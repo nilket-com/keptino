@@ -1,0 +1,5 @@
+[
+	{"name": "bank", "username": "alice", "password": "hunter2 ünïcödé 🔑", "pin": "4921", "note": "Security question: first pet\nAnswer: Rex", "url": "https://bank.example", "tags": "money, work"},
+	{"name": "mail", "username": "alice@example.com", "password": "correct-horse", "pin": "", "note": "", "url": "https://mail.example", "tags": "work"},
+	{"name": "wifi", "username": "", "password": "p@ss w0rd", "pin": "0000", "note": "router admin", "url": "", "tags": "home"}
+]

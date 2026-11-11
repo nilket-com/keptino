@@ -1,0 +1,22 @@
+[package]
+name = "interop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives the unmodified Linux vault code and the Android core against each other."
+
+[[bin]]
+name = "linux-vault"
+path = "src/linux_vault.rs"
+
+[[bin]]
+name = "android-vault"
+path = "src/android_vault.rs"
+
+[dependencies]
+digisafe = { path = "../../linux" }
+droid = { path = "../droid" }
+hex = "0.4.3"
+serde_json = "1.0.149"
+tokio = { version = "1", features = ["rt"] }
+zeroize = "1.8.2"

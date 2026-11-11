@@ -1,0 +1,42 @@
+{
+	"password": "correct horse battery staple",
+	"pepper_seed": "digisafe test pepper seed",
+	"pepper_hex": "3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1",
+	"vaults": {
+		"linux-debug.digisafe": {
+			"mem_kib": 4096
+		},
+		"linux-release.digisafe": {
+			"mem_kib": 4194304
+		}
+	},
+	"entries": [
+		{
+			"name": "bank",
+			"username": "alice",
+			"password": "hunter2 ünïcödé 🔑",
+			"pin": "4921",
+			"note": "Security question: first pet\nAnswer: Rex",
+			"url": "https://bank.example",
+			"tags": "money, work"
+		},
+		{
+			"name": "mail",
+			"username": "alice@example.com",
+			"password": "correct-horse",
+			"pin": "",
+			"note": "",
+			"url": "https://mail.example",
+			"tags": "work"
+		},
+		{
+			"name": "wifi",
+			"username": "",
+			"password": "p@ss w0rd",
+			"pin": "0000",
+			"note": "router admin",
+			"url": "",
+			"tags": "home"
+		}
+	]
+}

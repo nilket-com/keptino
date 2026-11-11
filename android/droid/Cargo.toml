@@ -1,23 +1,32 @@
 [package]
 name = "droid"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
+authors = ["nilket.com"]
+description = "DigiSafe vault core for Android."
 
 [lib]
-crate-type = ["dylib"]
-
-[profile.release]
-codegen-units = 1
-debug = false
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
-
-[target.'cfg(target_os="android")'.dependencies]
-jni = { version = "0.20", default-features = false }
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+argon2 = "0.5.3"
+base64ct = { version = "1.8.3", features = ["alloc"] }
+blake3 = "1.8.3"
 chacha20poly1305 = "0.10.1"
-sha3 = "0.10.6"
+getrandom = "0.4.1"
+jni = { version = "0.21.1", default-features = false }
+lz4 = "1.28.1"
+reed-solomon-erasure = "6.0.0"
+sha3 = "0.10.8"
+zeroize = "1.8.2"
 
+[dev-dependencies]
+hex = "0.4.3"
+
+# Unwinding is required: JNI entry points turn panics into Java exceptions.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+debug = 0

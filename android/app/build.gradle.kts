@@ -1,24 +1,21 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 android {
     namespace = "com.digisafe.app"
-    compileSdk = 32
-
+    compileSdk = 37
+    ndkVersion = "30.0.16248370"
     defaultConfig {
         applicationId = "com.digisafe.app"
         minSdk = 30
-        targetSdk = 32
-        versionCode = 1
-        versionName = "1.0"
-
+        targetSdk = 37
+        versionCode = 2
+        versionName = "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
-        }
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
-
+    sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("droid/tests/fixtures"))
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -26,43 +23,40 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
-    buildFeatures {
-        compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = rootProject.extra["composeVersion"] as String
-    }
-    packagingOptions {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-    }
-}
 
+    buildFeatures { compose = true; buildConfig = true }
+    packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+}
 dependencies {
-
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4:${rootProject.extra["composeVersion"]}")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    debugImplementation("androidx.compose.ui:ui-test-manifest:${rootProject.extra["composeVersion"]}")
-    debugImplementation("androidx.compose.ui:ui-tooling:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.activity:activity-compose:1.3.1")
-    implementation("androidx.compose.material:material-icons-extended:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.compose.material:material:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.compose.runtime:runtime-livedata:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.compose.ui:ui-tooling-preview:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.compose.ui:ui:${rootProject.extra["composeVersion"]}")
-    implementation("androidx.core:core-ktx:1.7.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.3.1")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.5.1")
-    implementation("com.lambdapioneer.argon2kt:argon2kt:1.3.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.4.1")
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    implementation("androidx.core:core-ktx:1.19.1")
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:core:1.7.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
     testImplementation("junit:junit:4.13.2")
-
 }
+
+val buildNative = tasks.register<Exec>("buildNative") {
+    workingDir(rootProject.file("droid"))
+    commandLine("bash", "build.sh")
+    environment("ANDROID_HOME", System.getenv("ANDROID_HOME") ?: "${System.getProperty("user.home")}/Android/Sdk")
+    environment("ANDROID_NDK_HOME", "${System.getenv("ANDROID_HOME") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk/30.0.16248370")
+    inputs.files(fileTree(rootProject.file("droid/src")), rootProject.file("droid/Cargo.toml"), rootProject.file("droid/Cargo.lock"), rootProject.file("droid/build.sh"))
+    outputs.dir(file("src/main/jniLibs"))
+}
+tasks.named("preBuild").configure { dependsOn(buildNative) }

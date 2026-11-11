@@ -1,0 +1,29 @@
+use std::fmt;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+	/// The vault file is damaged beyond what erasure coding can repair,
+	/// or is not a DigiSafe vault.
+	Corrupt(&'static str),
+	/// Authentication failed: wrong password or pepper, or altered data.
+	Decryption,
+	/// A caller-supplied argument is unusable.
+	Invalid(&'static str),
+	/// Key derivation could not run, typically for lack of memory.
+	Kdf(String),
+}
+
+impl fmt::Display for Error {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Error::Corrupt(what) => write!(f, "Corrupt vault: {what}."),
+			Error::Decryption => write!(f, "Decryption failure."),
+			Error::Invalid(what) => write!(f, "Invalid argument: {what}."),
+			Error::Kdf(what) => write!(f, "Key derivation failure: {what}."),
+		}
+	}
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;

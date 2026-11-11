@@ -2,7 +2,15 @@
 
 A digital safe for secure storage of everything LastPass leaks and KeePass fails to backup.
 
-### Features
+### Android
+
+The Android app opens and edits Linux `.digisafe` vaults. See
+[Android setup, builds, and interoperability tests](android/README.md). Existing
+vaults require the original pepper and a device with enough available memory for
+the Linux 4 GiB password derivation. The platform protections below describe Linux;
+Android uses Android Keystore and the lifecycle protections documented separately.
+
+### Linux features
 
  - 4GiB Argon2id / Sha3 salted and peppered master password derivation.
  - TPM locked pepper via systemd-creds.
