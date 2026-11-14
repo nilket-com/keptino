@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=DigiSafe
 Comment=A digital safe for secure storage.
-Generic Name=Password Manager
+GenericName=Password Manager
 Exec=bash -c "/usr/bin/digisafe 2>&1 | systemd-cat -t digisafe"
 Icon=digisafe
 Terminal=false

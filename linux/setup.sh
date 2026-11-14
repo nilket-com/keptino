@@ -98,7 +98,9 @@ if (( ${#missing[@]} )); then
     sudo apt-get install -y "${missing[@]}"
 fi
 if ! cargo deb --version >/dev/null 2>&1; then
-    cargo install cargo-deb --locked
+    # --force: cargo skips a crate it has on record even when the binary is broken.
+    cargo install cargo-deb --locked --force
+    cargo deb --version >/dev/null
 fi
 for tool in argon2 systemd-creds systemd-ask-password; do
     command -v "$tool" >/dev/null
