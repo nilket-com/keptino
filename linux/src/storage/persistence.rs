@@ -39,11 +39,10 @@ const NONCE_SIZE: usize = 24;
 /// metadata bound as associated data instead. They still open and are
 /// converted back to unmarked files on save. Nothing newer exists.
 const AAD_FORMAT: u32 = 2;
-/// Writes the marked AAD form instead of the unmarked mirrored form. On until
-/// the Android reader accepts an unmarked vault that carries a revision; the
-/// interop harness asks for either form explicitly to regenerate fixtures.
-const WRITE_AAD_FORMAT: bool =
-	cfg!(feature = "write-format-2") || !cfg!(feature = "write-unmarked");
+/// Writes the marked AAD form instead of the unmarked mirrored form. Off:
+/// both platforms read unmarked vaults with a revision. The interop harness
+/// turns it on only to regenerate the marked fixtures.
+const WRITE_AAD_FORMAT: bool = cfg!(feature = "write-format-2");
 const AAD_PREFIX: &[u8] = b"keptino-envelope-v2";
 
 fn revision_path(db_name: &str) -> PathBuf {

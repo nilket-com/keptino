@@ -24,9 +24,9 @@ maintainer-scripts = "debian"
 
 [features]
 # Only android/interop enables these. `harness` finds systemd-creds through
-# PATH so the test harness can stand in for the TPM. The writer form is
-# chosen explicitly for fixtures: `write-format-2` writes the marked AAD
-# form, `write-unmarked` the mirrored unmarked form.
+# PATH so the test harness can stand in for the TPM. `write-format-2` writes
+# the marked AAD form to regenerate those fixtures; `write-unmarked` names
+# the default mirrored form and changes nothing.
 harness = []
 write-format-2 = []
 write-unmarked = []

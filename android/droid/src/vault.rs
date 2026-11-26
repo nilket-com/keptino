@@ -11,9 +11,10 @@ use base64ct::{Base64, Encoding};
 use std::{collections::BTreeMap, ops::Bound, time::SystemTime};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Selects the marked AAD writer during the coordinated rollout.
-/// Both writers advance the revision and mirror every metadata entry.
-const WRITE_FORMAT_2: bool = true;
+/// Selects the marked AAD writer; off since both platforms read the unmarked
+/// mirrored form. Both writers advance the revision and mirror every
+/// metadata entry.
+const WRITE_FORMAT_2: bool = false;
 const TAG_META: u8 = 0;
 const TAG_PASSWORD: u8 = 1;
 const META_NAME: u8 = 1;
