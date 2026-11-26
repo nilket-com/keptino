@@ -99,6 +99,60 @@ fn current_revision(db: &Database) -> Option<u64> {
 	db.get_meta_entry("revision")?.get_value().parse().ok()
 }
 
+/// Argon2id cost parameters. Format 1 files carry none and use the build's
+/// constants; format 2 files record theirs as authenticated meta entries, so
+/// a vault written with one cost opens on a build with another and the cost
+/// can be raised later by a deliberate rekey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KdfParams {
+	m_cost: u32,
+	t_cost: u32,
+	p_cost: u32,
+}
+
+impl KdfParams {
+	const DEFAULT: Self = Self {
+		m_cost: if cfg!(debug_assertions) {
+			1 << 12
+		} else {
+			1 << 22
+		},
+		t_cost: 1,
+		p_cost: 1,
+	};
+	/// 4 MiB (the debug build's cost) to 16 GiB; outside this the file is
+	/// not one Keptino wrote.
+	const M_COST: std::ops::RangeInclusive<u32> = (1 << 12)..=(1 << 24);
+	const T_COST: std::ops::RangeInclusive<u32> = 1..=64;
+	const P_COST: std::ops::RangeInclusive<u32> = 1..=16;
+
+	/// The parameters named by `kdf_m`, `kdf_t` and `kdf_p` (KiB, passes,
+	/// lanes), the defaults when all three are absent, `None` when they are
+	/// partial or out of range.
+	fn from_meta(metadata: &HashMap<String, String>) -> Option<Self> {
+		let fields = ["kdf_m", "kdf_t", "kdf_p"].map(|name| metadata.get(name));
+		if fields.iter().all(Option::is_none) {
+			return Some(Self::DEFAULT);
+		}
+		let [m_cost, t_cost, p_cost] = fields.map(|field| field?.parse::<u32>().ok());
+		let params = Self {
+			m_cost: m_cost?,
+			t_cost: t_cost?,
+			p_cost: p_cost?,
+		};
+		(Self::M_COST.contains(&params.m_cost)
+			&& Self::T_COST.contains(&params.t_cost)
+			&& Self::P_COST.contains(&params.p_cost))
+		.then_some(params)
+	}
+
+	fn record(self, db: &Database) {
+		db.set_meta_entry(MetaEntry::new("kdf_m", &self.m_cost.to_string()));
+		db.set_meta_entry(MetaEntry::new("kdf_t", &self.t_cost.to_string()));
+		db.set_meta_entry(MetaEntry::new("kdf_p", &self.p_cost.to_string()));
+	}
+}
+
 fn base_path() -> PathBuf {
 	let mut apath = env::home_dir().unwrap_or_default();
 	apath.push(".config/keptino/");
@@ -290,12 +344,17 @@ fn open_candidates(
 	second: Option<Candidate>,
 	password: Zeroizing<String>,
 ) -> Result<(Database, Option<String>), String> {
-	let key = master_key_derivation(password, first.envelope.salt)?;
+	// The password is consumed by the first derivation; the second copy
+	// shares the salt and, except across a rekey, the cost, so the same key
+	// serves it. A different cost on the second copy is reported as a
+	// failure to open it, which is also what a forged cost would produce.
+	let key = master_key_derivation(password, first.envelope.salt, first.envelope.kdf)?;
 	if let Some(idb) = first.envelope.unlock(&key) {
 		info(&format!("{} database loaded.", first.source));
 		return Ok((Database::old(key, idb), None));
 	}
 	if let Some(second) = second
+		&& second.envelope.kdf == first.envelope.kdf
 		&& let Some(idb) = second.envelope.unlock(&key)
 	{
 		let rejected = format!(
@@ -327,7 +386,7 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database,
 		.to_string();
 	let mut salt = [0u8; SALT_SIZE];
 	getrandom::fill(&mut salt).unwrap();
-	let master_key = master_key_derivation(master_password, salt)?;
+	let master_key = master_key_derivation(master_password, salt, KdfParams::DEFAULT)?;
 	let db = Database::new(master_key);
 	db.set_meta_entry(MetaEntry::new("db_name", db_name));
 	db.set_meta_entry(MetaEntry::new("nonce", "0"));
@@ -342,6 +401,7 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database,
 struct Envelope {
 	modified: u64,
 	revision: Option<u64>,
+	kdf: KdfParams,
 	nonce: [u8; NONCE_SIZE],
 	salt: [u8; SALT_SIZE],
 	ciphertext: Vec<u8>,
@@ -381,16 +441,23 @@ impl Envelope {
 				"the file was written by a newer Keptino (format {format}). Update Keptino to open it."
 			)));
 		}
-		let (revision, aad) = if format >= 2 {
-			(Some(metadata.get("revision")?.parse().ok()?), envelope_aad(&pairs))
+		// Only authenticated parameters are honoured: a format-1 file uses
+		// the build's constants whatever it claims.
+		let (revision, kdf, aad) = if format >= 2 {
+			(
+				Some(metadata.get("revision")?.parse().ok()?),
+				KdfParams::from_meta(&metadata)?,
+				envelope_aad(&pairs),
+			)
 		} else {
-			(None, Vec::new())
+			(None, KdfParams::DEFAULT, Vec::new())
 		};
 		let mut nonce = [0; NONCE_SIZE];
 		nonce[..16].copy_from_slice(&metadata.get("nonce")?.parse::<u128>().ok()?.to_le_bytes());
 		Some(Ok(Self {
 			modified: metadata.get("modified_ts")?.parse().ok()?,
 			revision,
+			kdf,
 			salt: Base64::decode_vec(metadata.get("salt")?)
 				.ok()?
 				.try_into()
@@ -428,6 +495,11 @@ fn db_to_vec(db: &Database, upgrade: bool) -> Vec<u8> {
 		let revision = current_revision(db).unwrap_or(0) + 1;
 		db.set_meta_entry(MetaEntry::new("format", &CURRENT_FORMAT.to_string()));
 		db.set_meta_entry(MetaEntry::new("revision", &revision.to_string()));
+		// A vault upgraded from format 1 was opened with the build's
+		// constants; record them so every build reads it back the same way.
+		if db.get_meta_entry("kdf_m").is_none() {
+			KdfParams::DEFAULT.record(db);
+		}
 	}
 	let db_core = db.serialize();
 	let db_core_compressed = compress(&db_core);
@@ -473,6 +545,7 @@ fn load_pepper() -> Result<[u8; PEPPER_SIZE], String> {
 fn master_key_derivation(
 	password: Zeroizing<String>,
 	salt: [u8; SALT_SIZE],
+	kdf: KdfParams,
 ) -> Result<SecretMemory, String> {
 	use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
 	use sha3::{Digest, Sha3_256};
@@ -482,18 +555,13 @@ fn master_key_derivation(
 	pre_hasher.update(pepper);
 	pre_hasher.update(password.as_bytes());
 	let mut pre_hash = pre_hasher.finalize();
-	let m_cost = if cfg!(debug_assertions) {
-		2u32.pow(12)
-	} else {
-		2u32.pow(22)
-	};
 	let main_params = ParamsBuilder::new()
-		.m_cost(m_cost)
-		.t_cost(1)
-		.p_cost(1)
+		.m_cost(kdf.m_cost)
+		.t_cost(kdf.t_cost)
+		.p_cost(kdf.p_cost)
 		.output_len(KEY_SIZE)
 		.build()
-		.unwrap();
+		.map_err(|_| "Unsupported key derivation parameters.")?;
 	let main_hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, main_params);
 	let mut main_hash = [0u8; KEY_SIZE];
 	let mut derivation_salt = Zeroizing::new([0u8; SALT_SIZE + PEPPER_SIZE]);
@@ -831,8 +899,16 @@ mod tests {
 		let encoded = db_to_vec(&db, true);
 		let envelope = Envelope::decode(&encoded).unwrap();
 		assert_eq!(envelope.revision, Some(1));
+		assert_eq!(envelope.kdf, KdfParams::DEFAULT);
 		assert!(envelope.aad.starts_with(AAD_PREFIX));
 		assert!(envelope.unlock(&key.read().unwrap()).is_some());
+		// The recorded cost is authenticated like every other field.
+		let weakened = Envelope::decode(&tamper(&encoded, b"kdf_t\x02\x01\x00\x00\x001", b"kdf_t\x02\x01\x00\x00\x002")).unwrap();
+		assert_eq!(weakened.kdf.t_cost, 2);
+		assert!(weakened.unlock(&key.read().unwrap()).is_none());
+		// Out-of-range or partial parameters are not a vault at all.
+		assert!(Envelope::decode(&tamper(&encoded, b"kdf_m\x02\x04\x00\x00\x004096", b"kdf_m\x02\x04\x00\x00\x000001")).is_err());
+		assert!(Envelope::decode(&tamper(&encoded, b"kdf_p", b"kdf_q")).is_err());
 		// Changing a plaintext field that selection or identity depends on
 		// breaks authentication even though the ciphertext is untouched.
 		let renamed = Envelope::decode(&tamper(&encoded, b"example", b"exampel")).unwrap();
@@ -846,6 +922,41 @@ mod tests {
 		// A format from the future is refused with an explanation, not a guess.
 		let future = tamper(&db_to_vec(&db, false), b"format\x02\x01\x00\x00\x002", b"format\x02\x01\x00\x00\x009");
 		assert!(Envelope::decode(&future).err().unwrap().contains("newer Keptino"));
+	}
+
+	#[test]
+	fn kdf_parameters_default_when_absent_and_are_bounded() {
+		let meta = |fields: &[(&str, &str)]| {
+			fields
+				.iter()
+				.map(|(k, v)| (k.to_string(), v.to_string()))
+				.collect::<HashMap<_, _>>()
+		};
+		assert_eq!(KdfParams::from_meta(&meta(&[])), Some(KdfParams::DEFAULT));
+		assert_eq!(
+			KdfParams::from_meta(&meta(&[("kdf_m", "4194304"), ("kdf_t", "3"), ("kdf_p", "2")])),
+			Some(KdfParams {
+				m_cost: 1 << 22,
+				t_cost: 3,
+				p_cost: 2
+			})
+		);
+		assert_eq!(KdfParams::from_meta(&meta(&[("kdf_m", "4194304")])), None, "partial");
+		assert_eq!(
+			KdfParams::from_meta(&meta(&[("kdf_m", "1024"), ("kdf_t", "1"), ("kdf_p", "1")])),
+			None,
+			"below the floor"
+		);
+		assert_eq!(
+			KdfParams::from_meta(&meta(&[("kdf_m", "4096"), ("kdf_t", "0"), ("kdf_p", "1")])),
+			None,
+			"zero passes"
+		);
+		assert_eq!(
+			KdfParams::from_meta(&meta(&[("kdf_m", "4096"), ("kdf_t", "1"), ("kdf_p", "x")])),
+			None,
+			"not a number"
+		);
 	}
 
 	#[test]
