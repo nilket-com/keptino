@@ -5,7 +5,6 @@ use zeroize::Zeroizing;
 #[derive(Clone)]
 pub enum Message {
 	AttemptUnlock,
-	ClearClipboard,
 	CloseWindow,
 	CopyUsername,
 	CopyPassword,

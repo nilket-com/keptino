@@ -1,4 +1,4 @@
-use crate::gui::{components, messages::Message};
+use crate::gui::{clipboard, components, messages::Message};
 use crate::storage::{
 	entry::PasswordEntry,
 	persistence::{self, OpenedVault},
@@ -12,10 +12,7 @@ use iced::{
 	},
 	window,
 };
-use std::{
-	thread,
-	time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 struct LockedState {
@@ -406,61 +403,11 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				_ => unreachable!(),
 			};
 			*status = format!("{label} copied.");
-			thread::spawn(move || {
-				use arboard::{Clipboard, LinuxClipboardKind as LCK, SetExtLinux};
-				let mut cb = Clipboard::new().unwrap();
-				let _ = cb
-					.set()
-					.clipboard(LCK::Clipboard)
-					.exclude_from_history()
-					.text(value.as_str());
-				drop(value);
-				thread::sleep(COPY_TIMEOUT);
-			});
+			// The wipe thread owns the timeout; the Tick below only reports it.
+			clipboard::copy(value, COPY_TIMEOUT);
 		}
 		Message::TogglePinVisibility => {
 			*is_pin_visible = !*is_pin_visible;
-		}
-
-		Message::ClearClipboard => {
-			*status = "Clearing clipboard...".to_string();
-			thread::spawn(move || {
-				use arboard::{Clipboard, LinuxClipboardKind as LCK, SetExtLinux};
-				let mut cb = Clipboard::new().unwrap();
-				for idx in 0..60 {
-					let mut noise = [0u8; 16];
-					getrandom::fill(&mut noise).unwrap();
-					let munge = format!(
-						"KEPTINO_CLIPBOARD_MUNGE_{:03}_{:040}",
-						idx,
-						u128::from_le_bytes(noise)
-					);
-					let _ = cb
-						.set()
-						.clipboard(LCK::Clipboard)
-						.exclude_from_history()
-						.text(&munge);
-					let _ = cb
-						.set()
-						.clipboard(LCK::Primary)
-						.exclude_from_history()
-						.text(munge);
-					thread::sleep(Duration::from_millis(4));
-				}
-				let _ = cb
-					.set()
-					.clipboard(LCK::Clipboard)
-					.exclude_from_history()
-					.text("");
-				let _ = cb
-					.set()
-					.clipboard(LCK::Primary)
-					.exclude_from_history()
-					.text("");
-				thread::sleep(Duration::from_millis(200));
-			});
-			*last_copy_time = None;
-			*status = "Clipboard cleared.".to_string();
 		}
 		Message::Tick => {
 			if let Some(lit) = last_interaction_time {
@@ -480,11 +427,13 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					*status = format!("Clipboard clear time remaining: {copy_remaining}s");
 				}
 				if copy_elapsed >= COPY_TIMEOUT {
-					return Task::done(Message::ClearClipboard);
+					*last_copy_time = None;
+					*status = "Clipboard cleared.".to_string();
 				}
 			}
 		}
 		Message::Lock => {
+			clipboard::clear_pending();
 			db.zeroize();
 			*app_state = AppState::Locked(LockedState {
 				db_name: "".into(),

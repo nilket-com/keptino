@@ -1,3 +1,4 @@
+mod clipboard;
 mod colors;
 mod components;
 mod messages;
