@@ -1,5 +1,6 @@
 //! Reads and writes a vault file with the Android core, on the host.
 //!
+//!   android-vault metadata <file> <password> <pepper-hex> <mem-kib>
 //!   android-vault read <file> <password> <pepper-hex> <mem-kib>
 //!   android-vault write <file> <password> <pepper-hex> <mem-kib> < json
 //!
@@ -32,7 +33,7 @@ fn working_entry(vault: &Vault) -> Value {
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
 	let [_, command, file, password, pepper, mem_kib] = args.as_slice() else {
-		eprintln!("Usage: android-vault read|write <file> <password> <pepper-hex> <mem-kib>");
+		eprintln!("Usage: android-vault read|write|metadata <file> <password> <pepper-hex> <mem-kib>");
 		std::process::exit(2);
 	};
 	let path = Path::new(file);
@@ -53,6 +54,16 @@ fn main() {
 		std::process::exit(1);
 	});
 	match command.as_str() {
+		"metadata" => println!(
+			"{}",
+			json!({
+				"format": vault.meta("format"),
+				"revision": vault.revision(),
+				"kdf_m": vault.meta("kdf_m"),
+				"kdf_t": vault.meta("kdf_t"),
+				"kdf_p": vault.meta("kdf_p"),
+			})
+		),
 		"read" => {
 			let mut entries = Vec::new();
 			vault.clear();

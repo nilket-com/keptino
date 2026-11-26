@@ -116,9 +116,10 @@ try:
               common = {'password': manifest['password'], 'pepperHex': manifest['pepper_hex'], 'entry': 'bank'}
               instrument('native-debug-and-b2', 'com.keptino.app.VaultIntegrationTest', dict(common, fixture='linux-debug.keptino', dbName='vaultdebug', memoryKib=4096, mockBaseUrl=f'http://127.0.0.1:{port}'))
               collect('android-roundtrip.keptino', 'android-debug-roundtrip.keptino')
-              instrument('native-format-2', 'com.keptino.app.VaultIntegrationTest#linuxFixtureEditAndExport',
-                         dict(common, fixture='linux-debug-v2.keptino', dbName='vaultdebug-v2', memoryKib=4194304))
-              collect('android-roundtrip.keptino', 'android-format-2-roundtrip.keptino')
+              for form, label in [('v2', 'format-2'), ('unmarked', 'unmarked')]:
+                  instrument('native-' + label, 'com.keptino.app.VaultIntegrationTest#linuxFixtureEditAndExport',
+                             dict(common, fixture=f'linux-debug-{form}.keptino', dbName=f'vaultdebug-{form}', memoryKib=4194304))
+                  collect('android-roundtrip.keptino', f'android-{label}-roundtrip.keptino')
               if device_pin is None:
                   print('No device PIN: the production UI runs need the credential prompt and are skipped', flush=True)
               else:
@@ -141,7 +142,7 @@ try:
 finally:
     if device_pin: clear_device_pin(device_pin)
 print('Android output files: ' + str(report))
-outputs = [('android-debug-roundtrip.keptino', 'debug'), ('android-format-2-roundtrip.keptino', 'debug')]
+outputs = [('android-debug-roundtrip.keptino', 'debug'), ('android-format-2-roundtrip.keptino', 'debug'), ('android-unmarked-roundtrip.keptino', 'debug')]
 if device_pin: outputs += [('android-ui-roundtrip.keptino', 'release'), ('android-b2-roundtrip.keptino', 'release')]
 for filename, profile in outputs:
     result = subprocess.run([str(root / 'interop/run.sh'), 'check', str(report / filename), profile], cwd=root, capture_output=True, text=True, check=True, timeout=360)

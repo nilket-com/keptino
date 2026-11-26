@@ -16,6 +16,14 @@
 		"linux-release-v2.keptino": {
 			"mem_kib": 4194304,
 			"format": 2
+		},
+		"linux-debug-unmarked.keptino": {
+			"mem_kib": 4096,
+			"revision": 1
+		},
+		"linux-release-unmarked.keptino": {
+			"mem_kib": 4194304,
+			"revision": 1
 		}
 	},
 	"entries": [

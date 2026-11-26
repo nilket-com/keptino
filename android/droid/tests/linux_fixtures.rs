@@ -45,6 +45,7 @@ fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 	let mut reopened = Vault::open(name, PASSWORD, &pepper(), Some(file), Some(&saved), mem_kib).unwrap();
 	assert_eq!(reopened.source(), Source::Remote);
 	assert_eq!(reopened.revision(), initial_revision + 1);
+	assert!(reopened.meta("format").is_none(), "every save uses the unmarked form");
 	assert!(reopened.modified_ts() > before);
 	assert!(reopened.query("bank"));
 	assert_eq!(text(&reopened, field::PASSWORD), "replaced");
@@ -72,6 +73,12 @@ fn opens_and_edits_a_linux_debug_vault() {
 		crypto::RELEASE_MEM_KIB,
 		1,
 	);
+	check(
+		include_bytes!("fixtures/linux-debug-unmarked.keptino"),
+		"vaultdebug-unmarked",
+		crypto::RELEASE_MEM_KIB,
+		1,
+	);
 }
 
 /// Needs 4 GiB of free memory several times over: `cargo test --release -- --ignored`.
@@ -87,6 +94,12 @@ fn opens_and_edits_a_linux_release_vault() {
 	check(
 		include_bytes!("fixtures/linux-release-v2.keptino"),
 		"vaultrelease-v2",
+		crypto::DEBUG_MEM_KIB,
+		1,
+	);
+	check(
+		include_bytes!("fixtures/linux-release-unmarked.keptino"),
+		"vaultrelease-unmarked",
 		crypto::DEBUG_MEM_KIB,
 		1,
 	);

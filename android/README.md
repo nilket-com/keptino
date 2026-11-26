@@ -46,9 +46,10 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Gradle invokes `droid/build.sh` to build and package the Rust library for ARM64
 and x86-64. A native library built only for the host will not work in the APK.
 Minimum supported Android version is Android 11 (API 30), on 64-bit devices.
-Debug and release applications use the production Linux KDF defaults for legacy vaults.
-Format 2 records the Argon2id memory, passes and lanes in its authenticated header.
-Android uses those parameters when present and preserves them on save.
+Debug and release applications use the production Linux KDF defaults when a vault
+has no recorded costs. New saves record the Argon2id memory, passes and lanes as
+ordinary TLV metadata. Android bounds these costs before derivation and checks
+them against the authenticated inner copy before opening the vault.
 
 ## Open an existing Linux vault
 
@@ -75,7 +76,14 @@ The default production vault requires **4 GiB of available memory** for password
 derivation. Deriving the pepper from its seed also needs 4 GiB. Importing the
 original pepper skips the seed calculation.
 
-Format 2 carries an authenticated revision. Android remembers the highest
+On every open, Android compares the plaintext metadata against the copy inside
+the authenticated ciphertext, including on older vaults without a revision.
+New saves omit the format marker and advance the revision. Marked format-2
+files still open and convert on save. Pre-format-2 builds can edit unmarked files
+when their KDF defaults match. They preserve the revision without advancing it.
+The short-lived Android build that required the marker for revisions needs updating.
+
+Android remembers the highest
 revision opened or saved for each local vault name in a Keystore-protected
 record. To deliberately recover an older file, import it under a fresh name
 and select **Open local copy only**.
@@ -159,6 +167,11 @@ library, then reopen the Android result in Linux. Use synthetic credentials only
 Toolchain references: [AGP compatibility](https://developer.android.com/build/releases/agp-9-5-0-release-notes),
 [Android SDK tools](https://developer.android.com/tools),
 [Compose BOM](https://developer.android.com/develop/ui/compose/bom).
+
+The debug interoperability run also builds the Android vault core at
+`be0f6f3` from local Git history. It has that historical writer edit an
+unmarked Linux file, then checks the edit, revision and recorded KDF costs
+with the current reader.
 
 For the full emulator check, generate the Linux fixtures with
 `interop/run.sh fixtures`, build both APKs with

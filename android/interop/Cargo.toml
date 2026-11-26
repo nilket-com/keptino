@@ -15,6 +15,7 @@ path = "src/android_vault.rs"
 
 [features]
 write-format-2 = ["keptino/write-format-2"]
+write-unmarked = ["keptino/write-unmarked"]
 
 [dependencies]
 keptino = { path = "../../linux", features = ["harness"] }

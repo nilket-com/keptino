@@ -4,7 +4,7 @@
 #
 #   ./run.sh              debug KDF (4 MiB), a few seconds
 #   ./run.sh release      release KDF (4 GiB of memory per unlock)
-#   ./run.sh fixtures [dir]  write debug and release fixtures for both formats
+#   ./run.sh fixtures [dir]  write unmarked fixtures and retain historical fixtures
 #   ./run.sh check <file> [debug|release]
 #                         have Linux open a vault file saved elsewhere (by
 #                         the app on a device, say) with the fixture password
@@ -109,12 +109,46 @@ print(f"ok: {what}")
 PY
 }
 
+# Exercise the actual Android code that predates revisions and AAD. The
+# isolated build uses its original CLI and lockfile; only its unused Linux
+# dependency is omitted so testing this binary does not build the desktop UI.
+legacy_writer_roundtrip() {
+	local input=$1 mem=$2 repo legacy="$work/legacy" copy="$work/legacy-edit.keptino"
+	local ref=be0f6f370ee9b8a8a204a5def670176092f00a9b
+	repo=$(git rev-parse --show-toplevel)
+	mkdir -p "$legacy"
+	git -C "$repo" archive "$ref" android/droid android/interop | tar -x -C "$legacy"
+	sed -i '/^keptino = /d' "$legacy/android/interop/Cargo.toml"
+	cargo build --quiet --manifest-path "$legacy/android/interop/Cargo.toml" \
+		--bin android-vault --target-dir "$legacy/target"
+	cp "$input" "$copy"
+	local before after
+	before=$(android metadata "$copy" "$PASSWORD" "$pepper" "$mem")
+	python3 - "$before" "$mem" <<'PYMETA'
+import json, sys
+assert json.loads(sys.argv[1]) == {
+    "format": None, "revision": 1, "kdf_m": sys.argv[2], "kdf_t": "1", "kdf_p": "1"
+}
+PYMETA
+	"$legacy/target/debug/android-vault" write "$copy" "$PASSWORD" "$pepper" "$mem" <<'JSON'
+[{"name":"bank","note":"saved by the pre-format-2 writer"}]
+JSON
+	after=$(android metadata "$copy" "$PASSWORD" "$pepper" "$mem")
+	[[ $before == "$after" ]]
+	expect 'the historical writer preserved the mirrored metadata and edited the entry' \
+		"$(android read "$copy" "$PASSWORD" "$pepper" "$mem")" bank note 'saved by the pre-format-2 writer'
+}
+
 roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
 	local profile=$1 mem=$2 format=$3 fixtures=${4:-} db="vault$1" flag=() suffix=
 	if [[ $format == 2 ]]; then
 		suffix=-v2
 		db+=$suffix
 		flag+=(--features write-format-2)
+	elif [[ $format == unmarked ]]; then
+		suffix=-unmarked
+		db+=$suffix
+		flag+=(--features write-unmarked)
 	fi
 	[[ $profile == release ]] && flag+=(--release)
 	say "Building the $profile harness for format $format"
@@ -122,18 +156,28 @@ roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
 	bin=${CARGO_TARGET_DIR:-target}/$profile
 	local file="$work/home/.config/keptino/$db.keptino" phone="$work/phone-$db.keptino"
 
-	say "[$profile] Linux creates the vault and uploads it"
-	linux write "$db" "$PASSWORD" <entries.json
+	if [[ $format == unmarked ]]; then
+		say "[$profile] Linux creates an unmarked vault and uploads it"
+		linux write "$db" "$PASSWORD" <entries.json
+	else
+		say "[$profile] Seed both copies with the historical fixture"
+		cp "../droid/tests/fixtures/linux-$profile$suffix.keptino" "$file"
+		b2_upload "$db" "$file"
+	fi
 	cmp <(base64 -d "$work/bucket/$db.keptino") "$file"
 	echo 'ok: the bucket holds base64 of the local file'
 	local written
 	written=$(linux read "$db" "$PASSWORD")
 	same 'Linux reads back what it wrote' "$(cat entries.json)" "$written"
-	if [[ $format == 2 ]]; then
+	if [[ $format != 1 ]]; then
 		[[ $(cat "$work/home/.config/keptino/$db.revision") == 1 ]]
 	fi
 	if [[ -n $fixtures ]]; then
 		cp "$file" "$fixtures/linux-$profile$suffix.keptino"
+	fi
+
+	if [[ $profile == debug && $format == unmarked ]]; then
+		legacy_writer_roundtrip "$file" "$mem"
 	fi
 
 	say "[$profile] Android downloads and opens it"
@@ -159,7 +203,7 @@ JSON
 	say "[$profile] Linux opens the newer remote copy"
 	local seen
 	seen=$(linux read "$db" "$PASSWORD")
-	if [[ $format == 2 ]]; then
+	if [[ $format != 1 ]]; then
 		[[ $(cat "$work/home/.config/keptino/$db.revision") == 2 ]]
 	fi
 	same 'Linux reads the Android vault' "$edited" "$seen"
@@ -196,13 +240,17 @@ case "${1:-debug}" in
 		check "${2:?vault file}" "${3:-debug}"
 		exit 0
 		;;
-	debug) roundtrip debug 4096 1; roundtrip debug 4096 2 ;;
-	release) roundtrip release 4194304 1; roundtrip release 4194304 2 ;;
+	debug) for form in 1 2 unmarked; do roundtrip debug 4096 "$form"; done ;;
+	release) for form in 1 2 unmarked; do roundtrip release 4194304 "$form"; done ;;
 	fixtures)
 		fixtures=${2:-../droid/tests/fixtures}
 		mkdir -p "$fixtures"
-		for format in 1 2; do roundtrip debug 4096 "$format" "$fixtures"; done
-		for format in 1 2; do roundtrip release 4194304 "$format" "$fixtures"; done
+		# These four files are compatibility inputs from historical writers.
+		if [[ ! "$fixtures" -ef ../droid/tests/fixtures ]]; then
+			cp ../droid/tests/fixtures/linux-{debug,release}{,-v2}.keptino "$fixtures/"
+		fi
+		roundtrip debug 4096 unmarked "$fixtures"
+		roundtrip release 4194304 unmarked "$fixtures"
 		python3 - "$fixtures/manifest.json" "$PASSWORD" "$PEPPER_SEED" "$pepper" <<'PY'
 import json, sys
 path, password, seed, pepper = sys.argv[1:]
@@ -211,11 +259,13 @@ manifest = {
 	"pepper_seed": seed,
 	"pepper_hex": pepper,
 	"vaults": {
-        "linux-debug.keptino": {"mem_kib": 4096},
-        "linux-release.keptino": {"mem_kib": 4194304},
-        "linux-debug-v2.keptino": {"mem_kib": 4096, "format": 2},
-        "linux-release-v2.keptino": {"mem_kib": 4194304, "format": 2},
-    },
+		"linux-debug.keptino": {"mem_kib": 4096},
+		"linux-release.keptino": {"mem_kib": 4194304},
+		"linux-debug-v2.keptino": {"mem_kib": 4096, "format": 2},
+		"linux-release-v2.keptino": {"mem_kib": 4194304, "format": 2},
+		"linux-debug-unmarked.keptino": {"mem_kib": 4096, "revision": 1},
+		"linux-release-unmarked.keptino": {"mem_kib": 4194304, "revision": 1},
+	},
 	"entries": json.load(open("entries.json")),
 }
 with open(path, "w") as file:
