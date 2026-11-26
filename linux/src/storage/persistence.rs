@@ -1,5 +1,5 @@
 use crate::{
-	logger::{error, info},
+	logger::{error, info, warn},
 	storage::{
 		atlas::{FieldAtlas, next_tlv},
 		database::{Database, EntryTag, InteriorDatabase},
@@ -24,6 +24,79 @@ const KEY_SIZE: usize = 32;
 const SALT_SIZE: usize = 32;
 const PEPPER_SIZE: usize = 32;
 const NONCE_SIZE: usize = 24;
+
+/// Newest envelope format this build reads. Format 1 is the original file:
+/// plaintext metadata beside the ciphertext, nothing binding the two. Format
+/// 2 authenticates the metadata as associated data and carries a revision.
+const CURRENT_FORMAT: u32 = 2;
+/// Whether a vault that is still format 1 is rewritten as format 2 on save.
+/// Off until the Android reader understands format 2, so both platforms keep
+/// opening each other's files; a vault that is already format 2 is never
+/// written back as format 1.
+const WRITE_FORMAT_2: bool = false;
+const AAD_PREFIX: &[u8] = b"keptino-envelope-v2";
+
+fn revision_path(db_name: &str) -> PathBuf {
+	base_path().join(format!("{db_name}.revision"))
+}
+
+fn revision_temp_path(db_name: &str) -> PathBuf {
+	base_path().join(format!(".{db_name}.revision"))
+}
+
+/// The highest revision of this database opened or saved on this machine,
+/// kept outside the synced object so a replayed older copy is noticed.
+fn last_seen_revision(db_name: &str) -> Option<u64> {
+	fs::read_to_string(revision_path(db_name))
+		.ok()?
+		.trim()
+		.parse()
+		.ok()
+}
+
+fn remember_revision(db_name: &str, revision: u64) {
+	if last_seen_revision(db_name).is_none_or(|seen| revision > seen)
+		&& let Err(err) = write_atomic(
+			&revision_temp_path(db_name),
+			&revision_path(db_name),
+			revision.to_string().as_bytes(),
+		)
+	{
+		error(&format!("Cannot record the vault revision: {err}"));
+	}
+}
+
+/// Refuses a copy older than one already opened here, unless the user has
+/// removed the record to accept it deliberately.
+fn check_revision(opened: Option<u64>, last_seen: Option<u64>, db_name: &str) -> Result<(), String> {
+	match (opened, last_seen) {
+		(Some(opened), Some(seen)) if opened < seen => Err(format!(
+			"This copy is revision {opened}, but revision {seen} was already opened here. \
+			 To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again."
+		)),
+		_ => Ok(()),
+	}
+}
+
+/// Associated data of a format-2 envelope: every plaintext meta entry except
+/// the ciphertext itself, length-prefixed and sorted by name. A reader needs
+/// no field list, and a changed, added or dropped field fails authentication.
+fn envelope_aad(meta: &[(String, String)]) -> Vec<u8> {
+	let mut pairs: Vec<&(String, String)> = meta.iter().filter(|(name, _)| name != "db").collect();
+	pairs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+	let mut aad = AAD_PREFIX.to_vec();
+	for (name, value) in pairs {
+		for part in [name, value] {
+			aad.extend_from_slice(&(part.len() as u32).to_le_bytes());
+			aad.extend_from_slice(part.as_bytes());
+		}
+	}
+	aad
+}
+
+fn current_revision(db: &Database) -> Option<u64> {
+	db.get_meta_entry("revision")?.get_value().parse().ok()
+}
 
 fn base_path() -> PathBuf {
 	let mut apath = env::home_dir().unwrap_or_default();
@@ -65,22 +138,36 @@ impl OpenedVault {
 	pub fn status(&self) -> String {
 		match &self.remote {
 			Ok(_) => "Unlocked".into(),
-			Err(err) => format!("Opened local copy. {err} Uploads paused until next unlock."),
+			Err(err) => format!("{err} Uploads paused until next unlock."),
 		}
 	}
 
 	pub fn save(&self) -> impl Future<Output = String> + use<> {
 		let db = &self.database;
 		let db_name = db.get_meta_entry("db_name").unwrap().get_value().to_owned();
+		// The revision this session holds, before the save advances it.
+		let held = current_revision(db);
 		// Snapshot the encrypted vault before the UI can lock and clear its keys.
-		let bytes = db_to_vec(db);
+		let bytes = db_to_vec(db, WRITE_FORMAT_2);
+		let saved = current_revision(db);
 		let remote = self.remote.clone();
 		async move {
 			if to_file(&bytes, &db_name).is_err() {
 				return "Local save failed. Check disk space and file permissions.".into();
 			}
+			if let Some(revision) = saved {
+				remember_revision(&db_name, revision);
+			}
 			let result = match remote {
-				Ok(provider) => provider.upload(&base_path(), &db_name, &bytes).await,
+				Ok(provider) => match remote_revision(&provider, &db_name).await {
+					// The remote field is plaintext, so a forged value can only
+					// stop an upload, never cause one.
+					Ok(Some(theirs)) if held.is_none_or(|ours| theirs > ours) => Err(format!(
+						"The remote vault has newer changes (revision {theirs}). Saved locally only; unlock again to load them before uploading."
+					)),
+					Ok(_) => provider.upload(&base_path(), &db_name, &bytes).await,
+					Err(err) => Err(err),
+				},
 				Err(_) => Err("Unlock again to reconnect storage.".into()),
 			};
 			match result {
@@ -115,7 +202,7 @@ pub async fn load(
 	}
 	let dir = base_path();
 	let local = match fs::read(db_path(db_name)) {
-		Ok(bytes) => Some(Envelope::decode(&bytes).ok_or("Invalid local vault.")?),
+		Ok(bytes) => Some(Envelope::decode(&bytes).map_err(|err| format!("Local vault: {err}"))?),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 		Err(_) => return Err("Cannot read local vault.".into()),
 	};
@@ -123,37 +210,53 @@ pub async fn load(
 		let (remote, bytes) = Remote::download(&dir, db_name).await?;
 		let envelope = bytes
 			.as_deref()
-			.map(|b| Envelope::decode(b).ok_or("Invalid remote vault."))
+			.map(|b| Envelope::decode(b).map_err(|err| format!("Remote vault: {err}")))
 			.transpose()?;
 		Ok::<_, String>((remote, envelope))
 	}
 	.await;
-	let (provider, remote) = match download {
+	let (mut provider, remote) = match download {
 		Ok((provider, envelope)) => (Ok(provider), envelope),
-		Err(err) if local.is_some() => (Err(err), None),
+		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None),
 		Err(err) => return Err(err),
 	};
-	let selected = match (local, remote) {
+	let local = local.map(|envelope| Candidate {
+		envelope,
+		source: "local",
+	});
+	let remote = remote.map(|envelope| Candidate {
+		envelope,
+		source: "remote",
+	});
+	let database = match (local, remote) {
+		(None, None) => new_db(db_name, master_password),
+		(Some(only), None) | (None, Some(only)) => open_candidates(only, None, master_password)?.0,
 		(Some(local), Some(remote)) => {
-			if local.salt != remote.salt {
+			if local.envelope.salt != remote.envelope.salt {
 				return Err(
 					"A different vault already uses this name in the selected bucket.".into(),
 				);
 			}
-			Some(if local.modified >= remote.modified {
-				info("Local database loaded.");
-				local
+			let (first, second) = if prefer_local(&local.envelope, &remote.envelope) {
+				(local, remote)
 			} else {
-				info("Remote database loaded.");
-				remote
-			})
+				(remote, local)
+			};
+			let (database, rejected) = open_candidates(first, Some(second), master_password)?;
+			if let Some(rejected) = rejected {
+				provider = Err(rejected);
+			}
+			database
 		}
-		(local, remote) => local.or(remote),
 	};
-	let database = match selected {
-		Some(vault) => vault.unlock(master_password)?,
-		None => new_db(db_name, master_password),
-	};
+	let opened = current_revision(&database);
+	if let Err(err) = check_revision(opened, last_seen_revision(db_name), db_name) {
+		database.zeroize();
+		return Err(err);
+	}
+	if let Some(revision) = opened {
+		remember_revision(db_name, revision);
+	}
 	// Imported files may have been renamed. Keep subsequent saves at the
 	// validated name the user opened, including for Android exports.
 	database.set_meta_entry(MetaEntry::new("db_name", db_name));
@@ -161,6 +264,58 @@ pub async fn load(
 		database,
 		remote: provider,
 	})
+}
+
+struct Candidate {
+	envelope: Envelope,
+	source: &'static str,
+}
+
+/// Which of two copies to try first: the higher revision when both carry
+/// one, else the later modification time, local winning a tie. Both fields
+/// are plaintext, so the loser is tried when the winner fails to open.
+fn prefer_local(local: &Envelope, remote: &Envelope) -> bool {
+	match (local.revision, remote.revision) {
+		(Some(ours), Some(theirs)) if ours != theirs => ours > theirs,
+		_ => local.modified >= remote.modified,
+	}
+}
+
+/// Derives the key once (both candidates share a salt) and opens the first
+/// copy that authenticates. A copy that fails while the other opens is
+/// reported, and the caller pauses uploads so it is not overwritten blindly.
+fn open_candidates(
+	first: Candidate,
+	second: Option<Candidate>,
+	password: Zeroizing<String>,
+) -> Result<(Database, Option<String>), String> {
+	let key = master_key_derivation(password, first.envelope.salt);
+	if let Some(idb) = first.envelope.unlock(&key) {
+		info(&format!("{} database loaded.", first.source));
+		return Ok((Database::old(key, idb), None));
+	}
+	if let Some(second) = second
+		&& let Some(idb) = second.envelope.unlock(&key)
+	{
+		let rejected = format!(
+			"The {} copy failed authentication and may be corrupt or tampered with; opened the {} copy.",
+			first.source, second.source
+		);
+		warn(&rejected);
+		return Ok((Database::old(key, idb), Some(rejected)));
+	}
+	key.zeroize().ok();
+	Err("Cannot decrypt vault. Check the master password and pepper.".into())
+}
+
+/// The revision the remote object carries right now, if it is format 2.
+async fn remote_revision(provider: &Remote, db_name: &str) -> Result<Option<u64>, String> {
+	match provider.fetch(&base_path(), db_name).await? {
+		Some(bytes) => Ok(Envelope::decode(&bytes)
+			.map_err(|err| format!("Remote vault: {err}"))?
+			.revision),
+		None => Ok(None),
+	}
 }
 
 fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
@@ -181,18 +336,29 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
 	db
 }
 
+/// The plaintext layer of a vault file. `aad` is empty for format 1 and the
+/// canonical metadata for format 2, so `unlock` needs no format branch.
 struct Envelope {
 	modified: u64,
+	revision: Option<u64>,
 	nonce: [u8; NONCE_SIZE],
 	salt: [u8; SALT_SIZE],
 	ciphertext: Vec<u8>,
+	aad: Vec<u8>,
 }
 
 impl Envelope {
-	fn decode(bytes: &[u8]) -> Option<Self> {
+	fn decode(bytes: &[u8]) -> Result<Self, String> {
+		Self::parse(bytes).ok_or_else(|| "the file is damaged beyond repair.".to_string())?
+	}
+
+	/// `None` for a file that cannot be read at all; `Some(Err)` for one that
+	/// is intact but from a newer Keptino.
+	fn parse(bytes: &[u8]) -> Option<Result<Self, String>> {
 		use base64ct::{Base64, Encoding};
 		let recovered = decode_erasure(bytes)?;
 		let mut entries = recovered.as_slice();
+		let mut pairs = Vec::new();
 		let mut metadata = HashMap::new();
 		while !entries.is_empty() {
 			let (tag, fields) = next_tlv(&mut entries)?;
@@ -200,36 +366,50 @@ impl Envelope {
 				return None;
 			}
 			let record = FieldAtlas::try_deserialize(fields)?;
-			metadata.insert(
-				record.get_str(MetaField::Name as u8)?.to_owned(),
-				record.get_str(MetaField::Value as u8)?.to_owned(),
-			);
+			let name = record.get_str(MetaField::Name as u8)?.to_owned();
+			let value = record.get_str(MetaField::Value as u8)?.to_owned();
+			pairs.push((name.clone(), value.clone()));
+			metadata.insert(name, value);
 		}
+		let format: u32 = match metadata.get("format") {
+			Some(format) => format.parse().ok()?,
+			None => 1,
+		};
+		if format > CURRENT_FORMAT {
+			return Some(Err(format!(
+				"the file was written by a newer Keptino (format {format}). Update Keptino to open it."
+			)));
+		}
+		let (revision, aad) = if format >= 2 {
+			(Some(metadata.get("revision")?.parse().ok()?), envelope_aad(&pairs))
+		} else {
+			(None, Vec::new())
+		};
 		let mut nonce = [0; NONCE_SIZE];
 		nonce[..16].copy_from_slice(&metadata.get("nonce")?.parse::<u128>().ok()?.to_le_bytes());
-		Some(Self {
+		Some(Ok(Self {
 			modified: metadata.get("modified_ts")?.parse().ok()?,
+			revision,
 			salt: Base64::decode_vec(metadata.get("salt")?)
 				.ok()?
 				.try_into()
 				.ok()?,
 			nonce,
 			ciphertext: Base64::decode_vec(metadata.get("db")?).ok()?,
-		})
+			aad,
+		}))
 	}
 
-	fn unlock(self, password: Zeroizing<String>) -> Result<Database, String> {
-		let key = master_key_derivation(password, self.salt);
-		let compressed = decrypt(self.ciphertext, &key, self.nonce)
-			.ok_or("Cannot decrypt vault. Check the master password and pepper.")?;
-		Ok(Database::old(
-			key,
-			InteriorDatabase::deserialize(&decompress(compressed)),
-		))
+	fn unlock(&self, key: &SecretMemory) -> Option<InteriorDatabase> {
+		let compressed = decrypt(self.ciphertext.clone(), key, self.nonce, &self.aad)?;
+		Some(InteriorDatabase::deserialize(&decompress(compressed)))
 	}
 }
 
-fn db_to_vec(db: &Database) -> Vec<u8> {
+/// Encrypts the database into the bytes of a vault file. A format-2 vault is
+/// always written as format 2; a format-1 vault is upgraded when `upgrade`
+/// is set.
+fn db_to_vec(db: &Database, upgrade: bool) -> Vec<u8> {
 	let modified_ts = SystemTime::now()
 		.duration_since(SystemTime::UNIX_EPOCH)
 		.unwrap()
@@ -242,14 +422,28 @@ fn db_to_vec(db: &Database) -> Vec<u8> {
 	getrandom::fill(&mut nonce[..16]).unwrap();
 	let stored_nonce = u128::from_le_bytes(nonce[..16].try_into().unwrap());
 	db.set_meta_entry(MetaEntry::new("nonce", &stored_nonce.to_string()));
+	let format_2 = upgrade || db.get_meta_entry("format").is_some();
+	if format_2 {
+		let revision = current_revision(db).unwrap_or(0) + 1;
+		db.set_meta_entry(MetaEntry::new("format", &CURRENT_FORMAT.to_string()));
+		db.set_meta_entry(MetaEntry::new("revision", &revision.to_string()));
+	}
 	let db_core = db.serialize();
 	let db_core_compressed = compress(&db_core);
+	// The envelope mirrors every meta entry, so the inner copy is what the
+	// associated data authenticates against after decryption as well.
+	let db_envelope = db.meta_only();
+	let aad = if format_2 {
+		envelope_aad(&db_envelope.meta_pairs())
+	} else {
+		Vec::new()
+	};
 	let db_core_encrypted = encrypt(
 		&db_core_compressed,
 		&db.clone_master_key().read().unwrap(),
 		nonce,
+		&aad,
 	);
-	let db_envelope = db.meta_only();
 	db_envelope.set_meta_entry(MetaEntry::new("db", &to_base64(&db_core_encrypted)));
 	let db_bin = db_envelope.serialize();
 	encode_erasure(&db_bin)
@@ -370,7 +564,7 @@ fn decompress(msg_enc: Zeroizing<Vec<u8>>) -> Zeroizing<Vec<u8>> {
 	writer.0
 }
 
-fn encrypt(msg: &[u8], key: &SecretMemory, nonce: [u8; NONCE_SIZE]) -> Vec<u8> {
+fn encrypt(msg: &[u8], key: &SecretMemory, nonce: [u8; NONCE_SIZE], aad: &[u8]) -> Vec<u8> {
 	use chacha20poly1305::{
 		XChaCha20Poly1305,
 		aead::{AeadInPlace, KeyInit},
@@ -381,7 +575,7 @@ fn encrypt(msg: &[u8], key: &SecretMemory, nonce: [u8; NONCE_SIZE]) -> Vec<u8> {
 	let mut buffer = Zeroizing::new(Vec::with_capacity(msg.len() + 16));
 	buffer.extend_from_slice(msg);
 	cipher
-		.encrypt_in_place((&nonce).into(), b"", &mut *buffer)
+		.encrypt_in_place((&nonce).into(), aad, &mut *buffer)
 		.unwrap();
 	mem::take(&mut *buffer)
 }
@@ -390,6 +584,7 @@ fn decrypt(
 	msg_enc: Vec<u8>,
 	key: &SecretMemory,
 	nonce: [u8; NONCE_SIZE],
+	aad: &[u8],
 ) -> Option<Zeroizing<Vec<u8>>> {
 	use chacha20poly1305::{
 		XChaCha20Poly1305,
@@ -400,7 +595,7 @@ fn decrypt(
 	drop(mapped);
 	let mut buffer = Zeroizing::new(msg_enc);
 	cipher
-		.decrypt_in_place((&nonce).into(), b"", &mut *buffer)
+		.decrypt_in_place((&nonce).into(), aad, &mut *buffer)
 		.ok()?;
 	Some(buffer)
 }
@@ -527,30 +722,111 @@ mod tests {
 		fs::remove_dir_all(&dir).unwrap();
 	}
 
-	#[test]
-	fn cloud_envelopes_roundtrip_and_reject_damaged_input() {
+	fn fixture_database() -> Database {
 		let db = Database::test_database();
+		db.set_meta_entry(MetaEntry::new("db_name", "example"));
 		db.set_meta_entry(MetaEntry::new("salt", &to_base64(&[42; SALT_SIZE])));
 		db.set_meta_entry(MetaEntry::new("nonce", "7"));
-		let encoded = db_to_vec(&db);
+		db
+	}
+
+	#[test]
+	fn cloud_envelopes_roundtrip_and_reject_damaged_input() {
+		let db = fixture_database();
+		let encoded = db_to_vec(&db, false);
 		let envelope = Envelope::decode(&encoded).unwrap();
 		assert_eq!(envelope.salt, [42; SALT_SIZE]);
-		assert!(
-			decrypt(
-				envelope.ciphertext,
-				&db.clone_master_key().read().unwrap(),
-				envelope.nonce
-			)
-			.is_some()
-		);
+		assert_eq!(envelope.revision, None);
+		assert!(envelope.aad.is_empty());
+		assert!(envelope.unlock(&db.clone_master_key().read().unwrap()).is_some());
 		db.set_meta_entry(MetaEntry::new("nonce", "7"));
 		assert_ne!(
-			Envelope::decode(&db_to_vec(&db)).unwrap().nonce,
+			Envelope::decode(&db_to_vec(&db, false)).unwrap().nonce,
 			envelope.nonce
 		);
-		assert!(Envelope::decode(&encoded[1..]).is_none());
-		assert!(Envelope::decode(&[]).is_none());
-		assert!(Envelope::decode(&encode_erasure(&[0, 100, 0, 0, 0])).is_none());
+		assert!(Envelope::decode(&encoded[1..]).is_err());
+		assert!(Envelope::decode(&[]).is_err());
+		assert!(Envelope::decode(&encode_erasure(&[0, 100, 0, 0, 0])).is_err());
+	}
+
+	/// Re-encodes a vault file with one plaintext meta value altered.
+	fn tamper(encoded: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+		let mut recovered = decode_erasure(encoded).unwrap();
+		let at = recovered
+			.windows(from.len())
+			.position(|window| window == from)
+			.expect("plaintext field present");
+		recovered[at..at + from.len()].copy_from_slice(to);
+		encode_erasure(&recovered)
+	}
+
+	#[test]
+	fn format_two_binds_the_plaintext_metadata_and_never_downgrades() {
+		let db = fixture_database();
+		let key = db.clone_master_key();
+		let encoded = db_to_vec(&db, true);
+		let envelope = Envelope::decode(&encoded).unwrap();
+		assert_eq!(envelope.revision, Some(1));
+		assert!(envelope.aad.starts_with(AAD_PREFIX));
+		assert!(envelope.unlock(&key.read().unwrap()).is_some());
+		// Changing a plaintext field that selection or identity depends on
+		// breaks authentication even though the ciphertext is untouched.
+		let renamed = Envelope::decode(&tamper(&encoded, b"example", b"exampel")).unwrap();
+		assert!(renamed.unlock(&key.read().unwrap()).is_none());
+		let bumped = tamper(&encoded, b"revision", b"revisioN");
+		assert!(Envelope::decode(&bumped).is_err(), "revision is required in format 2");
+		// A vault that is format 2 stays format 2 when the upgrade switch is off.
+		let again = Envelope::decode(&db_to_vec(&db, false)).unwrap();
+		assert_eq!(again.revision, Some(2));
+		assert!(again.unlock(&key.read().unwrap()).is_some());
+		// A format from the future is refused with an explanation, not a guess.
+		let future = tamper(&db_to_vec(&db, false), b"format\x02\x01\x00\x00\x002", b"format\x02\x01\x00\x00\x009");
+		assert!(Envelope::decode(&future).err().unwrap().contains("newer Keptino"));
+	}
+
+	#[test]
+	fn associated_data_is_canonical_and_excludes_the_ciphertext() {
+		let a = vec![
+			("salt".to_string(), "s".to_string()),
+			("db".to_string(), "ciphertext".to_string()),
+			("format".to_string(), "2".to_string()),
+		];
+		let b = vec![
+			("format".to_string(), "2".to_string()),
+			("salt".to_string(), "s".to_string()),
+		];
+		assert_eq!(envelope_aad(&a), envelope_aad(&b));
+		let mut expected = AAD_PREFIX.to_vec();
+		for part in ["format", "2", "salt", "s"] {
+			expected.extend_from_slice(&(part.len() as u32).to_le_bytes());
+			expected.extend_from_slice(part.as_bytes());
+		}
+		assert_eq!(envelope_aad(&a), expected);
+		assert_ne!(
+			envelope_aad(&[("salt".to_string(), "t".to_string())]),
+			envelope_aad(&[("salt".to_string(), "s".to_string())])
+		);
+	}
+
+	#[test]
+	fn the_newer_revision_is_tried_first_and_older_copies_are_refused() {
+		let mut local = Envelope::decode(&db_to_vec(&fixture_database(), true)).unwrap();
+		let mut remote = Envelope::decode(&db_to_vec(&fixture_database(), true)).unwrap();
+		local.modified = 10;
+		remote.modified = 20;
+		assert!(!prefer_local(&local, &remote), "later timestamp wins without revisions");
+		local.revision = Some(3);
+		remote.revision = Some(2);
+		assert!(prefer_local(&local, &remote), "revision outranks timestamp");
+		remote.revision = Some(3);
+		assert!(!prefer_local(&local, &remote), "equal revisions fall back to timestamp");
+		local.revision = None;
+		assert!(!prefer_local(&local, &remote), "a legacy copy is compared by timestamp");
+		assert!(check_revision(Some(2), Some(5), "x").unwrap_err().contains("revision 2"));
+		assert!(check_revision(Some(5), Some(5), "x").is_ok());
+		assert!(check_revision(Some(6), Some(5), "x").is_ok());
+		assert!(check_revision(None, Some(5), "x").is_ok());
+		assert!(check_revision(Some(1), None, "x").is_ok());
 	}
 	#[test]
 	fn existing_compression_and_cipher_format_are_preserved() {
@@ -574,11 +850,11 @@ mod tests {
 		let original_encrypted = cipher
 			.encrypt((&nonce).into(), &original_compressed[..])
 			.unwrap();
-		assert_eq!(encrypt(&compressed, &key, nonce), original_encrypted);
-		let decoded = decompress(decrypt(original_encrypted.clone(), &key, nonce).unwrap());
+		assert_eq!(encrypt(&compressed, &key, nonce, &[]), original_encrypted);
+		let decoded = decompress(decrypt(original_encrypted.clone(), &key, nonce, &[]).unwrap());
 		assert_eq!(&*decoded, &plaintext);
 		let mut damaged = original_encrypted;
 		damaged[0] ^= 1;
-		assert!(decrypt(damaged, &key, nonce).is_none());
+		assert!(decrypt(damaged, &key, nonce, &[]).is_none());
 	}
 }

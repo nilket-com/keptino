@@ -208,13 +208,25 @@ impl Remote {
 		Ok((remote, bytes))
 	}
 
-	pub(super) async fn upload(&self, dir: &Path, db_name: &str, bytes: &[u8]) -> Result<()> {
+	fn session_credentials(&self, dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
 		let credentials = self.provider.credentials(dir)?;
 		if Provider::selected(dir)? != self.provider
 			|| blake3::hash(&credentials) != self.credential_hash
 		{
 			return Err("Storage configuration changed. Unlock again before syncing.".into());
 		}
+		Ok(credentials)
+	}
+
+	/// The current remote object, re-read with the configuration this vault
+	/// was opened with, so a save can see what it is about to replace.
+	pub(super) async fn fetch(&self, dir: &Path, db_name: &str) -> Result<Option<Vec<u8>>> {
+		let credentials = self.session_credentials(dir)?;
+		self.provider.download(&credentials, db_name).await
+	}
+
+	pub(super) async fn upload(&self, dir: &Path, db_name: &str, bytes: &[u8]) -> Result<()> {
+		let credentials = self.session_credentials(dir)?;
 		let response = self
 			.provider
 			.request(&credentials, db_name, Some(Base64::encode_string(bytes)))

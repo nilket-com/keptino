@@ -100,6 +100,22 @@ impl Database {
 			master_key: Arc::clone(&self.master_key),
 		}
 	}
+	/// Every meta entry as (name, value), in storage order.
+	pub fn meta_pairs(&self) -> Vec<(String, String)> {
+		let idb = self.idb.read().unwrap();
+		idb.entries
+			.entries
+			.keys()
+			.filter_map(|id| {
+				let (tag, data) = idb.entries.get(*id)?;
+				if tag != EntryTag::Meta as u8 {
+					return None;
+				}
+				let meta = MetaEntry::from(FieldAtlas::deserialize(&data));
+				Some((meta.get_name().to_owned(), meta.get_value().to_owned()))
+			})
+			.collect()
+	}
 	pub fn clone_master_key(&self) -> Arc<RwLock<SecretMemory>> {
 		self.master_key.clone()
 	}
