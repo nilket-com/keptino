@@ -78,7 +78,7 @@ def instrument(label, test_class, values):
     for key, value in values.items():
         command.extend(['-e', key, str(value)])
     if device_pin: command.extend(['-e', 'devicePin', device_pin])
-    command.append('com.digisafe.app.test/androidx.test.runner.AndroidJUnitRunner')
+    command.append('com.keptino.app.test/androidx.test.runner.AndroidJUnitRunner')
     output = subprocess.run([adb, '-s', args.serial, 'shell', shlex.join(command)], capture_output=True, text=True, timeout=900)
     text = output.stdout + output.stderr
     (report / (label + '.log')).write_text(text)
@@ -92,7 +92,7 @@ def instrument(label, test_class, values):
     print(label + ': passed' + (f' ({skipped} skipped: no device PIN)' if skipped else ''), flush=True)
 
 def collect(remote, local):
-    result = subprocess.run([adb, '-s', args.serial, 'exec-out', 'run-as', 'com.digisafe.app', 'cat', 'files/' + remote], check=True, capture_output=True)
+    result = subprocess.run([adb, '-s', args.serial, 'exec-out', 'run-as', 'com.keptino.app', 'cat', 'files/' + remote], check=True, capture_output=True)
     (report / local).write_bytes(result.stdout)
 
 for apk in ['app/build/outputs/apk/debug/app-debug.apk', 'app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk']:
@@ -104,7 +104,7 @@ try:
       with socket.socket() as sock:
           sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
       with (report / 'b2mock.log').open('w') as log:
-          mock = subprocess.Popen([sys.executable, str(root / 'interop/b2mock.py'), '--dir', directory, '--port', str(port), '--key-id', 'test-key-id', '--app-key', 'test-app-key'], stdout=log, stderr=log)
+          mock = subprocess.Popen([sys.executable, str(root / 'interop/b2mock.py'), '--dir', directory, '--bucket-name', 'mobile-interop-bucket', '--port', str(port), '--key-id', 'test-key-id', '--app-key', 'test-app-key'], stdout=log, stderr=log)
           try:
               for _ in range(100):
                   if mock.poll() is not None: raise RuntimeError('B2 mock exited')
@@ -114,17 +114,17 @@ try:
               else: raise RuntimeError('B2 mock did not start')
               call(adb, '-s', args.serial, 'reverse', f'tcp:{port}', f'tcp:{port}')
               common = {'password': manifest['password'], 'pepperHex': manifest['pepper_hex'], 'entry': 'bank'}
-              instrument('native-debug-and-b2', 'com.digisafe.app.VaultIntegrationTest', dict(common, fixture='linux-debug.digisafe', dbName='vaultdebug', memoryKib=4096, mockBaseUrl=f'http://127.0.0.1:{port}'))
-              collect('android-roundtrip.digisafe', 'android-debug-roundtrip.digisafe')
+              instrument('native-debug-and-b2', 'com.keptino.app.VaultIntegrationTest', dict(common, fixture='linux-debug.keptino', dbName='vaultdebug', memoryKib=4096, mockBaseUrl=f'http://127.0.0.1:{port}'))
+              collect('android-roundtrip.keptino', 'android-debug-roundtrip.keptino')
               if device_pin is None:
                   print('No device PIN: the production UI runs need the credential prompt and are skipped', flush=True)
               else:
-                  instrument('credential-cancel', 'com.digisafe.app.VaultUiTest#cancelledCredentialPromptKeepsVaultLocked', {})
-                  instrument('production-ui', 'com.digisafe.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.digisafe', dbName='vaultrelease'))
-                  collect('android-ui-roundtrip.digisafe', 'android-ui-roundtrip.digisafe')
-                  (Path(directory) / 'vaultrelease.digisafe').write_bytes(base64.b64encode((root / 'droid/tests/fixtures/linux-release.digisafe').read_bytes()))
-                  instrument('production-ui-b2', 'com.digisafe.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.digisafe', dbName='vaultrelease', mockBaseUrl=f'http://127.0.0.1:{port}'))
-                  (report / 'android-b2-roundtrip.digisafe').write_bytes(base64.b64decode((Path(directory) / 'vaultrelease.digisafe').read_bytes(), validate=True))
+                  instrument('credential-cancel', 'com.keptino.app.VaultUiTest#cancelledCredentialPromptKeepsVaultLocked', {})
+                  instrument('production-ui', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName='vaultrelease'))
+                  collect('android-ui-roundtrip.keptino', 'android-ui-roundtrip.keptino')
+                  (Path(directory) / 'vaultrelease.keptino').write_bytes(base64.b64encode((root / 'droid/tests/fixtures/linux-release.keptino').read_bytes()))
+                  instrument('production-ui-b2', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName='vaultrelease', mockBaseUrl=f'http://127.0.0.1:{port}'))
+                  (report / 'android-b2-roundtrip.keptino').write_bytes(base64.b64decode((Path(directory) / 'vaultrelease.keptino').read_bytes(), validate=True))
           finally:
               subprocess.run([adb, '-s', args.serial, 'reverse', '--remove', f'tcp:{port}'], check=False)
               mock.terminate()
@@ -133,8 +133,8 @@ try:
 finally:
     if device_pin: clear_device_pin(device_pin)
 print('Android output files: ' + str(report))
-outputs = [('android-debug-roundtrip.digisafe', 'debug')]
-if device_pin: outputs += [('android-ui-roundtrip.digisafe', 'release'), ('android-b2-roundtrip.digisafe', 'release')]
+outputs = [('android-debug-roundtrip.keptino', 'debug')]
+if device_pin: outputs += [('android-ui-roundtrip.keptino', 'release'), ('android-b2-roundtrip.keptino', 'release')]
 for filename, profile in outputs:
     result = subprocess.run([str(root / 'interop/run.sh'), 'check', str(report / filename), profile], cwd=root, capture_output=True, text=True, check=True, timeout=360)
     (report / (filename + '.linux.log')).write_text(result.stdout + result.stderr)

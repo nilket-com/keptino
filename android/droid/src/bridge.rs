@@ -1,4 +1,4 @@
-//! JNI entry points of `com.digisafe.app.Core`. Every failure, including a
+//! JNI entry points of `com.keptino.app.Core`. Every failure, including a
 //! panic, becomes a `java.lang.RuntimeException`; a database is reached
 //! through a handle, so a stale one is an error and not a dangling pointer.
 
@@ -133,7 +133,7 @@ pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_
 /// Startup checks: throws `SECURITY VIOLATION: ...` when the process is
 /// traced or instrumented, else returns warnings for the user, possibly none.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_preflight<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_preflight<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 ) -> jobjectArray {
@@ -153,7 +153,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_preflight<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_derivePepper<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_derivePepper<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	seed: JByteArray<'local>,
@@ -167,7 +167,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_derivePepper<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_open<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_open<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	db_name: JString<'local>,
@@ -200,7 +200,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_open<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_source<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_source<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -209,7 +209,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_source<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_modifiedTs<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_modifiedTs<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -220,7 +220,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_modifiedTs<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_query<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_query<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -233,7 +233,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_query<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_next<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_next<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -242,7 +242,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_next<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_previous<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_previous<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -251,7 +251,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_previous<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_clear<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_clear<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -265,7 +265,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_clear<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_getField<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_getField<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -278,7 +278,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_getField<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_setField<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_setField<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -292,7 +292,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_setField<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_commit<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_commit<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -301,7 +301,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_commit<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_save<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_save<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
@@ -313,7 +313,7 @@ pub extern "system" fn Java_com_digisafe_app_Core_save<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_digisafe_app_Core_close<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_close<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,

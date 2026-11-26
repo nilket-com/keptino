@@ -13,7 +13,7 @@ if (( EUID == 0 )); then
 fi
 
 # Remote storage providers for vault sync. The active one is named in
-# ~/.config/digisafe/storage-provider (identifier plus newline); an absent file
+# ~/.config/keptino/storage-provider (identifier plus newline); an absent file
 # means the legacy Backblaze configuration. Each provider keeps its own
 # <provider>.cred, encrypted by systemd-creds --user --name=<provider>.
 #   backblaze: key name, key ID, application key          (3 NUL-separated fields)
@@ -215,31 +215,89 @@ provision_pepper() {
     printf 'Deriving pepper from your original seed (requires 4 GiB of memory)...\n'
     systemd-ask-password -n "Enter original pepper seed:" | \
         argon2 digipepper -id -t 4 -m 22 -p 1 -l 32 -r -v 13 | \
-        systemd-creds encrypt --user --name=digipepper - "$temp_dir/digipepper.cred"
+        systemd-creds encrypt --user --name=pepper - "$temp_dir/pepper.cred"
     local pepper
-    pepper=$(systemd-creds decrypt --user --name=digipepper "$temp_dir/digipepper.cred" -)
+    pepper=$(systemd-creds decrypt --user --name=pepper "$temp_dir/pepper.cred" -)
     if [[ ! "$pepper" =~ ^[[:xdigit:]]{64}$ ]]; then
         unset pepper
         printf 'Generated pepper is invalid; existing credential was preserved.\n' >&2
         exit 1
     fi
     unset pepper
-    chmod 600 -- "$temp_dir/digipepper.cred"
-    if [[ -e "$config_dir/digipepper.cred" ]]; then
+    chmod 600 -- "$temp_dir/pepper.cred"
+    if [[ -e "$config_dir/pepper.cred" ]]; then
         local backup
-        backup=$(mktemp "$config_dir/digipepper.cred.backup.XXXXXXXX")
-        cp -- "$config_dir/digipepper.cred" "$backup"
+        backup=$(mktemp "$config_dir/pepper.cred.backup.XXXXXXXX")
+        cp -- "$config_dir/pepper.cred" "$backup"
         printf 'Previous encrypted pepper saved to %s\n' "$backup"
     fi
-    mv -- "$temp_dir/digipepper.cred" "$config_dir/digipepper.cred"
+    mv -- "$temp_dir/pepper.cred" "$config_dir/pepper.cred"
+}
+
+# A DigiSafe installation becomes a Keptino one in three independent steps,
+# each of which does nothing when its work is already done, so an interrupted
+# run finishes on the next one: the directory moves (a single rename), vault
+# files take the .keptino extension, and the pepper is re-wrapped from the old
+# credential name to the new one through a pipe, never a file. Provider
+# credentials need no change: their systemd-creds name is unchanged. Nothing
+# here needs the seed; if the TPM refuses the old pepper, the old file is kept
+# and the usual seed prompt or --restore-pepper takes over.
+legacy_config_dir="$HOME/.config/digisafe"
+
+migrate_legacy_config_dir() {
+    [[ -d "$legacy_config_dir" ]] || return 0
+    if [[ -e "$config_dir" ]]; then
+        printf 'Leaving the old DigiSafe directory %s in place: %s already exists.\n' "$legacy_config_dir" "$config_dir"
+        return
+    fi
+    printf 'Moving the DigiSafe configuration %s to %s...\n' "$legacy_config_dir" "$config_dir"
+    mv -- "$legacy_config_dir" "$config_dir"
+}
+
+# Renames every <db>.digisafe to <db>.keptino. When both exist, both are kept
+# and Keptino opens the .keptino one. Hidden files are never touched: the old
+# application left .<db>.digisafe temporaries behind interrupted saves.
+migrate_legacy_vaults() {
+    local vault target
+    for vault in "$config_dir"/*.digisafe; do
+        [[ -e "$vault" ]] || continue
+        target="${vault%.digisafe}.keptino"
+        if [[ -e "$target" ]]; then
+            printf 'Both %s and %s exist; Keptino uses the .keptino file and leaves the other untouched.\n' \
+                "$(basename -- "$vault")" "$(basename -- "$target")"
+            continue
+        fi
+        mv -- "$vault" "$target"
+        printf 'Renamed vault %s to %s\n' "$(basename -- "$vault")" "$(basename -- "$target")"
+    done
+}
+
+migrate_legacy_pepper() {
+    local old="$config_dir/digipepper.cred"
+    [[ -e "$old" && ! -e "$config_dir/pepper.cred" ]] || return 0
+    printf 'Re-wrapping the pepper credential under its new name...\n'
+    if systemd-creds decrypt --user --name=digipepper "$old" - 2>/dev/null \
+        | systemd-creds encrypt --user --name=pepper - "$temp_dir/pepper.cred" 2>/dev/null \
+        && [[ -s "$temp_dir/pepper.cred" ]]; then
+        chmod 600 -- "$temp_dir/pepper.cred"
+        mv -- "$temp_dir/pepper.cred" "$config_dir/pepper.cred"
+        rm -f -- "$old"
+        printf 'Pepper credential is now %s.\n' "$config_dir/pepper.cred"
+    else
+        rm -f -- "$temp_dir/pepper.cred"
+        printf 'The TPM would not release the old pepper credential; %s is kept for recovery. Setup will ask for the original pepper seed instead.\n' "$old" >&2
+    fi
 }
 
 prepare_config_dir() {
-    config_dir="$HOME/.config/digisafe"
+    config_dir="$HOME/.config/keptino"
+    migrate_legacy_config_dir
     mkdir -p -- "$config_dir"
     chmod 700 -- "$config_dir"
     temp_dir=$(mktemp -d "$config_dir/.setup.XXXXXXXX")
     trap 'rm -rf -- "$temp_dir"' EXIT
+    migrate_legacy_vaults
+    migrate_legacy_pepper
 }
 
 require_credential_tools() {
@@ -349,7 +407,7 @@ credential_format_ok() {
 # Only the selected provider and the pepper are used by Keptino.
 read_storage_provider
 unreadable_credentials=0
-for name in digipepper "$active_provider"; do
+for name in pepper "$active_provider"; do
     credential="$config_dir/$name.cred"
     [[ -e "$credential" ]] || continue
     chmod 600 -- "$credential"
@@ -360,7 +418,7 @@ for name in digipepper "$active_provider"; do
     if ! systemd-creds decrypt --user --name="$name" "$credential" - >/dev/null; then
         printf 'Cannot decrypt %s.\n' "$credential" >&2
         case "$name" in
-            digipepper)
+            pepper)
                 printf 'If you have the original pepper seed, run %s --restore-pepper. Otherwise keep this file for recovery in its original boot state.\n' "$0" >&2 ;;
             backblaze)
                 printf 'To re-enter the Backblaze application key, run %s --reset-backblaze.\n' "$0" >&2 ;;
@@ -370,8 +428,8 @@ for name in digipepper "$active_provider"; do
         unreadable_credentials=1
         continue
     fi
-    if [[ "$name" == digipepper ]]; then
-        pepper=$(systemd-creds decrypt --user --name=digipepper "$credential" -)
+    if [[ "$name" == pepper ]]; then
+        pepper=$(systemd-creds decrypt --user --name=pepper "$credential" -)
         if [[ ! "$pepper" =~ ^[[:xdigit:]]{64}$ ]]; then
             unset pepper
             printf 'Saved pepper is invalid: expected 64 hex characters. Restore the original pepper or recreate it using the original seed before opening an existing vault.\n' >&2
@@ -391,7 +449,7 @@ fi
 printf "Building and installing Keptino before requesting credentials...\n"
 cargo deb --install
 
-if [[ ! -e "$config_dir/digipepper.cred" ]]; then
+if [[ ! -e "$config_dir/pepper.cred" ]]; then
     provision_pepper
 else
     printf "Reusing existing pepper credential.\n"

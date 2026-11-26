@@ -3,10 +3,10 @@
 	"pepper_seed": "digisafe test pepper seed",
 	"pepper_hex": "3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1",
 	"vaults": {
-		"linux-debug.digisafe": {
+		"linux-debug.keptino": {
 			"mem_kib": 4096
 		},
-		"linux-release.digisafe": {
+		"linux-release.keptino": {
 			"mem_kib": 4194304
 		}
 	},

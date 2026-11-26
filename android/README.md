@@ -1,13 +1,27 @@
 # Keptino for Android
 
-The Android application reads and writes the Linux `.digisafe` format. It uses a Rust
+The Android application reads and writes Linux `.keptino` vaults. It uses a Rust
 core for the vault, key derivation and encryption; Kotlin handles the editor,
 Android Keystore, local files and Backblaze. The former plaintext JSON prototype
 is not used or automatically imported.
 
-The Android application ID remains `com.digisafe.app`. Install the new APK
-with the same signing key to upgrade DigiSafe in place and retain its local
-vaults and Android Keystore settings.
+## Move an existing Android vault
+
+Keptino installs alongside DigiSafe under the new application ID `com.keptino.app`.
+Android keeps each installation's private files and Keystore settings separate.
+
+1. Open each vault in the old app (`com.digisafe.app`), save your edits and use
+   **Export saved vault** to put the encrypted file in Downloads or another folder you can access.
+2. Install Keptino and configure it with the original pepper seed or pepper value.
+   Enter your Backblaze credentials again if you use sync.
+3. Enter the same database name, choose **Import Linux vault**, select the exported
+   `.digisafe` file and unlock with the original master password. Check the entries
+   before removing the old app. Keptino uses `.keptino` for new saves and exports.
+
+Sync now uses the object key `<database name>.keptino`. To migrate a cloud-only
+vault, copy the existing `<database name>.digisafe` object to that key in the same
+bucket, preserving its contents. If you have the latest local vault, you can
+import it and use **Save** with sync configured to upload it under the new key.
 
 ## Build
 
@@ -43,9 +57,10 @@ fallback to a weaker derivation.
    an existing vault. Do not paste real credentials into test fixtures or logs.
 2. Optionally enter the Backblaze application key ID and application key. Both
    must be supplied to enable sync. For sync between Android and Linux, configure
-   Linux to use Backblaze and scope the key to the `digisafe` bucket.
+   Linux to use Backblaze and restrict the key to the same bucket on both devices.
+   Keptino reads the bucket name from Backblaze when it authorizes the key.
    Leaving both empty enables local import/export use.
-3. Enter the database name. Import a Linux `.digisafe` file, or unlock with
+3. Enter the database name. Import a Linux `.keptino` file, or unlock with
    Backblaze enabled to download it. Import refuses to overwrite an existing local
    file. The original imported file is left unchanged.
 4. Enter the master password and unlock. “Open local copy only” skips network

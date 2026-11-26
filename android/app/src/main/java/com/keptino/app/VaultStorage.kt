@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import android.app.KeyguardManager
 import android.content.Context
@@ -12,10 +12,12 @@ import android.security.keystore.StrongBoxUnavailableException
 import android.util.AtomicFile
 import android.util.Base64
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.ByteBuffer
+import java.nio.file.Files
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.UUID
@@ -36,7 +38,11 @@ data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: S
 }
 
 class VaultStorage(private val context: Context) {
-    private companion object { val settingsLock = Mutex() }
+    private companion object {
+        val settingsLock = Mutex()
+        val namePattern = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+        val migrationLock = Any()
+    }
 
     private val legacy = AtomicFile(File(context.filesDir, "settings.enc"))
     private val secure = AtomicFile(File(context.filesDir, "settings-v2.enc"))
@@ -46,6 +52,17 @@ class VaultStorage(private val context: Context) {
 
     // AtomicFile.openRead also recovers a .bak left by older framework versions.
     private fun AtomicFile.present() = baseFile.exists() || File(baseFile.path + ".bak").exists()
+
+    init {
+        for (entry in context.filesDir.list().orEmpty()) {
+            val base = entry.removeSuffix(".bak")
+            val name = base.removeSuffix(".digisafe")
+            if (base != name && name.matches(namePattern)) {
+                // Retry on access so a failed move of one vault cannot block other vaults.
+                try { file(name) } catch (_: IOException) {}
+            }
+        }
+    }
 
     fun configured() = secure.present() || legacy.present()
 
@@ -173,14 +190,24 @@ class VaultStorage(private val context: Context) {
         }
     }
     fun file(name: String): File {
-        require(name.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "Use a database name containing letters, digits, dots, underscores or hyphens" }
-        return File(context.filesDir, "$name.digisafe")
+        require(name.matches(namePattern)) { "Use a database name containing letters, digits, dots, underscores or hyphens" }
+        val current = File(context.filesDir, "$name.keptino")
+        synchronized(migrationLock) {
+            val old = AtomicFile(File(context.filesDir, "$name.digisafe"))
+            if (old.present() && !AtomicFile(current).present()) {
+                old.openRead().close() // Recover the committed file if an old atomic save was interrupted.
+                Files.move(old.baseFile.toPath(), current.toPath())
+            }
+        }
+        return current
     }
     fun read(name: String): ByteArray? {
-        val file = file(name)
-        if (!file.exists()) return null
-        require(file.length() <= MAX_VAULT_BYTES) { "Vault is too large" }
-        return AtomicFile(file).readFully()
+        val file = AtomicFile(file(name))
+        if (!file.present()) return null
+        return file.openRead().use {
+            require(it.channel.size() <= MAX_VAULT_BYTES) { "Vault is too large" }
+            it.readBytes()
+        }
     }
     fun write(name: String, bytes: ByteArray) = writeAtomic(AtomicFile(file(name)), bytes)
     private fun writeAtomic(file: AtomicFile, bytes: ByteArray) {
@@ -190,7 +217,7 @@ class VaultStorage(private val context: Context) {
     }
 }
 
-/** B2 carries base64 of the Linux .digisafe file, not the raw file. */
+/** B2 carries base64 of the Linux .keptino file, not the raw file. */
 class Backblaze(private val settings: Settings) {
     private fun checkedUrl(value: String): URL {
         val url = URL(value)
@@ -228,20 +255,28 @@ class Backblaze(private val settings: Settings) {
         val basic = Base64.encodeToString("${settings.keyId}:${settings.appKey}".toByteArray(), Base64.NO_WRAP)
         return JSONObject(String(request("authorization", settings.authUrl.trimEnd('/') + "/b2api/v2/b2_authorize_account", "Basic $basic")!!))
     }
+    private fun bucketField(auth: JSONObject, field: String): String {
+        val value = auth.getJSONObject("allowed").opt(field) as? String
+        require(!value.isNullOrBlank()) { "Use a Backblaze application key restricted to the vault bucket." }
+        return value
+    }
+    private fun encode(value: String) = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
+
     fun download(name: String): ByteArray? {
         val auth = authorize()
-        val file = URLEncoder.encode("$name.digisafe", "UTF-8").replace("+", "%20")
-        val body = request("download", auth.getString("downloadUrl") + "/file/digisafe/$file", auth.getString("authorizationToken"), missingOk = true) ?: return null
+        val bucket = encode(bucketField(auth, "bucketName"))
+        val file = encode("$name.keptino")
+        val body = request("download", auth.getString("downloadUrl").trimEnd('/') + "/file/$bucket/$file", auth.getString("authorizationToken"), missingOk = true) ?: return null
         return Base64.decode(body, Base64.DEFAULT).also { require(it.size <= MAX_VAULT_BYTES) { "Remote vault is too large" } }
     }
     fun upload(name: String, bytes: ByteArray) {
         val auth = authorize()
-        val body = JSONObject().put("bucketId", auth.getJSONObject("allowed").getString("bucketId")).toString().toByteArray()
+        val body = JSONObject().put("bucketId", bucketField(auth, "bucketId")).toString().toByteArray()
         val upload = JSONObject(String(request("upload URL request", auth.getString("apiUrl") + "/b2api/v2/b2_get_upload_url", auth.getString("authorizationToken"), body, mapOf("Content-Type" to "application/json"))!!))
         val encoded = Base64.encode(bytes, Base64.NO_WRAP)
         val digest = MessageDigest.getInstance("SHA-1").digest(encoded).joinToString("") { "%02x".format(it) }
         request("upload", upload.getString("uploadUrl"), upload.getString("authorizationToken"), encoded, mapOf(
-            "X-Bz-File-Name" to URLEncoder.encode("$name.digisafe", "UTF-8").replace("+", "%20"),
+            "X-Bz-File-Name" to encode("$name.keptino"),
             "Content-Type" to "text/plain", "X-Bz-Content-Sha1" to digest, "X-Bz-Info-Author" to "Keptino", "X-Bz-Server-Side-Encryption" to "AES256"))
     }
 }

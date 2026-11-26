@@ -77,7 +77,7 @@ fn main() {
 				assert_ne!(vault.commit(), Commit::EmptyName, "Name cannot be empty.");
 			}
 			let bytes = vault.save().unwrap();
-			let temporary = path.with_extension("digisafe.part");
+			let temporary = path.with_extension("keptino.part");
 			std::fs::write(&temporary, bytes).unwrap();
 			std::fs::rename(&temporary, path).unwrap();
 		}

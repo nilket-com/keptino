@@ -53,11 +53,11 @@ mock="http://127.0.0.1:$port"
 # replaced by a script that prints the file.
 say 'Deriving the pepper as linux/setup.sh does (4 GiB)'
 pepper=$(printf '%s' "$PEPPER_SEED" | argon2 digipepper -id -t 4 -m 22 -p 1 -l 32 -r -v 13)
-mkdir -p "$work/bin" "$work/home/.config/digisafe"
+mkdir -p "$work/bin" "$work/home/.config/keptino"
 printf '#!/bin/sh\nexec cat "$4"\n' >"$work/bin/systemd-creds"
 chmod +x "$work/bin/systemd-creds"
-printf '%s\n' "$pepper" >"$work/home/.config/digisafe/digipepper.cred"
-printf 'mock\0%s\0%s' "$KEY_ID" "$APP_KEY" >"$work/home/.config/digisafe/backblaze.cred"
+printf '%s\n' "$pepper" >"$work/home/.config/keptino/pepper.cred"
+printf 'mock\0%s\0%s' "$KEY_ID" "$APP_KEY" >"$work/home/.config/keptino/backblaze.cred"
 
 linux() {
 	env HOME="$work/home" PATH="$work/bin:$PATH" SSL_CERT_FILE="$work/ca.pem" \
@@ -72,7 +72,7 @@ b2_token() {
 		python3 -c 'import json, sys; print(json.load(sys.stdin)["authorizationToken"])'
 }
 b2_download() { # <db> <file>
-	curl -fsS -H "Authorization: $(b2_token)" "$mock/file/digisafe/$1.digisafe" | base64 -d >"$2"
+	curl -fsS -H "Authorization: $(b2_token)" "$mock/file/keptino/$1.keptino" | base64 -d >"$2"
 }
 b2_upload() { # <db> <file>
 	local reply url token
@@ -80,7 +80,7 @@ b2_upload() { # <db> <file>
 	url=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["uploadUrl"])' <<<"$reply")
 	token=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["authorizationToken"])' <<<"$reply")
 	base64 -w 0 "$2" >"$work/upload.b64"
-	curl -fsS -o /dev/null -H "Authorization: $token" -H "X-Bz-File-Name: $1.digisafe" \
+	curl -fsS -o /dev/null -H "Authorization: $token" -H "X-Bz-File-Name: $1.keptino" \
 		-H 'Content-Type: text/plain' -H "X-Bz-Content-Sha1: $(sha1sum <"$work/upload.b64" | cut -d' ' -f1)" \
 		--data-binary "@$work/upload.b64" "$url"
 }
@@ -115,17 +115,17 @@ roundtrip() { # <profile> <mem-kib> [fixture directory]
 	say "Building the $profile harness"
 	cargo build --quiet --locked "${flag[@]}"
 	bin=target/$profile
-	local file="$work/home/.config/digisafe/$db.digisafe" phone="$work/phone-$db.digisafe"
+	local file="$work/home/.config/keptino/$db.keptino" phone="$work/phone-$db.keptino"
 
 	say "[$profile] Linux creates the vault and uploads it"
 	linux write "$db" "$PASSWORD" <entries.json
-	cmp <(base64 -d "$work/bucket/$db.digisafe") "$file"
+	cmp <(base64 -d "$work/bucket/$db.keptino") "$file"
 	echo 'ok: the bucket holds base64 of the local file'
 	local written
 	written=$(linux read "$db" "$PASSWORD")
 	same 'Linux reads back what it wrote' "$(cat entries.json)" "$written"
 	if [[ -n $fixtures ]]; then
-		cp "$file" "$fixtures/linux-$profile.digisafe"
+		cp "$file" "$fixtures/linux-$profile.keptino"
 	fi
 
 	say "[$profile] Android downloads and opens it"
@@ -172,12 +172,12 @@ JSON
 
 check() { # <file> <profile>
 	local profile=$2 db flag=()
-	db=$(basename "$1" .digisafe)
+	db=$(basename "$1" .keptino)
 	[[ $profile == release ]] && flag=(--release)
 	cargo build --quiet --locked "${flag[@]}"
 	bin=target/$profile
 	# Only in the bucket, so Linux must fetch and decrypt it.
-	base64 -w 0 "$1" >"$work/bucket/$db.digisafe"
+	base64 -w 0 "$1" >"$work/bucket/$db.keptino"
 	linux read "$db" "$PASSWORD" || { cat "$work/linux.log" >&2; exit 1; }
 }
 
@@ -200,7 +200,7 @@ manifest = {
 	"password": password,
 	"pepper_seed": seed,
 	"pepper_hex": pepper,
-	"vaults": {"linux-debug.digisafe": {"mem_kib": 4096}, "linux-release.digisafe": {"mem_kib": 4194304}},
+	"vaults": {"linux-debug.keptino": {"mem_kib": 4096}, "linux-release.keptino": {"mem_kib": 4194304}},
 	"entries": json.load(open("entries.json")),
 }
 with open(path, "w") as file:

@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -39,7 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.digisafe.app.ui.theme.KeptinoTheme
+import com.keptino.app.ui.theme.KeptinoTheme
 import javax.crypto.Cipher
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -282,7 +282,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, authenticate: s
                 }
                 if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
                 Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
-                OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.digisafe") }) { Text("Export saved vault") }
+                OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
                 OutlinedButton(enabled = !vm.busy, onClick = { if (vm.dirty) confirmLock = true else vm.lock() }) { Text("Lock") }
             }
         }

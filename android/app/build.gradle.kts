@@ -3,11 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 android {
-    namespace = "com.digisafe.app"
+    namespace = "com.keptino.app"
     compileSdk = 37
     ndkVersion = "30.0.16248370"
     defaultConfig {
-        applicationId = "com.digisafe.app"
+        applicationId = "com.keptino.app"
         minSdk = 30
         targetSdk = 37
         versionCode = 3

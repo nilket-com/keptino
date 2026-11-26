@@ -63,14 +63,14 @@ fn check(file: &[u8], mem_kib: u32) {
 
 #[test]
 fn opens_and_edits_a_linux_debug_vault() {
-	check(include_bytes!("fixtures/linux-debug.digisafe"), crypto::DEBUG_MEM_KIB);
+	check(include_bytes!("fixtures/linux-debug.keptino"), crypto::DEBUG_MEM_KIB);
 }
 
 /// Needs 4 GiB of free memory several times over: `cargo test --release -- --ignored`.
 #[test]
 #[ignore]
 fn opens_and_edits_a_linux_release_vault() {
-	check(include_bytes!("fixtures/linux-release.digisafe"), crypto::RELEASE_MEM_KIB);
+	check(include_bytes!("fixtures/linux-release.keptino"), crypto::RELEASE_MEM_KIB);
 }
 
 #[test]

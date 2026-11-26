@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import android.os.SystemClock
 import android.widget.EditText
@@ -28,7 +28,7 @@ class DeviceCredential private constructor(private val pin: String) {
         ?: "com.android.systemui,com.android.settings").split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 
     companion object {
-        const val APP = "com.digisafe.app"
+        const val APP = "com.keptino.app"
         fun fromArguments(): DeviceCredential {
             val pin = InstrumentationRegistry.getArguments().getString("devicePin")
             assumeTrue("Pass devicePin (the emulator lock screen PIN) to exercise device credential prompts", pin != null)

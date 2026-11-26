@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule

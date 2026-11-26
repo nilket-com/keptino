@@ -2,14 +2,18 @@
 
 A password vault by nilket for Linux and Android.
 
-Keptino was previously named DigiSafe. Existing installations use the same
-`.digisafe` vault files, local credentials and cloud objects. On Linux, launch
-it with `keptino`. The Debian package replaces `digisafe` and keeps the old
-command and pinned desktop launcher working.
+Keptino was previously named DigiSafe. On Linux, launch it with `keptino`. The
+Debian package replaces `digisafe` and keeps the old command and pinned desktop
+launcher working. Run `./linux/setup.sh` before opening Keptino. If
+`~/.config/keptino` is absent, setup moves `~/.config/digisafe` there with its
+cloud credentials. It renames vaults to `.keptino` and re-wraps the TPM-sealed
+pepper under its new credential name without writing the plaintext to disk.
+If both directories exist, setup leaves the old directory in place. The
+original pepper seed and master password still open the vault.
 
 ### Android
 
-The Android app opens and edits Linux `.digisafe` vaults. See
+The Android app opens and edits Linux `.keptino` vaults. See
 [Android setup, builds, and interoperability tests](android/README.md). Existing
 vaults require the original pepper and a device with enough available memory for
 the Linux 4 GiB password derivation. The platform protections below describe Linux;
@@ -49,7 +53,7 @@ being constrained by the desktop session's memlock limit. This is reapplied
 on upgrades. Launch the installed executable; a build in `target/` does not
 have this capability.
 
-Rerunning setup reuses the encrypted credentials in `~/.config/digisafe`.
+Rerunning setup reuses the encrypted credentials in `~/.config/keptino`.
 Setup checks the pepper and the active provider credential. If either file
 is empty or cannot be decrypted, setup stops for repair. Keep the original
 pepper credential when using an existing vault.
@@ -73,7 +77,7 @@ also lists the provider credential.
 
 ### Cloud storage on Linux
 
-Keptino syncs one object named `<database name>.digisafe` in a private
+Keptino syncs one object named `<database name>.keptino` in a private
 bucket. All four providers store the same Base64-encoded encrypted vault.
 Existing installations default to Backblaze B2 and reuse `backblaze.cred`.
 
@@ -85,7 +89,7 @@ Existing installations default to Backblaze B2 and reuse `backblaze.cred`.
 | Amazon S3 (`aws`) | A general purpose bucket and an IAM access key pair. Grant `s3:GetObject` and `s3:PutObject` on vault objects and `s3:ListBucket` on the bucket so a first unlock can distinguish a missing vault from denied access. Enter the bucket name, AWS region, access key ID, and secret access key. [S3 permissions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html) | The new-customer free plan lasts up to six months. [S3 pricing](https://aws.amazon.com/s3/pricing/) |
 
 To switch providers, first save your current vault and confirm the local
-`~/.config/digisafe/<database name>.digisafe` file exists. Close Keptino
+`~/.config/keptino/<database name>.keptino` file exists. Close Keptino
 and run setup with the desired provider. For R2, run
 
 ```sh
@@ -97,6 +101,15 @@ Keptino. Unlock the same database name and save once to upload it to an empty
 destination bucket. Switching redirects future syncs and leaves the previous
 bucket's object in place. To recover on another installation, configure the
 same bucket and use the original pepper seed, database name, and master password.
+
+### Cloud objects after the rename
+
+Keptino reads and writes `<database name>.keptino` in the existing bucket.
+If the latest vault is in the cloud under `<database name>.digisafe`, use
+the provider's console to copy the object to the new key before unlocking on
+Linux or Android. Preserve the object's contents. If the latest vault is on
+your migrated installation, unlock it and save once to upload it under the
+new key. The old object stays available under its original name.
 
 Use one writer at a time. Unlock compares the local and remote modification
 times. Each save uses a fresh nonce, including when editing a local copy offline.

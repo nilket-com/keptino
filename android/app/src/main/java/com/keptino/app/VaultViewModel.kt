@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import android.app.Application
 import androidx.compose.runtime.getValue
@@ -73,7 +73,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO + NonCancellable) {
                 val local = storage.read(name)
                 val remote = if (offline) null else sync?.download(name)
-                require(local != null || remote != null) { "No database found. Import a Linux .digisafe file or enable Backblaze sync." }
+                require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable Backblaze sync." }
                 pendingHandle = Core.open(name, bytes, settings.pepper, local, remote, PRODUCTION_MEMORY_KIB)
             }
             sessionSync = sync

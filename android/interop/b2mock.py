@@ -20,7 +20,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BUCKET_ID = "mockbucket0001"
-BUCKET_NAME = "digisafe"
+BUCKET_NAME = "keptino"
 ACCOUNT_TOKEN = "mock-account-token"
 UPLOAD_TOKEN = "mock-upload-token"
 
@@ -87,9 +87,9 @@ class Handler(BaseHTTPRequestHandler):
 				"authorizationToken": ACCOUNT_TOKEN,
 				"apiUrl": self.base(),
 				"downloadUrl": self.base(),
-				"allowed": {"bucketId": BUCKET_ID, "bucketName": BUCKET_NAME},
+				"allowed": {"bucketId": BUCKET_ID, "bucketName": self.server.bucket_name},
 			})
-		prefix = f"/file/{BUCKET_NAME}/"
+		prefix = f"/file/{self.server.bucket_name}/"
 		if path.startswith(prefix):
 			if not self.authorized(ACCOUNT_TOKEN):
 				return
@@ -144,6 +144,7 @@ def main():
 	parser.add_argument("--dir", required=True, help="directory holding the bucket's objects")
 	parser.add_argument("--port", type=int, default=8787)
 	parser.add_argument("--bind", default="127.0.0.1")
+	parser.add_argument("--bucket-name", default=BUCKET_NAME)
 	parser.add_argument("--key-id", default="mock-key-id")
 	parser.add_argument("--app-key", default="mock-app-key")
 	parser.add_argument("--tls-cert", help="certificate chain for HTTPS proxy mode")
@@ -153,6 +154,7 @@ def main():
 	server = ThreadingHTTPServer((args.bind, args.port), Handler)
 	server.daemon_threads = True
 	server.directory = args.dir
+	server.bucket_name = args.bucket_name
 	server.credentials = f"{args.key_id}:{args.app_key}"
 	server.tls = None
 	if args.tls_cert:

@@ -91,7 +91,7 @@ impl Provider {
 			.map_err(|_| BAD_CREDENTIAL)?
 			.split('\0')
 			.collect();
-		let key = format!("{db_name}.digisafe");
+		let key = format!("{db_name}.keptino");
 		let key = utf8_percent_encode(&key, KEY_CHARS).to_string();
 		let req = match fields.as_slice() {
 			[_, id, secret] if self == Self::Backblaze && !id.is_empty() && !secret.is_empty() => {

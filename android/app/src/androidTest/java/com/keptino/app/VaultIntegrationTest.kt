@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -69,6 +69,31 @@ class VaultIntegrationTest {
         storage.write("atomic-test", byteArrayOf(1, 2, 3)); storage.write("atomic-test", byteArrayOf(4, 5))
         assertArrayEquals(byteArrayOf(4, 5), storage.read("atomic-test"))
         storage.file("atomic-test").delete()
+    }
+
+    @Test fun migratesLegacyVaultAndPreservesBothFilesOnCollision() {
+        val dir = context.filesDir
+        val old = File(dir, "migration-test.digisafe")
+        val backup = File(dir, "migration-test.digisafe.bak")
+        val current = File(dir, "migration-test.keptino")
+        val original = byteArrayOf(1, 2, 3)
+        val other = byteArrayOf(4, 5)
+        try {
+            current.delete()
+            old.writeBytes(other)
+            backup.writeBytes(original)
+            val storage = VaultStorage(context)
+            assertTrue(current.isFile)
+            assertFalse(old.exists())
+            assertFalse(backup.exists())
+            assertArrayEquals(original, storage.read("migration-test"))
+
+            old.writeBytes(other)
+            assertArrayEquals(original, VaultStorage(context).read("migration-test"))
+            assertArrayEquals(other, old.readBytes())
+        } finally {
+            listOf(old, backup, current).forEach { it.delete() }
+        }
     }
 
     @Test fun settingsNeedTheDeviceCredentialForEveryOperation() {

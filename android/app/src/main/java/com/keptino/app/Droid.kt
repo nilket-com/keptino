@@ -1,4 +1,4 @@
-package com.digisafe.app
+package com.keptino.app
 
 object Core {
     init { System.loadLibrary("droid") }

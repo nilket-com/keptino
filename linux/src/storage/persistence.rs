@@ -21,26 +21,26 @@ const NONCE_SIZE: usize = 24;
 
 fn base_path() -> PathBuf {
 	let mut apath = env::home_dir().unwrap_or_default();
-	apath.push(".config/digisafe/");
+	apath.push(".config/keptino/");
 	fs::create_dir_all(&apath).ok();
 	apath
 }
 
 fn db_path(db_name: &str) -> PathBuf {
 	let mut apath = base_path();
-	apath.push(format!("{}.digisafe", db_name));
+	apath.push(format!("{}.keptino", db_name));
 	apath
 }
 
 fn temp_path(db_name: &str) -> PathBuf {
 	let mut apath = base_path();
-	apath.push(format!(".{}.digisafe", db_name));
+	apath.push(format!(".{}.keptino", db_name));
 	apath
 }
 
 fn pepper_path() -> String {
 	let mut apath = base_path();
-	apath.push("digipepper.cred");
+	apath.push("pepper.cred");
 	apath.to_str().unwrap().to_string()
 }
 
@@ -246,7 +246,7 @@ fn db_to_vec(db: &Database) -> Vec<u8> {
 
 fn load_pepper() -> [u8; PEPPER_SIZE] {
 	let pepper_output = Command::new("systemd-creds")
-		.args(["decrypt", "--user", "--name=digipepper", &pepper_path()])
+		.args(["decrypt", "--user", "--name=pepper", &pepper_path()])
 		.output()
 		.unwrap();
 	let pepper_hex = Zeroizing::new(pepper_output.stdout);
