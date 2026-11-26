@@ -44,9 +44,7 @@ fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 	let saved = vault.save().unwrap();
 	let mut reopened = Vault::open(name, PASSWORD, &pepper(), Some(file), Some(&saved), mem_kib).unwrap();
 	assert_eq!(reopened.source(), Source::Remote);
-	if initial_revision > 0 {
-		assert_eq!(reopened.revision(), initial_revision + 1);
-	}
+	assert_eq!(reopened.revision(), initial_revision + 1);
 	assert!(reopened.modified_ts() > before);
 	assert!(reopened.query("bank"));
 	assert_eq!(text(&reopened, field::PASSWORD), "replaced");
