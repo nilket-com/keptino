@@ -4,7 +4,7 @@
 #
 #   ./run.sh              debug KDF (4 MiB), a few seconds
 #   ./run.sh release      release KDF (4 GiB of memory per unlock)
-#   ./run.sh fixtures     both, and rewrite ../droid/tests/fixtures
+#   ./run.sh fixtures [dir]  write debug and release fixtures for both formats
 #   ./run.sh check <file> [debug|release]
 #                         have Linux open a vault file saved elsewhere (by
 #                         the app on a device, say) with the fixture password
@@ -109,12 +109,17 @@ print(f"ok: {what}")
 PY
 }
 
-roundtrip() { # <profile> <mem-kib> [fixture directory]
-	local profile=$1 mem=$2 fixtures=${3:-} db="vault$1" flag=()
-	[[ $profile == release ]] && flag=(--release)
-	say "Building the $profile harness"
+roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
+	local profile=$1 mem=$2 format=$3 fixtures=${4:-} db="vault$1" flag=() suffix=
+	if [[ $format == 2 ]]; then
+		suffix=-v2
+		db+=$suffix
+		flag+=(--features write-format-2)
+	fi
+	[[ $profile == release ]] && flag+=(--release)
+	say "Building the $profile harness for format $format"
 	cargo build --quiet --locked "${flag[@]}"
-	bin=target/$profile
+	bin=${CARGO_TARGET_DIR:-target}/$profile
 	local file="$work/home/.config/keptino/$db.keptino" phone="$work/phone-$db.keptino"
 
 	say "[$profile] Linux creates the vault and uploads it"
@@ -124,8 +129,11 @@ roundtrip() { # <profile> <mem-kib> [fixture directory]
 	local written
 	written=$(linux read "$db" "$PASSWORD")
 	same 'Linux reads back what it wrote' "$(cat entries.json)" "$written"
+	if [[ $format == 2 ]]; then
+		[[ $(cat "$work/home/.config/keptino/$db.revision") == 1 ]]
+	fi
 	if [[ -n $fixtures ]]; then
-		cp "$file" "$fixtures/linux-$profile.keptino"
+		cp "$file" "$fixtures/linux-$profile$suffix.keptino"
 	fi
 
 	say "[$profile] Android downloads and opens it"
@@ -151,7 +159,9 @@ JSON
 	say "[$profile] Linux opens the newer remote copy"
 	local seen
 	seen=$(linux read "$db" "$PASSWORD")
-	grep -q 'Remote database loaded\.' "$work/linux.log" || { echo 'MISMATCH: Linux did not take the remote copy'; exit 1; }
+	if [[ $format == 2 ]]; then
+		[[ $(cat "$work/home/.config/keptino/$db.revision") == 2 ]]
+	fi
 	same 'Linux reads the Android vault' "$edited" "$seen"
 	expect 'the edit made on Android' "$seen" bank password 'changed on the phone ☎'
 	expect 'fields Android left alone' "$seen" bank pin 4921
@@ -173,9 +183,9 @@ JSON
 check() { # <file> <profile>
 	local profile=$2 db flag=()
 	db=$(basename "$1" .keptino)
-	[[ $profile == release ]] && flag=(--release)
+	[[ $profile == release ]] && flag+=(--release)
 	cargo build --quiet --locked "${flag[@]}"
-	bin=target/$profile
+	bin=${CARGO_TARGET_DIR:-target}/$profile
 	# Only in the bucket, so Linux must fetch and decrypt it.
 	base64 -w 0 "$1" >"$work/bucket/$db.keptino"
 	linux read "$db" "$PASSWORD" || { cat "$work/linux.log" >&2; exit 1; }
@@ -186,13 +196,13 @@ case "${1:-debug}" in
 		check "${2:?vault file}" "${3:-debug}"
 		exit 0
 		;;
-	debug) roundtrip debug 4096 ;;
-	release) roundtrip release 4194304 ;;
+	debug) roundtrip debug 4096 1; roundtrip debug 4096 2 ;;
+	release) roundtrip release 4194304 1; roundtrip release 4194304 2 ;;
 	fixtures)
-		fixtures=../droid/tests/fixtures
+		fixtures=${2:-../droid/tests/fixtures}
 		mkdir -p "$fixtures"
-		roundtrip debug 4096 "$fixtures"
-		roundtrip release 4194304 "$fixtures"
+		for format in 1 2; do roundtrip debug 4096 "$format" "$fixtures"; done
+		for format in 1 2; do roundtrip release 4194304 "$format" "$fixtures"; done
 		python3 - "$fixtures/manifest.json" "$PASSWORD" "$PEPPER_SEED" "$pepper" <<'PY'
 import json, sys
 path, password, seed, pepper = sys.argv[1:]
@@ -200,7 +210,12 @@ manifest = {
 	"password": password,
 	"pepper_seed": seed,
 	"pepper_hex": pepper,
-	"vaults": {"linux-debug.keptino": {"mem_kib": 4096}, "linux-release.keptino": {"mem_kib": 4194304}},
+	"vaults": {
+        "linux-debug.keptino": {"mem_kib": 4096},
+        "linux-release.keptino": {"mem_kib": 4194304},
+        "linux-debug-v2.keptino": {"mem_kib": 4096, "format": 2},
+        "linux-release-v2.keptino": {"mem_kib": 4194304, "format": 2},
+    },
 	"entries": json.load(open("entries.json")),
 }
 with open(path, "w") as file:

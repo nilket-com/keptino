@@ -17,14 +17,10 @@ fn text(vault: &Vault, id: u8) -> String {
 	String::from_utf8(vault.get_field(id).unwrap().to_vec()).unwrap()
 }
 
-fn check(file: &[u8], mem_kib: u32) {
-	let name = if mem_kib == crypto::DEBUG_MEM_KIB {
-		"vaultdebug"
-	} else {
-		"vaultrelease"
-	};
+fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 	let mut vault = Vault::open(name, PASSWORD, &pepper(), Some(file), None, mem_kib).unwrap();
 	assert_eq!(vault.source(), Source::Local);
+	assert_eq!(vault.revision(), initial_revision);
 	assert_eq!(vault.meta("db_name").as_deref(), Some(name));
 	assert_eq!(vault.names(), ["bank", "mail", "wifi"]);
 	assert!(vault.query("bank"));
@@ -48,6 +44,9 @@ fn check(file: &[u8], mem_kib: u32) {
 	let saved = vault.save().unwrap();
 	let mut reopened = Vault::open(name, PASSWORD, &pepper(), Some(file), Some(&saved), mem_kib).unwrap();
 	assert_eq!(reopened.source(), Source::Remote);
+	if initial_revision > 0 {
+		assert_eq!(reopened.revision(), initial_revision + 1);
+	}
 	assert!(reopened.modified_ts() > before);
 	assert!(reopened.query("bank"));
 	assert_eq!(text(&reopened, field::PASSWORD), "replaced");
@@ -63,14 +62,36 @@ fn check(file: &[u8], mem_kib: u32) {
 
 #[test]
 fn opens_and_edits_a_linux_debug_vault() {
-	check(include_bytes!("fixtures/linux-debug.keptino"), crypto::DEBUG_MEM_KIB);
+	check(
+		include_bytes!("fixtures/linux-debug.keptino"),
+		"vaultdebug",
+		crypto::DEBUG_MEM_KIB,
+		0,
+	);
+	check(
+		include_bytes!("fixtures/linux-debug-v2.keptino"),
+		"vaultdebug-v2",
+		crypto::RELEASE_MEM_KIB,
+		1,
+	);
 }
 
 /// Needs 4 GiB of free memory several times over: `cargo test --release -- --ignored`.
 #[test]
 #[ignore]
 fn opens_and_edits_a_linux_release_vault() {
-	check(include_bytes!("fixtures/linux-release.keptino"), crypto::RELEASE_MEM_KIB);
+	check(
+		include_bytes!("fixtures/linux-release.keptino"),
+		"vaultrelease",
+		crypto::RELEASE_MEM_KIB,
+		0,
+	);
+	check(
+		include_bytes!("fixtures/linux-release-v2.keptino"),
+		"vaultrelease-v2",
+		crypto::DEBUG_MEM_KIB,
+		1,
+	);
 }
 
 #[test]

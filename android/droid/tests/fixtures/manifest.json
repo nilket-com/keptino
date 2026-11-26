@@ -8,6 +8,14 @@
 		},
 		"linux-release.keptino": {
 			"mem_kib": 4194304
+		},
+		"linux-debug-v2.keptino": {
+			"mem_kib": 4096,
+			"format": 2
+		},
+		"linux-release-v2.keptino": {
+			"mem_kib": 4194304,
+			"format": 2
 		}
 	},
 	"entries": [
