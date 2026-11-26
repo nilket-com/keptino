@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 const DEFAULT_BUTTON_SIZE: (u32, u32) = (120, 40);
 const ICON_BUTTON_SIZE: u32 = 44;
 const CLIPBOARD: &[u8] = include_bytes!("icons/clipboard.svg");
+const DIE: &[u8] = include_bytes!("icons/die.svg");
 const EYE_OPEN: &[u8] = include_bytes!("icons/show.svg");
 const EYE_CROSSED: &[u8] = include_bytes!("icons/hide.svg");
 
@@ -253,15 +254,7 @@ pub fn password_screen<'a>(
 				styled_tooltip(password_input, "Password", 3),
 				password_copy_button,
 				password_visibility_toggle,
-				styled_tooltip(
-					styled_button(
-						"Gen",
-						Message::GeneratePassword,
-						(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
-					),
-					"Generate password",
-					0
-				)
+				icon_button(DIE, Message::GeneratePassword)
 			],
 			row![
 				styled_tooltip(pin_input, "PIN", 2),
