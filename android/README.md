@@ -113,10 +113,13 @@ that support ARM MTE. [Android MTE](https://developer.android.com/ndk/guides/arm
 The app locks after two minutes without interaction, including time spent in the
 background. A monotonic deadline is checked again when the app resumes, so a
 frozen background process does not extend the unlock period. Unsaved changes are
-discarded when it locks. Switching to another app does not immediately lock the
+discarded when it locks. Locking hides revealed fields immediately, even during
+a save or upload. An in-progress local save can finish after the editor locks.
+Switching to another app does not immediately lock the
 vault or erase a copied password. Clipboard copies are marked sensitive and
 clearing is attempted after 30 seconds, provided the clipboard still contains the
-application's copy. Android may refuse background clipboard access; the app retries
+application's copy. Locking or finishing the activity also triggers an immediate
+cleanup attempt. Android may refuse background clipboard access; the app retries
 when resumed. Clearing is best effort, and other clipboard consumers may retain copies.
 Secret inputs disable keyboard suggestions, and ordinary inputs disable autocorrect
 and automatic capitalization. This is a request to the IME, not a guarantee against

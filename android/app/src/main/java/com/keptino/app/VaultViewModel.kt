@@ -29,13 +29,21 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var editing by mutableStateOf(false); private set
     private var committedDirty = false
     private var currentEntryName = ""
-    private var lockRequested = false
-    private fun task(block: suspend () -> Unit) {
+    private var generation = 0L
+    // A save owns this handle until the local atomic write returns, even if the UI locks.
+    private var savingHandle = 0L
+    private fun task(block: suspend (Long) -> Unit) {
         if (busy) return
+        val started = generation
         busy = true
         viewModelScope.launch {
-            try { block() } catch (e: Exception) { status = e.message ?: "Operation failed" }
-            finally { busy = false; if (lockRequested) { lockRequested = false; lock() } }
+            try {
+                block(started)
+            } catch (e: Exception) {
+                if (started == generation) status = e.message ?: "Operation failed"
+            } finally {
+                busy = false
+            }
         }
     }
     suspend fun refreshKeyProtection() {
@@ -44,7 +52,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun changeSetup() { if (!busy && !unlocked) { configured = false; status = "Leave both pepper fields empty to keep the saved pepper" } }
-    fun setup(seed: String, pepperHex: String, keyIdInput: String, appKeyInput: String, authUrl: String, authenticate: suspend (Cipher) -> Cipher) = task {
+    fun setup(seed: String, pepperHex: String, keyIdInput: String, appKeyInput: String, authUrl: String, authenticate: suspend (Cipher) -> Cipher) = task { started ->
         // Backblaze keys never contain whitespace; keyboards and pastes often add some.
         val keyId = keyIdInput.trim(); val appKey = appKeyInput.trim()
         require((keyId.isBlank() && appKey.isBlank()) || (keyId.isNotBlank() && appKey.isNotBlank())) { "Enter both Backblaze credentials or leave both empty" }
@@ -59,10 +67,16 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 val bytes = seed.toByteArray(); try { Core.derivePepper(bytes, PRODUCTION_MEMORY_KIB) } finally { bytes.fill(0) }
             }
         }
-        try { withContext(Dispatchers.IO) { storage.writeSettings(Settings(pepper, keyId, appKey, authUrl), authenticate) }; configured = true; refreshKeyProtection(); status = "Setup saved" }
-        finally { pepper.fill(0) }
+        try {
+            withContext(Dispatchers.IO) { storage.writeSettings(Settings(pepper, keyId, appKey, authUrl), authenticate) }
+            configured = true
+            refreshKeyProtection()
+            if (started == generation) status = "Setup saved"
+        } finally {
+            pepper.fill(0)
+        }
     }
-    fun unlock(password: String, offline: Boolean, authenticate: suspend (Cipher) -> Cipher) = task {
+    fun unlock(password: String, offline: Boolean, authenticate: suspend (Cipher) -> Cipher) = task { started ->
         val name = dbName
         val settings = withContext(Dispatchers.IO) { storage.settings(authenticate) }
         val bytes = password.toByteArray()
@@ -76,6 +90,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable Backblaze sync." }
                 pendingHandle = Core.open(name, bytes, settings.pepper, local, remote, PRODUCTION_MEMORY_KIB)
             }
+            if (started != generation) return@task
             sessionSync = sync
             handle = pendingHandle; pendingHandle = 0L; unlocked = true; dirty = false; editing = false; committedDirty = false
             status = if (Core.source(handle) == 2) "Opened remote database" else "Opened local database"
@@ -93,7 +108,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private fun read(id: Int): String { val bytes = Core.getField(handle, id); return try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) } }
     private fun action(block: () -> Unit) {
         if (busy || !unlocked) return
-        try { block() } catch (e: Exception) { status = e.message ?: "Operation failed" }
+        try { block(started) } catch (e: Exception) { if (started == generation) status = e.message ?: "Operation failed" }
     }
     fun navigate(direction: Int) = action {
         check(!editing) { "Set the current entry before navigating" }
@@ -118,28 +133,43 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun commit() = action {
         when (Core.commit(handle)) { 0 -> status = "Enter an entry name"; else -> { dirty = true; committedDirty = true; editing = false; status = "Entry set. Save to persist changes."; refresh() } }
     }
-    fun save() = task {
+    fun save() = task { started ->
         check(unlocked) { "Unlock first" }
         check(!editing) { "Set the current entry before saving" }
         val name = dbName
-        val encoded = withContext(Dispatchers.IO) { Core.save(handle).also { storage.write(name, it) } }
+        val saving = handle
+        savingHandle = saving
+        val encoded = try {
+            withContext(Dispatchers.IO) { Core.save(saving).also { storage.write(name, it) } }
+        } finally {
+            savingHandle = 0L
+            if (saving != handle) Core.close(saving)
+        }
+        if (started != generation) return@task
         dirty = false; committedDirty = false
         status = "Saved locally"
         sessionSync?.let { sync ->
-            try { withContext(Dispatchers.IO) { sync.upload(name, encoded) }; status = "Saved locally and to Backblaze" }
-            catch (e: Exception) { status = "Saved locally; remote upload failed. Retry Save when connected." }
+            val result = try {
+                withContext(Dispatchers.IO) { sync.upload(name, encoded) }
+                "Saved locally and to Backblaze"
+            } catch (e: Exception) {
+                "Saved locally; remote upload failed. Retry Save when connected."
+            }
+            if (started == generation) status = result
         }
     }
-    fun importVault(bytes: ByteArray) = task {
+    fun importVault(bytes: ByteArray) = task { started ->
         check(!unlocked) { "Lock before importing" }
         require(bytes.size <= MAX_VAULT_BYTES) { "Vault is too large" }
-        require(storage.read(dbName) == null) { "A local vault with this name already exists. Choose a different name to import safely." }
-        withContext(Dispatchers.IO) { storage.write(dbName, bytes) }; status = "Imported encrypted vault"
+        val name = dbName
+        require(storage.read(name) == null) { "A local vault with this name already exists. Choose a different name to import safely." }
+        withContext(Dispatchers.IO) { storage.write(name, bytes) }
+        if (started == generation) status = "Imported encrypted vault"
     }
     fun report(message: String) { status = message }
     fun lock() {
-        if (busy) { lockRequested = true; return }
-        if (handle != 0L) Core.close(handle)
+        generation++
+        if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null
         handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; committedDirty = false; currentEntryName = ""
         status = "Locked"

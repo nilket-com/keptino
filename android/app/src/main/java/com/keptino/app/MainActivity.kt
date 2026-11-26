@@ -221,7 +221,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     var appKey by remember { mutableStateOf("") }
     var authUrl by remember { mutableStateOf("https://api.backblazeb2.com") }
     var offline by remember { mutableStateOf(false) }
-    var confirmLock by remember { mutableStateOf(false) }
+    var confirmLock by remember(vm.unlocked) { mutableStateOf(false) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -306,11 +306,11 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
                 Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
-                OutlinedButton(enabled = !vm.busy, onClick = { if (vm.dirty) confirmLock = true else lock() }) { Text("Lock") }
+                OutlinedButton(onClick = { if (vm.dirty && !vm.busy) confirmLock = true else lock() }) { Text("Lock") }
             }
         }
     }
-    if (confirmLock) AlertDialog(onDismissRequest = { confirmLock = false }, title = { Text("Discard unsaved changes?") },
+    if (vm.unlocked && confirmLock) AlertDialog(onDismissRequest = { confirmLock = false }, title = { Text("Discard unsaved changes?") },
         text = { Text("Save first to keep changes to this vault.") },
         confirmButton = { TextButton(onClick = { confirmLock = false; lock() }) { Text("Discard and lock") } },
         dismissButton = { TextButton(onClick = { confirmLock = false }) { Text("Cancel") } })

@@ -101,11 +101,32 @@ class VaultUiTest {
             compose.onNodeWithText(savedText, substring = false).assertExists()
             // A fixed output name lets the host reopen the exact UI-saved bytes with Linux.
             storage.write("android-ui-roundtrip", storage.read(name)!!)
+            compose.onNodeWithText("Copy Password").performScrollTo().performClick()
             compose.onNodeWithText("Lock", substring = false).performScrollTo().performClick()
             compose.onNodeWithText("Master password").assertExists()
+            scenario.onActivity { activity ->
+                val clipboard = activity.getSystemService(android.content.ClipboardManager::class.java)
+                assertFalse("Explicit lock must clear our copied password", clipboard.hasPrimaryClip())
+            }
             // The migrated setup unlocks again with one prompt and the same pepper and sync settings.
             unlock()
-            compose.onNodeWithText("Lock", substring = false).performScrollTo().performClick()
+            // Both calls run on the main thread before the save can publish its result.
+            lateinit var vm: VaultViewModel
+            scenario.onActivity { activity ->
+                vm = androidx.lifecycle.ViewModelProvider(activity)[VaultViewModel::class.java]
+                vm.query = args.getString("entry") ?: "example"
+                vm.navigate(0)
+                vm.reveal(3)
+                org.junit.Assert.assertEquals("android-edited-password 🔑", vm.fields[2])
+                vm.save()
+                assertTrue(vm.busy)
+                vm.lock()
+                assertFalse(vm.unlocked)
+                assertTrue(vm.revealed.isEmpty() && vm.fields.all { it.isEmpty() })
+            }
+            compose.waitUntil(30_000) { !vm.busy }
+            assertFalse(vm.unlocked)
+            org.junit.Assert.assertEquals("Locked", vm.status)
             compose.onNodeWithText("Master password").assertExists()
         }
     }
