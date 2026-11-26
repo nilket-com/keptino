@@ -26,6 +26,8 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
@@ -342,5 +344,35 @@ class Backblaze(private val settings: Settings) {
         request("upload", upload.getString("uploadUrl"), upload.getString("authorizationToken"), encoded, mapOf(
             "X-Bz-File-Name" to encode("$name.keptino"),
             "Content-Type" to "text/plain", "X-Bz-Content-Sha1" to digest, "X-Bz-Info-Author" to "Keptino", "X-Bz-Server-Side-Encryption" to "AES256"))
+    }
+}
+
+/** Compare against the encrypted object observed at unlock or the last successful upload. */
+internal class BackblazeSession(
+    private val client: Backblaze,
+    private val name: String,
+    original: ByteArray?,
+    private var offline: Boolean,
+    initiallyPaused: Boolean,
+) {
+    private fun digest(bytes: ByteArray?) = bytes?.let { MessageDigest.getInstance("SHA-256").digest(it) }
+    private var expected = digest(original)
+    var paused = initiallyPaused
+        private set
+
+    suspend fun upload(bytes: ByteArray, active: () -> Boolean): Boolean {
+        if (paused) return false
+        val observed = withContext(Dispatchers.IO) { digest(client.download(name)) }
+        if (!active()) return false
+        if (!observed.contentEquals(expected) && !(offline && observed == null)) {
+            paused = true
+            return false
+        }
+        expected = withContext(Dispatchers.IO) {
+            client.upload(name, bytes)
+            digest(bytes)
+        }
+        offline = false
+        return true
     }
 }

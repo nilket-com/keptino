@@ -206,6 +206,29 @@ class VaultIntegrationTest {
         } finally { Core.close(h); password.fill(0); pepper.fill(0) }
     }
 
+    @Test fun cloudSessionPreservesRemoteChangesAcrossRetries() = runBlocking {
+        org.junit.Assume.assumeTrue("Pass mockBaseUrl to exercise B2 sync", args.containsKey("mockBaseUrl"))
+        val client = Backblaze(Settings(ByteArray(0), "test-key-id", "test-app-key", args.getString("mockBaseUrl")!!))
+        val name = "conflict-" + java.util.UUID.randomUUID()
+        val original = byteArrayOf(1)
+        val edit = byteArrayOf(2)
+        val concurrent = byteArrayOf(3)
+        val session = BackblazeSession(client, name, original, offline = true, initiallyPaused = false)
+        assertTrue(session.upload(original) { true }) // First upload from an offline vault to an empty bucket.
+        assertFalse(session.upload(edit) { false }) // Lock during the remote check.
+        assertArrayEquals(original, client.download(name))
+        assertTrue(session.upload(edit) { true })
+        client.upload(name, concurrent)
+        repeat(2) {
+            assertFalse(session.upload(edit) { true })
+            assertTrue(session.paused)
+            assertArrayEquals(concurrent, client.download(name))
+        }
+        val fallback = BackblazeSession(client, name, concurrent, offline = false, initiallyPaused = true)
+        assertFalse(fallback.upload(edit) { true })
+        assertArrayEquals(concurrent, client.download(name))
+    }
+
     @Test fun backblazeMockRoundTrip() {
         org.junit.Assume.assumeTrue("Pass mockBaseUrl to exercise B2 sync", args.containsKey("mockBaseUrl"))
         val base = args.getString("mockBaseUrl")!!

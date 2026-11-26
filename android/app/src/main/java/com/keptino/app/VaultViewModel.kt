@@ -6,7 +6,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import java.security.MessageDigest
 import javax.crypto.Cipher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -25,12 +24,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var revealed by mutableStateOf(setOf<Int>()); private set
     var dirty by mutableStateOf(false); private set
     var keyProtection by mutableStateOf<String?>(null); private set
-    private var sessionSync: Backblaze? = null
-    private var expectedRemote: ByteArray? = null
+    private var sessionSync: BackblazeSession? = null
     private var heldRevision = 0uL
-    private var offlineBaseline = false
-    private var uploadsPaused = false
-    private fun fingerprint(bytes: ByteArray?) = bytes?.let { MessageDigest.getInstance("SHA-256").digest(it) }
     private var handle = 0L
     var editing by mutableStateOf(false); private set
     private var committedDirty = false
@@ -90,23 +85,22 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         try {
             refreshKeyProtection()
             val sync = if (settings.sync) Backblaze(settings.copy(pepper = ByteArray(0))) else null
-            val baseline = withContext(Dispatchers.IO + NonCancellable) {
+            val cloudSession = withContext(Dispatchers.IO + NonCancellable) {
                 val local = storage.read(name)
                 val remote = if (offline) null else sync?.download(name)
                 require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable Backblaze sync." }
                 pendingHandle = Core.open(name, bytes, settings.pepper, local, remote, PRODUCTION_MEMORY_KIB)
                 storage.acceptRevision(name, Core.revision(pendingHandle).toULong())
-                fingerprint(if (offline) local else remote)
+                sync?.let {
+                    BackblazeSession(it, name, if (offline) local else remote, offline, Core.uploadsPaused(pendingHandle))
+                }
             }
             if (started != generation) return@task
             heldRevision = Core.revision(pendingHandle).toULong()
-            expectedRemote = baseline
-            offlineBaseline = offline
-            uploadsPaused = Core.uploadsPaused(pendingHandle)
-            sessionSync = sync
+            sessionSync = cloudSession
             handle = pendingHandle; pendingHandle = 0L; unlocked = true; dirty = false; editing = false; committedDirty = false
             status = if (Core.source(handle) == 2) "Opened remote database" else "Opened local database"
-            if (uploadsPaused) status += ". The local and remote copies need reconciliation. Uploads paused."
+            if (sessionSync?.paused == true) status += ". The local and remote copies need reconciliation. Uploads paused."
             Core.clear(handle); refresh()
         } finally {
             if (pendingHandle != 0L) Core.close(pendingHandle)
@@ -167,27 +161,14 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         heldRevision = Core.revision(handle).toULong()
         dirty = false; committedDirty = false
         status = "Saved locally"
-        if (uploadsPaused) {
+        if (sessionSync?.paused == true) {
             status = "Saved locally. Uploads paused until the copies are reconciled and reopened."
             return@task
         }
         sessionSync?.let { sync ->
             val result = try {
-                val observed = withContext(Dispatchers.IO) { fingerprint(sync.download(name)) }
-                if (started != generation) return@task
-                if (!observed.contentEquals(expectedRemote) && !(offlineBaseline && observed == null)) {
-                    uploadsPaused = true
-                    status = "Saved locally. The remote copy changed. Uploads paused. Reopen to reconcile."
-                    return@task
-                }
-                val uploaded = withContext(Dispatchers.IO) {
-                    sync.upload(name, encoded)
-                    fingerprint(encoded)
-                }
-                if (started != generation) return@task
-                expectedRemote = uploaded
-                offlineBaseline = false
-                "Saved locally and to Backblaze"
+                if (sync.upload(encoded) { started == generation }) "Saved locally and to Backblaze"
+                else "Saved locally. The remote copy changed. Uploads paused. Reopen to reconcile."
             } catch (e: Exception) {
                 "Saved locally; remote upload failed. Retry Save when connected."
             }
@@ -207,7 +188,6 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         generation++
         if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null
-        expectedRemote = null; uploadsPaused = false; offlineBaseline = false
         handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; committedDirty = false; currentEntryName = ""
         status = "Locked"
     }
