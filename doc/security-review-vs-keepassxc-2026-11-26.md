@@ -132,3 +132,27 @@ Supremacy track: S1 Landlock then seccomp; S2 FIDO2; README design-principles se
 ## Appendix: cargo audit, linux/Cargo.lock, 2026-11-26
 
 Vulnerabilities in linked crates: rustls 0.23.36 (RUSTSEC-2026-0285, -0346, -0348, -0349; patched 0.23.46), rustls-webpki 0.103.9 (-0049, -0098, -0099, -0104, -0382; patched 0.103.16), aws-lc-sys 0.37.0 (-0044, -0045, -0046, -0047, -0048; patched 0.39), quick-xml 0.38.4 (-0194, -0195; patched 0.41, manifest bump), time 0.3.44 (-0009; patched 0.3.47), url 2.5.8 (-0592; patched 2.5.9). Lockfile-only, not linked for this target: quinn-proto 0.11.13 (10 advisories), quinn-udp 0.5.14 (-0538), webpki-root-certs 1.0.6 (-0383). Warnings: 18, none in the crypto path. `android/droid/Cargo.lock`: instant unmaintained, lru 0.7.8 unsound; no vulnerabilities.
+
+## Status, 2026-11-26 evening
+
+Linux, all on `main`:
+
+| Finding | State |
+| --- | --- |
+| K1 envelope authentication and revision | Reader and writer done; writer upgrade switch (`WRITE_FORMAT_2`) stays off until the Android reader and format-2 fixtures land. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
+| K2 dependencies | Updated; seven-day cooldown in `.cargo/config.toml`; `cargo audit` in setup; zero advisories |
+| K3 lock | Lock button, Ctrl+L, logind and screensaver D-Bus listener (verified by Codex on a private bus) |
+| K4 clipboard | Conditional, state-independent wipe; cleared on lock |
+| K5 file mode | 0600 files, 0700 directory |
+| K6 generations | Three previous saves kept as `.keptino.1` to `.3` |
+| K8 generator and delete | Done |
+| K9 limits | Remote downloads bounded at 64 MiB, read in chunks |
+| K10 KDF parameters | `kdf_m`, `kdf_t`, `kdf_p` written and honoured in format 2 |
+| K11 lifetimes | Absolute tool paths, clean error for a missing pepper, provider credential kept in secret memory for the session |
+| K13 minor | WAYLAND_DISPLAY only defaulted, lsblk optional, cargo-deb pinned, unused dependency dropped |
+| S1 Landlock | Done; needs one desktop launch to confirm fonts and the compositor under the sandbox |
+| Commit hygiene | ket's commit preflight and hooks adopted; full history re-signed |
+
+Android (Codex): Phase 1 landed (K4 clipboard on lock and finish, K3 immediate session revocation, K6 bounded and verified writes, K2 dependency refresh under the cooldown). K1 reader, K10 costs and the rollback guard in progress at the time of writing; interop harness wired for `harness` and `write-format-2` features.
+
+Open: K1 writer flip (joint, one release), K7 Android memory layer, K9 Android limits, S2 FIDO2, password health report, TOTP.
