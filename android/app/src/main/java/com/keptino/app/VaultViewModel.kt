@@ -108,7 +108,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private fun read(id: Int): String { val bytes = Core.getField(handle, id); return try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) } }
     private fun action(block: () -> Unit) {
         if (busy || !unlocked) return
-        try { block(started) } catch (e: Exception) { if (started == generation) status = e.message ?: "Operation failed" }
+        try { block() } catch (e: Exception) { status = e.message ?: "Operation failed" }
     }
     fun navigate(direction: Int) = action {
         check(!editing) { "Set the current entry before navigating" }
