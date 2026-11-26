@@ -671,14 +671,29 @@ fn decode_erasure(encoded: &[u8]) -> Option<Vec<u8>> {
 	Some(recovered)
 }
 
+/// Previous saves kept beside the vault as `<db>.keptino.1` (the newest)
+/// through `.keptino.3`, so a bad save or a sync that chose the wrong copy
+/// can be undone by copying one back over the vault file.
+const GENERATIONS: usize = 3;
+
 fn to_file(dat: &[u8], db_name: &str) -> std::io::Result<()> {
-	write_atomic(&temp_path(db_name), &db_path(db_name), dat)
+	write_atomic_keeping(&temp_path(db_name), &db_path(db_name), dat, GENERATIONS)
 }
 
-/// Writes the vault through a temporary file that is readable by its owner
-/// only, whatever the process umask, then renames it into place. A temporary
-/// left by an interrupted save is replaced, never appended to or reused.
 fn write_atomic(tmp_path: &Path, path: &Path, dat: &[u8]) -> std::io::Result<()> {
+	write_atomic_keeping(tmp_path, path, dat, 0)
+}
+
+/// Writes through a temporary file that is readable by its owner only,
+/// whatever the process umask, then renames it into place. A temporary left
+/// by an interrupted save is replaced, never appended to or reused. The
+/// previous `keep` contents survive as numbered generations.
+fn write_atomic_keeping(
+	tmp_path: &Path,
+	path: &Path,
+	dat: &[u8],
+	keep: usize,
+) -> std::io::Result<()> {
 	match fs::remove_file(tmp_path) {
 		Ok(()) => {}
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -692,12 +707,40 @@ fn write_atomic(tmp_path: &Path, path: &Path, dat: &[u8]) -> std::io::Result<()>
 	file.write_all(dat)?;
 	file.sync_all()?;
 	mem::drop(file);
+	if keep > 0 && path.exists() {
+		rotate_generations(path, keep)?;
+	}
 	fs::rename(tmp_path, path)?;
 	if let Some(parent) = path.parent() {
 		let dir = fs::File::open(parent)?;
 		dir.sync_all()?;
 	}
 	Ok(())
+}
+
+fn generation_path(path: &Path, n: usize) -> PathBuf {
+	let mut name = path.as_os_str().to_owned();
+	name.push(format!(".{n}"));
+	PathBuf::from(name)
+}
+
+/// Shifts `.1` through `.keep-1` up one and links the current file as `.1`.
+/// The current file stays in place until the caller's rename replaces it,
+/// so there is never a moment without a vault file.
+fn rotate_generations(path: &Path, keep: usize) -> std::io::Result<()> {
+	for n in (1..keep).rev() {
+		let from = generation_path(path, n);
+		if from.exists() {
+			fs::rename(&from, generation_path(path, n + 1))?;
+		}
+	}
+	let newest = generation_path(path, 1);
+	match fs::remove_file(&newest) {
+		Ok(()) => {}
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+		Err(err) => return Err(err),
+	}
+	fs::hard_link(path, newest)
 }
 
 #[cfg(test)]
@@ -719,6 +762,18 @@ mod tests {
 		assert!(!tmp.exists());
 		write_atomic(&tmp, &path, b"second").unwrap();
 		assert_eq!(fs::read(&path).unwrap(), b"second");
+		assert!(!generation_path(&path, 1).exists(), "no generations without keep");
+		for content in [&b"third"[..], b"fourth", b"fifth", b"sixth"] {
+			write_atomic_keeping(&tmp, &path, content, 2).unwrap();
+		}
+		assert_eq!(fs::read(&path).unwrap(), b"sixth");
+		assert_eq!(fs::read(generation_path(&path, 1)).unwrap(), b"fifth");
+		assert_eq!(fs::read(generation_path(&path, 2)).unwrap(), b"fourth");
+		assert!(!generation_path(&path, 3).exists(), "older generations are dropped");
+		assert_eq!(
+			fs::metadata(generation_path(&path, 1)).unwrap().permissions().mode() & 0o777,
+			0o600
+		);
 		fs::remove_dir_all(&dir).unwrap();
 	}
 
