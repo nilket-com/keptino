@@ -25,3 +25,5 @@ android/local.properties
 !android/gradle/wrapper/gradle-wrapper.jar
 
 android/interop/target
+
+erasure/target
