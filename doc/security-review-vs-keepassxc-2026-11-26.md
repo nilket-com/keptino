@@ -1,6 +1,6 @@
 # Keptino vs KeePassXC: security review
 
-Date: 2026-11-26. Tree reviewed: `main` at db8ed87 (Linux) and ada0db1 (Android, Codex). Reviewers: Claude (Linux, vault format, sync, feature comparison) and Codex (Android app, droid native core). Static review plus the existing Rust suites; no attack reproductions and no file edits. Reference: KeePassXC 2.8.0 (stable 2026-10-21) and the KDBX 4 format.
+Date: 2026-11-26. Tree reviewed: `main` at 9b1b6cf (Linux) and 115545f (Android, Codex); hashes are those after the 2026-11-26 signed-history rewrite. Reviewers: Claude (Linux, vault format, sync, feature comparison) and Codex (Android app, droid native core). Static review plus the existing Rust suites; no attack reproductions and no file edits. Reference: KeePassXC 2.8.0 (stable 2026-10-21) and the KDBX 4 format.
 
 ## Verdict
 
