@@ -122,12 +122,15 @@ Linux or Android. Preserve the object's contents. If the latest vault is on
 your migrated installation, unlock it and save once to upload it under the
 new key. The old object stays available under its original name.
 
-Saving with this release upgrades a vault to format 2: the plaintext
-envelope (salt, nonce, timestamps, name, revision and key-derivation cost) is
-bound to the ciphertext, so a tampered or replayed envelope fails to open.
-Earlier Keptino releases cannot read format 2; update Linux and Android
-before saving on either. Unlock compares the local and remote copies by
-revision, then by modification time, and tries the other copy if the preferred one fails to authenticate,
+Every vault file carries its metadata twice: in the plaintext envelope and
+inside the encrypted database. After decryption the two copies must match
+exactly, so a changed, added or dropped plaintext field (a replayed
+modification time, say) fails to open like a wrong password. This holds for
+every vault ever written, with no re-save. Saves also record a `revision`
+that advances on each save and the Argon2 cost the vault was opened with;
+earlier releases open such vaults, use their own compiled cost, and carry
+the revision along without advancing it. Unlock compares the local and
+remote copies by revision, then by modification time, and tries the other copy if the preferred one fails to authenticate,
 pausing uploads for the session when that happens. A copy whose revision is
 below the highest one already opened on this machine is refused; remove
 `~/.config/keptino/<database name>.revision` to accept it deliberately. Each

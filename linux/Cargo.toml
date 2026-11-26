@@ -24,11 +24,12 @@ maintainer-scripts = "debian"
 
 [features]
 # Only android/interop enables these. `harness` finds systemd-creds through
-# PATH so the test harness can stand in for the TPM and keeps saves at
-# format 1 for the legacy fixtures; `write-format-2` restores the production
-# behaviour of upgrading format-1 vaults on save.
+# PATH so the test harness can stand in for the TPM. The writer form is
+# chosen explicitly for fixtures: `write-format-2` writes the marked AAD
+# form, `write-unmarked` the mirrored unmarked form.
 harness = []
 write-format-2 = []
+write-unmarked = []
 
 [dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }

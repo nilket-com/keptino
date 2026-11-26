@@ -105,19 +105,10 @@ impl Database {
 	}
 	/// Every meta entry as (name, value), in storage order.
 	pub fn meta_pairs(&self) -> Vec<(String, String)> {
-		let idb = self.idb.read().unwrap();
-		idb.entries
-			.entries
-			.keys()
-			.filter_map(|id| {
-				let (tag, data) = idb.entries.get(*id)?;
-				if tag != EntryTag::Meta as u8 {
-					return None;
-				}
-				let meta = MetaEntry::from(FieldAtlas::deserialize(&data));
-				Some((meta.get_name().to_owned(), meta.get_value().to_owned()))
-			})
-			.collect()
+		self.idb.read().unwrap().meta_pairs()
+	}
+	pub fn remove_meta_entry(&self, name: &str) -> bool {
+		self.idb.write().unwrap().remove_meta_entry(name)
 	}
 	pub fn clone_master_key(&self) -> Arc<RwLock<SecretMemory>> {
 		self.master_key.clone()
@@ -256,6 +247,27 @@ impl InteriorDatabase {
 			return Some(MetaEntry::from(FieldAtlas::deserialize(&entry.1)));
 		}
 		None
+	}
+	fn remove_meta_entry(&mut self, name: &str) -> bool {
+		let Some(id) = self.index_by_name.remove(&format!("meta\x00{}", name)) else {
+			return false;
+		};
+		self.entries.remove(id)
+	}
+	/// Every meta entry as (name, value), in storage order.
+	pub fn meta_pairs(&self) -> Vec<(String, String)> {
+		self.entries
+			.entries
+			.keys()
+			.filter_map(|id| {
+				let (tag, data) = self.entries.get(*id)?;
+				if tag != EntryTag::Meta as u8 {
+					return None;
+				}
+				let meta = MetaEntry::from(FieldAtlas::deserialize(&data));
+				Some((meta.get_name().to_owned(), meta.get_value().to_owned()))
+			})
+			.collect()
 	}
 	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
 		self.entries.serialize()
