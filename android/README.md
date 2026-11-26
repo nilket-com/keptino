@@ -46,9 +46,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Gradle invokes `droid/build.sh` to build and package the Rust library for ARM64
 and x86-64. A native library built only for the host will not work in the APK.
 Minimum supported Android version is Android 11 (API 30), on 64-bit devices.
-Debug and release applications both use the production Linux KDF parameters.
-Tests may explicitly request the smaller Linux debug KDF; there is no automatic
-fallback to a weaker derivation.
+Debug and release applications use the production Linux KDF defaults for legacy vaults.
+Format 2 records the Argon2id memory, passes and lanes in its authenticated header.
+Android uses those parameters when present and preserves them on save.
 
 ## Open an existing Linux vault
 
@@ -71,11 +71,20 @@ fallback to a weaker derivation.
    before uploading. An upload failure reports that the local save succeeded.
    **Export saved vault** exports the last saved encrypted file for Linux to open.
 
-The production key derivation requires **4 GiB of available memory**, in addition
-to the app and operating system. Deriving the pepper from its seed also needs
-4 GiB. Devices unable to supply that memory cannot open production Linux vaults;
-the app does not reduce the KDF cost. Importing an existing pepper avoids the seed
-calculation but does not remove the master-password KDF requirement.
+The default production vault requires **4 GiB of available memory** for password
+derivation. Deriving the pepper from its seed also needs 4 GiB. Importing the
+original pepper skips the seed calculation.
+
+Format 2 carries an authenticated revision. Android remembers the highest
+revision opened or saved for each local vault name in a Keystore-protected
+record. To deliberately recover an older file, import it under a fresh name
+and select **Open local copy only**.
+
+If the preferred copy fails authentication and the other opens, uploads pause
+for that session. Before each upload, Android checks whether the encrypted
+remote object has changed since unlock or the last successful upload. If it
+changed, the edit stays in the local file and can be exported before reopening.
+Concurrent writes between the final check and the upload remain possible.
 
 ## Device behavior
 

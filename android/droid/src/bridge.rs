@@ -106,11 +106,7 @@ fn field_id(value: jint) -> Result<u8> {
 
 /// Runs `body`, converting an error or a panic into a pending Java
 /// exception and returning `fallback` to the JVM, which ignores it.
-fn guard<'local, T>(
-	env: &mut JNIEnv<'local>,
-	fallback: T,
-	body: impl FnOnce(&mut JNIEnv<'local>) -> Result<T>,
-) -> T {
+fn guard<'local, T>(env: &mut JNIEnv<'local>, fallback: T, body: impl FnOnce(&mut JNIEnv<'local>) -> Result<T>) -> T {
 	let message = match catch_unwind(AssertUnwindSafe(|| body(env))) {
 		Ok(Ok(value)) => return value,
 		Ok(Err(error)) => error.to_string(),
@@ -206,6 +202,26 @@ pub extern "system" fn Java_com_keptino_app_Core_source<'local>(
 	handle: jlong,
 ) -> jint {
 	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.source() as jint)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_revision<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+) -> jlong {
+	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.revision() as jlong)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_uploadsPaused<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+) -> jboolean {
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.uploads_paused as jboolean))
+	})
 }
 
 #[unsafe(no_mangle)]

@@ -26,17 +26,50 @@ pub const DEBUG_MEM_KIB: u32 = 1 << 12;
 /// A key in its own locked, undumpable page. See `security::LockedKey`.
 pub type Key = LockedKey;
 
-fn argon2id(password: &[u8], salt: &[u8], t_cost: u32, mem_kib: u32) -> Result<Key> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KdfCost {
+	pub memory_kib: u32,
+	pub passes: u32,
+	pub lanes: u32,
+}
+
+impl KdfCost {
+	pub fn legacy(memory_kib: u32) -> Self {
+		Self {
+			memory_kib,
+			passes: 1,
+			lanes: 1,
+		}
+	}
+}
+
+fn argon2id(password: &[u8], salt: &[u8], t_cost: u32, mem_kib: u32, lanes: u32) -> Result<Key> {
 	let params = ParamsBuilder::new()
 		.m_cost(mem_kib)
 		.t_cost(t_cost)
-		.p_cost(1)
+		.p_cost(lanes)
 		.output_len(KEY_SIZE)
 		.build()
 		.map_err(|e| Error::Kdf(e.to_string()))?;
 	let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 	// Allocate fallibly: the default path aborts the process when 4 GiB is
 	// unavailable, which on a phone is an expected condition.
+	#[cfg(target_os = "android")]
+	if let Ok(info) = std::fs::read_to_string("/proc/meminfo")
+		&& let Some(available) = info.lines().find_map(|line| {
+			line.strip_prefix("MemAvailable:")?
+				.split_whitespace()
+				.next()?
+				.parse::<u64>()
+				.ok()
+		})
+		&& u64::from(mem_kib) > available
+	{
+		return Err(Error::Kdf(format!(
+			"requires {} MiB of available memory",
+			mem_kib / 1024
+		)));
+	}
 	let mut blocks = Vec::new();
 	blocks
 		.try_reserve_exact(mem_kib as usize)
@@ -62,7 +95,7 @@ pub fn derive_pepper(seed: &[u8], mem_kib: u32) -> Result<Key> {
 	if seed.is_empty() {
 		return Err(Error::Invalid("empty pepper seed"));
 	}
-	argon2id(seed, b"digipepper", 4, mem_kib)
+	argon2id(seed, b"digipepper", 4, mem_kib, 1)
 }
 
 pub fn derive_master_key(
@@ -70,6 +103,15 @@ pub fn derive_master_key(
 	pepper: &[u8; PEPPER_SIZE],
 	salt: &[u8; SALT_SIZE],
 	mem_kib: u32,
+) -> Result<Key> {
+	derive_master_key_with_cost(password, pepper, salt, KdfCost::legacy(mem_kib))
+}
+
+pub(crate) fn derive_master_key_with_cost(
+	password: &[u8],
+	pepper: &[u8; PEPPER_SIZE],
+	salt: &[u8; SALT_SIZE],
+	cost: KdfCost,
 ) -> Result<Key> {
 	let mut pre_hasher = Sha3_256::new();
 	pre_hasher.update(salt);
@@ -79,7 +121,7 @@ pub fn derive_master_key(
 	let mut derivation_salt = Zeroizing::new([0u8; SALT_SIZE + PEPPER_SIZE]);
 	derivation_salt[..SALT_SIZE].copy_from_slice(salt);
 	derivation_salt[SALT_SIZE..].copy_from_slice(pepper);
-	let main_hash = argon2id(&pre_hash, &*derivation_salt, 1, mem_kib);
+	let main_hash = argon2id(&pre_hash, &*derivation_salt, cost.passes, cost.memory_kib, cost.lanes);
 	pre_hash.zeroize();
 	let main_hash = main_hash?;
 	let mut post_hasher = Sha3_256::new();
@@ -148,20 +190,33 @@ pub fn decompress(msg: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 pub fn encrypt(msg: &[u8], key: &Key, nonce: &[u8; NONCE_SIZE]) -> Vec<u8> {
+	encrypt_with_aad(msg, key, nonce, &[])
+}
+
+pub(crate) fn encrypt_with_aad(msg: &[u8], key: &Key, nonce: &[u8; NONCE_SIZE], aad: &[u8]) -> Vec<u8> {
 	let cipher = XChaCha20Poly1305::new((&**key).into());
 	let mut buffer = Zeroizing::new(Vec::with_capacity(msg.len() + 16));
 	buffer.extend_from_slice(msg);
 	cipher
-		.encrypt_in_place(nonce.into(), b"", &mut *buffer)
+		.encrypt_in_place(nonce.into(), aad, &mut *buffer)
 		.expect("Encryption of an in-memory buffer");
 	std::mem::take(&mut *buffer)
 }
 
 pub fn decrypt(msg: Vec<u8>, key: &Key, nonce: &[u8; NONCE_SIZE]) -> Result<Zeroizing<Vec<u8>>> {
+	decrypt_with_aad(msg, key, nonce, &[])
+}
+
+pub(crate) fn decrypt_with_aad(
+	msg: Vec<u8>,
+	key: &Key,
+	nonce: &[u8; NONCE_SIZE],
+	aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
 	let cipher = XChaCha20Poly1305::new((&**key).into());
 	let mut buffer = Zeroizing::new(msg);
 	cipher
-		.decrypt_in_place(nonce.into(), b"", &mut *buffer)
+		.decrypt_in_place(nonce.into(), aad, &mut *buffer)
 		.map_err(|_| Error::Decryption)?;
 	Ok(buffer)
 }
@@ -193,7 +248,10 @@ mod tests {
 	fn pepper_matches_the_argon2_command_line_tool() {
 		// printf 'correct horse' | argon2 digipepper -id -t 4 -m 12 -p 1 -l 32 -r -v 13
 		let pepper = derive_pepper(b"correct horse", DEBUG_MEM_KIB).unwrap();
-		assert_eq!(hex::encode(*pepper), include_str!("../tests/fixtures/pepper_m12.hex").trim());
+		assert_eq!(
+			hex::encode(*pepper),
+			include_str!("../tests/fixtures/pepper_m12.hex").trim()
+		);
 		assert!(derive_pepper(b"", DEBUG_MEM_KIB).is_err());
 	}
 }

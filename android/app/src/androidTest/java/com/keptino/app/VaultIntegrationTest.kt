@@ -63,6 +63,24 @@ class VaultIntegrationTest {
         assertArrayEquals(warnings, Core.preflight())
     }
 
+    @Test fun rememberedRevisionRejectsOlderAndLegacyVaultsAfterReopen() {
+        val name = "revision-" + java.util.UUID.randomUUID()
+        val storage = VaultStorage(context)
+        storage.acceptRevision(name, 0uL)
+        storage.acceptRevision(name, 1uL)
+        val reopened = VaultStorage(context)
+        reopened.acceptRevision(name, ULong.MAX_VALUE)
+        reopened.acceptRevision(name, ULong.MAX_VALUE)
+        assertThrows(IllegalStateException::class.java) {
+            reopened.acceptRevision(name, ULong.MAX_VALUE, previous = 1uL) { fail("Replaced a concurrent save") }
+        }
+        for (older in listOf(0uL, 1uL, ULong.MAX_VALUE - 1uL)) {
+            assertThrows(IllegalStateException::class.java) {
+                reopened.acceptRevision(name, older) { fail("Replaced a vault below the remembered revision") }
+            }
+        }
+    }
+
     @Test fun atomicVaultStorageAndSafeFileNames() {
         val storage = VaultStorage(context)
         try { storage.file("../outside"); fail("Unsafe file name accepted") } catch (_: IllegalArgumentException) {}

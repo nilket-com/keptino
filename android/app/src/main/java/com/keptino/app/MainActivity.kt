@@ -261,7 +261,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 vm.keyProtection?.let { Text(it) }
                 warnings.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
             }
-            if (vm.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Working… Password derivation uses 4 GiB of memory.") }
+            if (vm.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Working…") }
             if (vm.status.isNotEmpty()) Text(vm.status)
             if (!vm.configured) {
                 Text("Connect to your Linux vault", style = MaterialTheme.typography.titleLarge)
@@ -280,7 +280,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 Button(enabled = !vm.busy, onClick = { vm.unlock(password, offline, authenticate); password = "" }) { Text("Unlock") }
                 OutlinedButton(enabled = !vm.busy, onClick = { import.launch(arrayOf("*/*")) }) { Text("Import Linux vault") }
                 OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
-                Text("Import preserves the source file and refuses to replace an existing local vault. Production Linux vaults require 4 GiB of available memory to unlock.")
+                Text("Import preserves the source file and refuses to replace an existing local vault. Default production vaults require 4 GiB of available memory to unlock.")
             } else {
                 Input("Find by name or tag", vm.query, { vm.query = it }, enabled = !vm.busy)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -42,6 +42,7 @@ class VaultStorage(private val context: Context) {
         val settingsLock = Mutex()
         val namePattern = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
         val migrationLock = Any()
+        val revisionLock = Any()
     }
 
     private val legacy = AtomicFile(File(context.filesDir, "settings.enc"))
@@ -200,6 +201,51 @@ class VaultStorage(private val context: Context) {
             }
         }
         return current
+    }
+    // A separate keystore alias per vault also distinguishes first use from a missing record.
+    // The encrypted counter is independent of pepper rotation and does not require another prompt.
+    fun acceptRevision(name: String, revision: ULong, previous: ULong = revision, persist: () -> Unit = {}) = synchronized(revisionLock) {
+        require(name.matches(namePattern))
+        val record = AtomicFile(File(context.filesDir, "$name.revision"))
+        val alias = "keptino-revision-$name"
+        val ks = store
+        val existingKey = ks.getKey(alias, null) as? SecretKey
+        val aad = alias.toByteArray(Charsets.UTF_8)
+        val floor = if (existingKey == null && !record.present()) 0uL else {
+            check(existingKey != null && record.present()) {
+                "Vault revision record unavailable. To recover, import a saved copy under a fresh name."
+            }
+            val bytes = record.openRead().use { input ->
+                check(input.channel.size() == 36L) { "Invalid vault revision record" }
+                input.readBytes()
+            }
+            val decrypt = Cipher.getInstance("AES/GCM/NoPadding")
+            decrypt.init(Cipher.DECRYPT_MODE, existingKey, GCMParameterSpec(128, bytes, 0, 12))
+            decrypt.updateAAD(aad)
+            ByteBuffer.wrap(decrypt.doFinal(bytes, 12, 24)).long.toULong()
+        }
+        check(revision >= floor) {
+            "This copy is revision $revision. This device has seen $floor. To recover it, import under a fresh name and open locally."
+        }
+        check(previous >= floor) {
+            "Another session saved revision $floor. Reopen before replacing the local vault."
+        }
+        persist()
+        if (revision > floor) {
+            val key = existingKey ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+                init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256).build())
+                generateKey()
+            }
+            val encrypt = Cipher.getInstance("AES/GCM/NoPadding")
+            encrypt.init(Cipher.ENCRYPT_MODE, key)
+            encrypt.updateAAD(aad)
+            val bytes = encrypt.iv + encrypt.doFinal(ByteBuffer.allocate(8).putLong(revision.toLong()).array())
+            writeAtomic(record, bytes)
+            check(record.readFully().contentEquals(bytes)) { "Could not verify the vault revision record" }
+        }
     }
     fun read(name: String): ByteArray? {
         val file = AtomicFile(file(name))
