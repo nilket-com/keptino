@@ -57,7 +57,14 @@ val buildNative = tasks.register<Exec>("buildNative") {
     commandLine("bash", "build.sh")
     environment("ANDROID_HOME", System.getenv("ANDROID_HOME") ?: "${System.getProperty("user.home")}/Android/Sdk")
     environment("ANDROID_NDK_HOME", "${System.getenv("ANDROID_HOME") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk/30.0.16248370")
-    inputs.files(fileTree(rootProject.file("droid/src")), rootProject.file("droid/Cargo.toml"), rootProject.file("droid/Cargo.lock"), rootProject.file("droid/build.sh"))
+    inputs.files(
+        fileTree(rootProject.file("droid/src")),
+        rootProject.file("droid/Cargo.toml"),
+        rootProject.file("droid/Cargo.lock"),
+        rootProject.file("droid/build.sh"),
+        fileTree(rootProject.file("../erasure/src")),
+        rootProject.file("../erasure/Cargo.toml"),
+    )
     outputs.dir(file("src/main/jniLibs"))
 }
 tasks.named("preBuild").configure { dependsOn(buildNative) }

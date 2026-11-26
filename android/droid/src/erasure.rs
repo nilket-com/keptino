@@ -1,7 +1,7 @@
 //! Reed-Solomon 8:4 with a `len u64 LE | blake3 | shard` header per shard.
 
 use crate::error::{Error, Result};
-use reed_solomon_erasure::galois_8::ReedSolomon;
+use keptino_erasure::ReedSolomon;
 
 const DATA_SHARDS: usize = 8;
 const PARITY_SHARDS: usize = 4;
@@ -64,6 +64,25 @@ pub fn decode(encoded: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn restores_linux_vault_files_byte_for_byte() {
+		for original in [
+			include_bytes!("../tests/fixtures/linux-debug.keptino").as_slice(),
+			include_bytes!("../tests/fixtures/linux-debug-v2.keptino").as_slice(),
+			include_bytes!("../tests/fixtures/linux-debug-unmarked.keptino").as_slice(),
+			include_bytes!("../tests/fixtures/linux-release.keptino").as_slice(),
+			include_bytes!("../tests/fixtures/linux-release-v2.keptino").as_slice(),
+			include_bytes!("../tests/fixtures/linux-release-unmarked.keptino").as_slice(),
+		] {
+			let mut damaged = original.to_vec();
+			let chunk = damaged.len() / TOTAL_SHARDS;
+			for shard in [0, 2, 4, 6] {
+				damaged[shard * chunk + HEADER_SIZE] ^= 1;
+			}
+			assert!(encode(&decode(&damaged).unwrap()) == original);
+		}
+	}
 
 	#[test]
 	fn repairs_four_damaged_shards_and_refuses_five() {
