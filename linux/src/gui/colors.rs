@@ -8,10 +8,12 @@ pub const BG_INPUT_FOCUS: Color = rgb(8, 4, 10);
 pub const BG_BUTTON: Color = rgb(8, 8, 16);
 pub const BG_BUTTON_HOVER: Color = rgb(16, 16, 32);
 
-pub const BORDER_PRIMARY: Color = rgb(60, 8, 100);
+// Nautilus runs from deep cobalt in the shell to cyan along the rim.
+pub const NAUTILUS_CYAN: Color = rgb(32, 180, 204);
+pub const BORDER_PRIMARY: Color = rgb(30, 77, 148);
 pub const BORDER_SECONDARY: Color = rgb(32, 80, 32);
-pub const BORDER_ACCENT: Color = rgb(110, 10, 240);
-pub const BORDER_HOVER: Color = rgb(80, 8, 140);
+pub const BORDER_ACCENT: Color = NAUTILUS_CYAN;
+pub const BORDER_HOVER: Color = rgb(35, 119, 195);
 
 pub const BORDER_PRIMARY_QUERY: Color = rgb(80, 140, 80);
 pub const BORDER_ACCENT_QUERY: Color = rgb(80, 180, 80);
@@ -23,7 +25,7 @@ pub const TEXT_PLACEHOLDER: Color = rgb(80, 70, 80);
 pub const TEXT_PLACEHOLDER_HOVER: Color = rgb(100, 90, 100);
 pub const TEXT_TITLE_BUTTON: Color = rgb(120, 120, 120);
 pub const TEXT_TITLE_BUTTON_HOVER: Color = rgb(100, 250, 100);
-pub const TEXT_STATUS: Color = rgb(170, 130, 230);
+pub const TEXT_STATUS: Color = rgb(116, 184, 244);
 
 pub const BRAND_GREEN: Color = rgb(80, 180, 80);
 pub const BRAND_PURPLE: Color = rgb(150, 4, 250);
