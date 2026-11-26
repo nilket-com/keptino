@@ -1,9 +1,13 @@
-# DigiSafe for Android
+# Keptino for Android
 
 The Android application reads and writes the Linux `.digisafe` format. It uses a Rust
 core for the vault, key derivation and encryption; Kotlin handles the editor,
 Android Keystore, local files and Backblaze. The former plaintext JSON prototype
 is not used or automatically imported.
+
+The Android application ID remains `com.digisafe.app`. Install the new APK
+with the same signing key to upgrade DigiSafe in place and retain its local
+vaults and Android Keystore settings.
 
 ## Build
 
@@ -34,7 +38,7 @@ fallback to a weaker derivation.
 
 ## Open an existing Linux vault
 
-1. Configure a device PIN, pattern or password. In DigiSafe setup, enter the **original pepper seed** used by Linux, or its original
+1. Configure a device PIN, pattern or password. In Keptino setup, enter the **original pepper seed** used by Linux, or its original
    32-byte pepper encoded as 64 hexadecimal characters. A new seed cannot unlock
    an existing vault. Do not paste real credentials into test fixtures or logs.
 2. Optionally enter the Backblaze application key ID and application key. Both
@@ -156,9 +160,9 @@ provides 12 GiB:
 
 ```sh
 sdkmanager 'emulator' 'system-images;android-37.0;default;x86_64'
-printf 'no\n' | avdmanager create avd --name digisafe-api37 \
+printf 'no\n' | avdmanager create avd --name keptino-api37 \
   --package 'system-images;android-37.0;default;x86_64' --device pixel_6
-"$ANDROID_HOME/emulator/emulator" -avd digisafe-api37 -memory 12288 -cores 4 \
+"$ANDROID_HOME/emulator/emulator" -avd keptino-api37 -memory 12288 -cores 4 \
   -no-window -no-audio -no-snapshot -gpu software
 ```
 
@@ -174,4 +178,4 @@ requires a signing configuration and key, which this repository does not contain
 
 Use command-line tools 23.0 when creating the API 37 AVD. Older tools can silently
 write `target=android-0`, causing emulator graphics/system-server crashes. Check
-`~/.android/avd/digisafe-api37.ini` contains `target=android-37.0`.
+`~/.android/avd/keptino-api37.ini` contains `target=android-37.0`.

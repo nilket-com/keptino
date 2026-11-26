@@ -1,4 +1,4 @@
-//! The DigiSafe vault for Android: reads and writes the files of the Linux
+//! The Keptino vault for Android: reads and writes the files of the Linux
 //! application. Kotlin reaches it through the `bridge` module.
 
 pub mod atlas;

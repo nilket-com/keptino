@@ -3,7 +3,7 @@ name = "droid"
 version = "0.2.0"
 edition = "2024"
 authors = ["nilket.com"]
-description = "DigiSafe vault core for Android."
+description = "Keptino vault core for Android."
 
 [lib]
 crate-type = ["cdylib", "rlib"]

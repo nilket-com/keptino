@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.isSensitiveData
 import androidx.compose.ui.semantics.semantics
@@ -38,7 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.digisafe.app.ui.theme.DigiSafeTheme
+import com.digisafe.app.ui.theme.KeptinoTheme
 import javax.crypto.Cipher
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -69,7 +70,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
         val nativeWarnings = try { Core.preflight().toList() } catch (e: RuntimeException) {
             viewModelStore.clear()
-            setContent { DigiSafeTheme { Text(e.message ?: "Device security check failed.", Modifier.safeDrawingPadding().padding(20.dp)) } }
+            setContent { KeptinoTheme { Text(e.message ?: "Device security check failed.", Modifier.safeDrawingPadding().padding(20.dp)) } }
             return
         }
         idleDeadline = savedInstanceState?.getLong("idleDeadline") ?: 0L
@@ -82,12 +83,12 @@ class MainActivity : ComponentActivity() {
                 warnings = nativeWarnings + withContext(Dispatchers.IO) { deviceWarnings(applicationContext) }
                 vm.refreshKeyProtection()
             }
-            DigiSafeTheme { VaultScreen(vm, ::copySecret, ::authenticate, warnings) }
+            KeptinoTheme { VaultScreen(vm, ::copySecret, ::authenticate, warnings) }
         }
     }
     internal suspend fun authenticate(cipher: Cipher): Cipher = withContext(Dispatchers.Main.immediate) {
         check(ready && !isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            "Return to DigiSafe and retry device authentication."
+            "Return to Keptino and retry device authentication."
         }
         suspendCancellableCoroutine { continuation ->
             val signal = CancellationSignal()
@@ -95,7 +96,7 @@ class MainActivity : ComponentActivity() {
             promptSignal = signal
             continuation.invokeOnCancellation { signal.cancel() }
             val prompt = BiometricPrompt.Builder(this@MainActivity)
-                .setTitle("Authenticate for DigiSafe")
+                .setTitle("Authenticate for Keptino")
                 .setAllowedAuthenticators(Authenticators.BIOMETRIC_STRONG or Authenticators.DEVICE_CREDENTIAL)
                 .build()
             try {
@@ -164,7 +165,7 @@ class MainActivity : ComponentActivity() {
         if (vm.busy || !vm.unlocked) { vm.report("Unlock and wait for the current operation to finish before copying"); return }
         val text = vm.secret(id)
         if (text.isEmpty()) { vm.report("This field is empty"); return }
-        val token = "DigiSafe " + java.util.UUID.randomUUID().toString()
+        val token = "Keptino " + java.util.UUID.randomUUID().toString()
         val clip = ClipData.newPlainText(token, text)
         clip.description.extras = PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
         getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
@@ -231,7 +232,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, authenticate: s
     }
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.safeDrawingPadding().imePadding().padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("DigiSafe", style = MaterialTheme.typography.headlineLarge)
+            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineLarge)
             Text(if (vm.unlocked) "${vm.dbName} · ${if (vm.dirty) "unsaved changes" else "unlocked"}" else "Your encrypted vault", style = MaterialTheme.typography.titleMedium)
             if (!vm.unlocked) {
                 vm.keyProtection?.let { Text(it) }

@@ -3,7 +3,7 @@ use std::fmt;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
 	/// The vault file is damaged beyond what erasure coding can repair,
-	/// or is not a DigiSafe vault.
+	/// or is not a Keptino vault.
 	Corrupt(&'static str),
 	/// Authentication failed: wrong password or pepper, or altered data.
 	Decryption,

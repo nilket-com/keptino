@@ -7,7 +7,7 @@
 //!   linux-vault read <db> <password>           entries as a JSON array
 //!   linux-vault write <db> <password> < json   set those entries, then save
 
-use digisafe::storage::{database::Database, entry::PasswordEntry, persistence};
+use keptino::storage::{database::Database, entry::PasswordEntry, persistence};
 use serde_json::{Map, Value, json};
 use std::io::Read;
 use zeroize::Zeroizing;

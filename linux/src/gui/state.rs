@@ -44,7 +44,7 @@ enum AppState {
 	Unlocked(UnlockedState),
 }
 
-pub const APP_NAME: &str = "DigiSafe";
+pub const APP_NAME: &str = "Keptino";
 const COPY_TIMEOUT: Duration = Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 20 });
 const IDLE_TIMEOUT: Duration = Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 240 });
 
@@ -427,7 +427,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					let mut noise = [0u8; 16];
 					getrandom::fill(&mut noise).unwrap();
 					let munge = format!(
-						"DIGISAFE_CLIPBOARD_MUNGE_{:03}_{:040}",
+						"KEPTINO_CLIPBOARD_MUNGE_{:03}_{:040}",
 						idx,
 						u128::from_le_bytes(noise)
 					);

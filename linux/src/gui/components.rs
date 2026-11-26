@@ -34,7 +34,7 @@ pub fn title_bar<'a>() -> Element<'a, Message> {
 			mouse_area(container(row![
 				space::horizontal(),
 				space::horizontal().width(42),
-				text("DigiSafe")
+				text(super::state::APP_NAME)
 					.size(16)
 					.font(Font {
 						weight: font::Weight::Bold,

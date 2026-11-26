@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=DigiSafe
-Comment=A digital safe for secure storage.
+Name=Keptino
+Comment=A password vault by nilket.
 GenericName=Password Manager
-Exec=bash -c "/usr/bin/digisafe 2>&1 | systemd-cat -t digisafe"
-Icon=digisafe
+Exec=bash -c "/usr/bin/keptino 2>&1 | systemd-cat -t keptino"
+Icon=keptino
 Terminal=false
 Type=Application
 Categories=Utility;Security;

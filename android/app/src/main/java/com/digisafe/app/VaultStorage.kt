@@ -59,7 +59,7 @@ class VaultStorage(private val context: Context) {
 
     private fun generateKey(alias: String): SecretKey {
         check(context.getSystemService(KeyguardManager::class.java).isDeviceSecure) {
-            "Set a device PIN, pattern or password to protect DigiSafe setup."
+            "Set a device PIN, pattern or password to protect Keptino setup."
         }
         fun generate(strongBox: Boolean): SecretKey {
             val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
@@ -242,6 +242,6 @@ class Backblaze(private val settings: Settings) {
         val digest = MessageDigest.getInstance("SHA-1").digest(encoded).joinToString("") { "%02x".format(it) }
         request("upload", upload.getString("uploadUrl"), upload.getString("authorizationToken"), encoded, mapOf(
             "X-Bz-File-Name" to URLEncoder.encode("$name.digisafe", "UTF-8").replace("+", "%20"),
-            "Content-Type" to "text/plain", "X-Bz-Content-Sha1" to digest, "X-Bz-Info-Author" to "DigiSafe", "X-Bz-Server-Side-Encryption" to "AES256"))
+            "Content-Type" to "text/plain", "X-Bz-Content-Sha1" to digest, "X-Bz-Info-Author" to "Keptino", "X-Bz-Server-Side-Encryption" to "AES256"))
     }
 }

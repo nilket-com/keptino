@@ -871,35 +871,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "digisafe"
-version = "0.2.0"
-dependencies = [
- "arboard",
- "argon2",
- "aws-credential-types",
- "aws-sigv4",
- "base64ct",
- "blake3",
- "chacha20poly1305",
- "chrono",
- "getrandom 0.4.1",
- "hex",
- "iced",
- "libc",
- "lz4",
- "percent-encoding",
- "quick-xml",
- "reed-solomon-erasure",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "sha3",
- "tiny-skia 0.12.0",
- "zeroize",
-]
-
-[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1987,6 +1958,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecc2af9a1119c51f12a14607e783cb977bde58bc069ff0c3da1095e635d70654"
 dependencies = [
  "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "keptino"
+version = "0.2.1"
+dependencies = [
+ "arboard",
+ "argon2",
+ "aws-credential-types",
+ "aws-sigv4",
+ "base64ct",
+ "blake3",
+ "chacha20poly1305",
+ "chrono",
+ "getrandom 0.4.1",
+ "hex",
+ "iced",
+ "libc",
+ "lz4",
+ "percent-encoding",
+ "quick-xml",
+ "reed-solomon-erasure",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha3",
+ "tiny-skia 0.12.0",
+ "zeroize",
 ]
 
 [[package]]

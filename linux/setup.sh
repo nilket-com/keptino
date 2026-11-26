@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-trap 'printf "DigiSafe setup failed at line %s. Fix the error above and rerun setup.\n" "$LINENO" >&2' ERR
+trap 'printf "Keptino setup failed at line %s. Fix the error above and rerun setup.\n" "$LINENO" >&2' ERR
 
 # Resolve assets and Cargo.toml relative to this script, regardless of the caller's cwd.
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
@@ -251,7 +251,7 @@ require_credential_tools() {
 
 # Exercise user-scoped encryption before requesting any real secrets.
 check_credential_encryption() {
-    printf 'digisafe-setup-check' | systemd-creds encrypt --user --name=setup-check - "$temp_dir/check.cred"
+    printf 'keptino-setup-check' | systemd-creds encrypt --user --name=setup-check - "$temp_dir/check.cred"
     systemd-creds decrypt --user --name=setup-check "$temp_dir/check.cred" /dev/null
 }
 
@@ -305,7 +305,7 @@ if [[ -n "${1:-}" ]]; then
     exit 0
 fi
 
-printf "Checking DigiSafe dependencies...\n"
+printf "Checking Keptino dependencies...\n"
 for tool in cargo rustc sudo apt-get dpkg-query; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         printf "Missing %s. Setup requires Debian/Ubuntu, sudo, and a working Rust toolchain.\n" "$tool" >&2
@@ -346,7 +346,7 @@ credential_format_ok() {
     (( separators == expected_separators ))
 }
 
-# Only the selected provider and the pepper are used by DigiSafe.
+# Only the selected provider and the pepper are used by Keptino.
 read_storage_provider
 unreadable_credentials=0
 for name in digipepper "$active_provider"; do
@@ -388,7 +388,7 @@ if (( unreadable_credentials )); then
     fail 'Setup stopped before the build. Rerun setup after recovering the listed credentials.'
 fi
 
-printf "Building and installing DigiSafe before requesting credentials...\n"
+printf "Building and installing Keptino before requesting credentials...\n"
 cargo deb --install
 
 if [[ ! -e "$config_dir/digipepper.cred" ]]; then
@@ -409,4 +409,4 @@ else
     active_provider=$selected_provider
 fi
 
-printf "DigiSafe setup finished. Vault sync uses %s.\n" "$(provider_label "$active_provider")"
+printf "Keptino setup finished. Vault sync uses %s.\n" "$(provider_label "$active_provider")"

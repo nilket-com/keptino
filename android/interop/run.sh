@@ -30,7 +30,7 @@ say() { printf '\n== %s\n' "$*"; }
 # A CA the Linux code is told to trust, and a certificate for Backblaze's
 # hosts signed by it.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
-	-subj '/CN=DigiSafe test CA' -addext 'basicConstraints=critical,CA:TRUE' \
+	-subj '/CN=Keptino test CA' -addext 'basicConstraints=critical,CA:TRUE' \
 	-addext 'keyUsage=critical,keyCertSign' \
 	-keyout "$work/ca.key" -out "$work/ca.pem" 2>/dev/null
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \

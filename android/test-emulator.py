@@ -100,7 +100,7 @@ for apk in ['app/build/outputs/apk/debug/app-debug.apk', 'app/build/outputs/apk/
 device_pin = None if args.no_device_pin else args.device_pin
 if device_pin: set_device_pin(device_pin)
 try:
-  with tempfile.TemporaryDirectory(prefix='digisafe-b2-test-') as directory:
+  with tempfile.TemporaryDirectory(prefix='keptino-b2-test-') as directory:
       with socket.socket() as sock:
           sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
       with (report / 'b2mock.log').open('w') as log:

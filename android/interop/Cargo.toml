@@ -14,7 +14,7 @@ name = "android-vault"
 path = "src/android_vault.rs"
 
 [dependencies]
-digisafe = { path = "../../linux" }
+keptino = { path = "../../linux" }
 droid = { path = "../droid" }
 hex = "0.4.3"
 serde_json = "1.0.149"

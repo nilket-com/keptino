@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A local stand-in for the Backblaze B2 calls DigiSafe makes.
+"""A local stand-in for the Backblaze B2 calls Keptino makes.
 
 Plain HTTP for the Android app (point its B2 base URL here; from the
 emulator the host is 10.0.2.2). With --tls-cert/--tls-key it is also an

@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "DigiSafe"
+rootProject.name = "Keptino"
 include(":app")

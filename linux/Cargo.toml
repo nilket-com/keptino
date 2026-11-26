@@ -1,19 +1,24 @@
 [package]
-name = "digisafe"
-version = "0.2.0"
+name = "keptino"
+version = "0.2.1"
 edition = "2024"
 resolver = "3"
 authors = ["nilket.com"]
-description = "A digital safe for secure storage."
+description = "A password vault by nilket."
 
 [package.metadata.deb]
 maintainer = "nilket.com"
 copyright = "2026, nilket.com"
 license-file = ["../LICENSE", "0"]
+provides = "digisafe"
+conflicts = "digisafe"
+replaces = "digisafe"
 assets = [
-    ["target/release/digisafe", "/usr/bin/digisafe", "755"],
-    ["digisafe.png", "/usr/share/pixmaps/digisafe.png", "644"],
-    ["digisafe.desktop", "/usr/share/applications/digisafe.desktop", "644"],
+    ["target/release/keptino", "/usr/bin/keptino", "755"],
+    ["debian/digisafe", "/usr/bin/digisafe", "755"],
+    ["keptino.png", "/usr/share/pixmaps/keptino.png", "644"],
+    # Keep the desktop ID used by existing pinned launchers.
+    ["keptino.desktop", "/usr/share/applications/digisafe.desktop", "644"],
 ]
 depends = "argon2, systemd, libcap2-bin"
 maintainer-scripts = "debian"

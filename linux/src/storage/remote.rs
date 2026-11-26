@@ -244,7 +244,7 @@ fn s3_request(
 	} else {
 		Method::GET
 	};
-	let identity = Credentials::new(id, secret, None, None, "DigiSafe").into();
+	let identity = Credentials::new(id, secret, None, None, "Keptino").into();
 	let mut settings = SigningSettings::default();
 	settings.percent_encoding_mode = PercentEncodingMode::Single;
 	settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
@@ -337,7 +337,7 @@ async fn backblaze_request(
 			.header("X-Bz-File-Name", key)
 			.header("Content-Type", "text/plain")
 			.header("X-Bz-Content-Sha1", checksum)
-			.header("X-Bz-Info-Author", "DigiSafe")
+			.header("X-Bz-Info-Author", "Keptino")
 			.header("X-Bz-Server-Side-Encryption", "AES256")
 			.body(body))
 	} else {
