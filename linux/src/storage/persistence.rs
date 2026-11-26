@@ -9,7 +9,13 @@ use crate::{
 	},
 };
 use std::{
-	collections::HashMap, env, fs, io::Write, mem, path::PathBuf, process::Command,
+	collections::HashMap,
+	env, fs,
+	io::Write,
+	mem,
+	os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+	path::{Path, PathBuf},
+	process::Command,
 	time::SystemTime,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -22,7 +28,12 @@ const NONCE_SIZE: usize = 24;
 fn base_path() -> PathBuf {
 	let mut apath = env::home_dir().unwrap_or_default();
 	apath.push(".config/keptino/");
-	fs::create_dir_all(&apath).ok();
+	// Private to the user from the first run, before setup.sh has chmod'ed it.
+	fs::DirBuilder::new()
+		.recursive(true)
+		.mode(0o700)
+		.create(&apath)
+		.ok();
 	apath
 }
 
@@ -466,13 +477,27 @@ fn decode_erasure(encoded: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn to_file(dat: &[u8], db_name: &str) -> std::io::Result<()> {
-	let tmp_path = temp_path(db_name);
-	let mut file = fs::File::create(&tmp_path)?;
+	write_atomic(&temp_path(db_name), &db_path(db_name), dat)
+}
+
+/// Writes the vault through a temporary file that is readable by its owner
+/// only, whatever the process umask, then renames it into place. A temporary
+/// left by an interrupted save is replaced, never appended to or reused.
+fn write_atomic(tmp_path: &Path, path: &Path, dat: &[u8]) -> std::io::Result<()> {
+	match fs::remove_file(tmp_path) {
+		Ok(()) => {}
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+		Err(err) => return Err(err),
+	}
+	let mut file = fs::OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.mode(0o600)
+		.open(tmp_path)?;
 	file.write_all(dat)?;
 	file.sync_all()?;
 	mem::drop(file);
-	let path = db_path(db_name);
-	fs::rename(&tmp_path, &path)?;
+	fs::rename(tmp_path, path)?;
 	if let Some(parent) = path.parent() {
 		let dir = fs::File::open(parent)?;
 		dir.sync_all()?;
@@ -483,6 +508,25 @@ fn to_file(dat: &[u8], db_name: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn vault_files_are_private_and_replace_stale_temporaries() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = env::temp_dir().join(format!("keptino-write-{}", std::process::id()));
+		fs::create_dir_all(&dir).unwrap();
+		let tmp = dir.join(".main.keptino");
+		let path = dir.join("main.keptino");
+		fs::write(&tmp, b"interrupted").unwrap();
+		fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+		write_atomic(&tmp, &path, b"vault").unwrap();
+		assert_eq!(fs::read(&path).unwrap(), b"vault");
+		assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+		assert!(!tmp.exists());
+		write_atomic(&tmp, &path, b"second").unwrap();
+		assert_eq!(fs::read(&path).unwrap(), b"second");
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
 	#[test]
 	fn cloud_envelopes_roundtrip_and_reject_damaged_input() {
 		let db = Database::test_database();
