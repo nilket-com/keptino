@@ -49,11 +49,15 @@ fn set_not_dumpable() {
 	}
 }
 
+/// A launcher that carries no Wayland socket in its environment gets the
+/// compositor's default. An explicit socket is left alone: the build has no
+/// X11 backend, so a second compositor is not a downgrade.
 pub fn force_secure_display() {
-	if env::var("WAYLAND_DISPLAY").ok().as_deref() != Some("wayland-0") {
-		unsafe {
-			env::set_var("WAYLAND_DISPLAY", "wayland-0");
-		}
+	if env::var("WAYLAND_DISPLAY").is_ok_and(|socket| !socket.is_empty()) {
+		return;
+	}
+	unsafe {
+		env::set_var("WAYLAND_DISPLAY", "wayland-0");
 	}
 }
 
@@ -86,10 +90,12 @@ fn check_tme() {
 }
 
 fn sniff_luks() {
-	let output =
-		String::from_utf8_lossy(&Command::new("lsblk").arg("-e7").output().unwrap().stdout)
-			.to_string();
-	let is_crypt = output.contains(" crypt ");
+	// An absolute path, so a PATH entry the session controls cannot substitute it.
+	let Ok(output) = Command::new("/usr/bin/lsblk").arg("-e7").output() else {
+		warn("lsblk is unavailable; LUKS drive encryption was not checked.");
+		return;
+	};
+	let is_crypt = String::from_utf8_lossy(&output.stdout).contains(" crypt ");
 	if !is_crypt {
 		warn("LUKS drive encryption not detected.");
 	}

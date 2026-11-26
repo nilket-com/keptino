@@ -386,7 +386,9 @@ if (( ${#missing[@]} )); then
 fi
 if ! cargo deb --version >/dev/null 2>&1; then
     # --force: cargo skips a crate it has on record even when the binary is broken.
-    cargo install cargo-deb --locked --force
+    # The version is pinned because `cargo install` ignores the dependency
+    # cooldown in .cargo/config.toml; bump it deliberately after review.
+    cargo install cargo-deb --version 3.6.3 --locked --force
     cargo deb --version >/dev/null
 fi
 require_credential_tools argon2 systemd-creds systemd-ask-password
