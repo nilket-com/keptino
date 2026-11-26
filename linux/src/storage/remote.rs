@@ -62,7 +62,7 @@ impl Provider {
 
 	fn credentials(self, dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
 		let name = self.name();
-		let output = Command::new("systemd-creds")
+		let output = Command::new(super::SYSTEMD_CREDS)
 			.args(["decrypt", "--user", &format!("--name={name}")])
 			.arg(dir.join(format!("{name}.cred")))
 			.arg("-")
@@ -152,19 +152,14 @@ impl Provider {
 		let resp = self.request(credentials, db_name, None).await?;
 		let status = resp.status();
 		if status == StatusCode::NOT_FOUND {
-			let bytes = resp
-				.bytes()
-				.await
-				.map_err(|_| "Incomplete storage response.")?;
+			let bytes = bounded_body(resp, "storage response").await?;
 			if self.missing_key(&bytes) {
 				return Ok(None);
 			}
 		} else if status == StatusCode::OK {
-			let body = resp
-				.text()
-				.await
-				.map_err(|_| "Incomplete vault download.")?;
-			let data = Base64::decode_vec(&body).map_err(|_| "Invalid remote vault encoding.")?;
+			let body = bounded_body(resp, "vault download").await?;
+			let text = std::str::from_utf8(&body).map_err(|_| "Invalid remote vault encoding.")?;
+			let data = Base64::decode_vec(text).map_err(|_| "Invalid remote vault encoding.")?;
 			return Ok(Some(data));
 		}
 		Err(format!(
@@ -187,6 +182,33 @@ impl Provider {
 				.is_ok_and(|e| e.code == "NoSuchKey")
 		}
 	}
+}
+
+/// Vault objects are kilobytes to a few megabytes. This process cannot swap,
+/// so a response is read in chunks and abandoned once it exceeds this bound
+/// rather than trusting a Content-Length the server may omit.
+const MAX_REMOTE_BYTES: usize = 64 << 20;
+
+async fn bounded_body(mut resp: Response, what: &str) -> Result<Vec<u8>> {
+	let too_large = || format!("The {what} exceeds {} MiB.", MAX_REMOTE_BYTES >> 20);
+	if resp
+		.content_length()
+		.is_some_and(|len| len > MAX_REMOTE_BYTES as u64)
+	{
+		return Err(too_large());
+	}
+	let mut body = Vec::new();
+	while let Some(chunk) = resp
+		.chunk()
+		.await
+		.map_err(|_| format!("Incomplete {what}."))?
+	{
+		if body.len().saturating_add(chunk.len()) > MAX_REMOTE_BYTES {
+			return Err(too_large());
+		}
+		body.extend_from_slice(&chunk);
+	}
+	Ok(body)
 }
 
 // Bind uploads to the configuration used to open this vault without retaining the API secret.

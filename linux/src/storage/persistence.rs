@@ -6,6 +6,7 @@ use crate::{
 		entry::{MetaEntry, MetaField},
 		remote::Remote,
 		secret::SecretMemory,
+		SYSTEMD_CREDS,
 	},
 };
 use std::{
@@ -229,7 +230,7 @@ pub async fn load(
 		source: "remote",
 	});
 	let database = match (local, remote) {
-		(None, None) => new_db(db_name, master_password),
+		(None, None) => new_db(db_name, master_password)?,
 		(Some(only), None) | (None, Some(only)) => open_candidates(only, None, master_password)?.0,
 		(Some(local), Some(remote)) => {
 			if local.envelope.salt != remote.envelope.salt {
@@ -289,7 +290,7 @@ fn open_candidates(
 	second: Option<Candidate>,
 	password: Zeroizing<String>,
 ) -> Result<(Database, Option<String>), String> {
-	let key = master_key_derivation(password, first.envelope.salt);
+	let key = master_key_derivation(password, first.envelope.salt)?;
 	if let Some(idb) = first.envelope.unlock(&key) {
 		info(&format!("{} database loaded.", first.source));
 		return Ok((Database::old(key, idb), None));
@@ -318,7 +319,7 @@ async fn remote_revision(provider: &Remote, db_name: &str) -> Result<Option<u64>
 	}
 }
 
-fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
+fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database, String> {
 	let created_ts = SystemTime::now()
 		.duration_since(SystemTime::UNIX_EPOCH)
 		.unwrap()
@@ -326,14 +327,14 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
 		.to_string();
 	let mut salt = [0u8; SALT_SIZE];
 	getrandom::fill(&mut salt).unwrap();
-	let master_key = master_key_derivation(master_password, salt);
+	let master_key = master_key_derivation(master_password, salt)?;
 	let db = Database::new(master_key);
 	db.set_meta_entry(MetaEntry::new("db_name", db_name));
 	db.set_meta_entry(MetaEntry::new("nonce", "0"));
 	db.set_meta_entry(MetaEntry::new("salt", &to_base64(&salt)));
 	db.set_meta_entry(MetaEntry::new("created_ts", &created_ts));
 	db.set_meta_entry(MetaEntry::new("modified_ts", &created_ts));
-	db
+	Ok(db)
 }
 
 /// The plaintext layer of a vault file. `aad` is empty for format 1 and the
@@ -449,25 +450,33 @@ fn db_to_vec(db: &Database, upgrade: bool) -> Vec<u8> {
 	encode_erasure(&db_bin)
 }
 
-fn load_pepper() -> [u8; PEPPER_SIZE] {
-	let pepper_output = Command::new("systemd-creds")
+/// The TPM-sealed pepper, released by systemd-creds for this user. A missing
+/// or refused credential is an unlock error the user can act on, not a crash.
+fn load_pepper() -> Result<[u8; PEPPER_SIZE], String> {
+	let pepper_output = Command::new(SYSTEMD_CREDS)
 		.args(["decrypt", "--user", "--name=pepper", &pepper_path()])
 		.output()
-		.unwrap();
+		.map_err(|_| "Cannot run systemd-creds to read the pepper.")?;
 	let pepper_hex = Zeroizing::new(pepper_output.stdout);
+	if !pepper_output.status.success() {
+		return Err(
+			"The pepper credential cannot be decrypted. Run setup, or --restore-pepper with the original seed."
+				.into(),
+		);
+	}
 	let mut pepper = [0u8; PEPPER_SIZE];
-	hex::decode_to_slice(
-		std::str::from_utf8(&pepper_hex).unwrap().trim(),
-		&mut pepper,
-	)
-	.unwrap();
-	pepper
+	let text = std::str::from_utf8(&pepper_hex).map_err(|_| "Invalid pepper credential.")?;
+	hex::decode_to_slice(text.trim(), &mut pepper).map_err(|_| "Invalid pepper credential.")?;
+	Ok(pepper)
 }
 
-fn master_key_derivation(password: Zeroizing<String>, salt: [u8; SALT_SIZE]) -> SecretMemory {
+fn master_key_derivation(
+	password: Zeroizing<String>,
+	salt: [u8; SALT_SIZE],
+) -> Result<SecretMemory, String> {
 	use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
 	use sha3::{Digest, Sha3_256};
-	let pepper = load_pepper();
+	let pepper = load_pepper()?;
 	let mut pre_hasher = Sha3_256::new();
 	pre_hasher.update(salt);
 	pre_hasher.update(pepper);
@@ -505,7 +514,7 @@ fn master_key_derivation(password: Zeroizing<String>, salt: [u8; SALT_SIZE]) -> 
 	let master_key = SecretMemory::new_pages(1).unwrap();
 	master_key.write(0, &post_hash).unwrap();
 	post_hash.zeroize();
-	master_key
+	Ok(master_key)
 }
 
 fn to_base64(msg: &[u8]) -> String {
