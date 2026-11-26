@@ -11,6 +11,11 @@ pub enum Error {
 	Invalid(&'static str),
 	/// Key derivation could not run, typically for lack of memory.
 	Kdf(String),
+	/// Locked key memory could not be set up.
+	Memory(&'static str),
+	/// The process is traced, instrumented or loaded through an injector.
+	/// The application refuses to run, as the Linux application exits.
+	Security(String),
 }
 
 impl fmt::Display for Error {
@@ -20,6 +25,8 @@ impl fmt::Display for Error {
 			Error::Decryption => write!(f, "Decryption failure."),
 			Error::Invalid(what) => write!(f, "Invalid argument: {what}."),
 			Error::Kdf(what) => write!(f, "Key derivation failure: {what}."),
+			Error::Memory(what) => write!(f, "Memory failure: {what}."),
+			Error::Security(what) => write!(f, "SECURITY VIOLATION: {what}."),
 		}
 	}
 }

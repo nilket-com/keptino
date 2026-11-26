@@ -214,6 +214,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "jni",
+ "libc",
  "lz4",
  "reed-solomon-erasure",
  "sha3",

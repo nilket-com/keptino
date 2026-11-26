@@ -5,15 +5,17 @@
 use crate::{
 	crypto::{self, PEPPER_SIZE},
 	error::{Error, Result},
+	security,
 	vault::Vault,
 };
 use jni::{
 	JNIEnv,
 	objects::{JByteArray, JObject, JString},
-	sys::{jboolean, jbyteArray, jint, jlong},
+	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
 use std::{
 	collections::HashMap,
+	ffi::c_void,
 	panic::{AssertUnwindSafe, catch_unwind},
 	sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
@@ -118,6 +120,36 @@ fn guard<'local, T>(
 		let _ = env.throw_new("java/lang/RuntimeException", message);
 	}
 	fallback
+}
+
+/// Hardens the process as soon as the library loads, before Kotlin asks
+/// for anything; `preflight` repeats it and adds the checks that can fail.
+#[unsafe(no_mangle)]
+pub extern "system" fn JNI_OnLoad(_vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
+	security::harden_process();
+	JNI_VERSION_1_6
+}
+
+/// Startup checks: throws `SECURITY VIOLATION: ...` when the process is
+/// traced or instrumented, else returns warnings for the user, possibly none.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_digisafe_app_Core_preflight<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let warnings = security::preflight()?;
+		let count = jint::try_from(warnings.len()).map_err(|_| Error::Invalid("too many warnings"))?;
+		let array = env
+			.new_object_array(count, "java/lang/String", JObject::null())
+			.map_err(jni_error)?;
+		for (index, warning) in warnings.iter().enumerate() {
+			let text = env.new_string(warning).map_err(jni_error)?;
+			env.set_object_array_element(&array, index as jint, text)
+				.map_err(jni_error)?;
+		}
+		Ok(array.into_raw())
+	})
 }
 
 #[unsafe(no_mangle)]

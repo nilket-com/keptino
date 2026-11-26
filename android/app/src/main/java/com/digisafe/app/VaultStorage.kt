@@ -1,22 +1,32 @@
 package com.digisafe.app
 
-import android.content.Context
 import android.app.KeyguardManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import android.util.AtomicFile
 import android.util.Base64
-import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 
 const val PRODUCTION_MEMORY_KIB = 4194304
 const val MAX_VAULT_BYTES = 64 * 1024 * 1024
@@ -26,34 +36,141 @@ data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: S
 }
 
 class VaultStorage(private val context: Context) {
-    private val settingsFile = AtomicFile(File(context.filesDir, "settings.enc"))
-    fun configured() = settingsFile.baseFile.exists()
-    private fun key(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey("digisafe-settings", null) as? SecretKey)?.let { return it }
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-            init(KeyGenParameterSpec.Builder("digisafe-settings", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setUnlockedDeviceRequired(context.getSystemService(KeyguardManager::class.java).isDeviceSecure).build())
-        }.generateKey()
+    private companion object { val settingsLock = Mutex() }
+
+    private val legacy = AtomicFile(File(context.filesDir, "settings.enc"))
+    private val secure = AtomicFile(File(context.filesDir, "settings-v2.enc"))
+    private val store get() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    private val legacyAlias = "digisafe-settings"
+    private val securePrefix = "digisafe-settings-v2-"
+
+    // AtomicFile.openRead also recovers a .bak left by older framework versions.
+    private fun AtomicFile.present() = baseFile.exists() || File(baseFile.path + ".bak").exists()
+
+    fun configured() = secure.present() || legacy.present()
+
+    // The v2 file contains a 16-byte key ID, a 12-byte GCM IV, and ciphertext + tag.
+    // A fresh alias per write keeps the previous file/key pair usable until atomic commit.
+    private fun alias(bytes: ByteArray): String {
+        require(bytes.size >= 16 + 12 + 16) { "Invalid protected settings" }
+        val id = ByteBuffer.wrap(bytes)
+        return securePrefix + UUID(id.long, id.long)
     }
-    fun writeSettings(settings: Settings) {
-        val plain = JSONObject().put("pepper", Base64.encodeToString(settings.pepper, Base64.NO_WRAP))
-            .put("keyId", settings.keyId).put("appKey", settings.appKey).put("authUrl", settings.authUrl).toString().toByteArray()
+
+    private fun generateKey(alias: String): SecretKey {
+        check(context.getSystemService(KeyguardManager::class.java).isDeviceSecure) {
+            "Set a device PIN, pattern or password to protect DigiSafe setup."
+        }
+        fun generate(strongBox: Boolean): SecretKey {
+            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUnlockedDeviceRequired(true)
+                .setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
+                .setInvalidatedByBiometricEnrollment(true)
+                .setIsStrongBoxBacked(strongBox)
+                .build()
+            return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply { init(spec) }.generateKey()
+        }
+        if (context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)) {
+            try { return generate(true) } catch (_: StrongBoxUnavailableException) { /* Try the default Keystore. */ }
+        }
+        return generate(false)
+    }
+
+    suspend fun keyProtection(): String? = settingsLock.withLock {
+        if (!secure.present()) return@withLock if (legacy.present()) "Setup protection will be upgraded on authentication." else null
+        val key = store.getKey(alias(secure.readFully()), null) as? SecretKey ?: return@withLock "Settings key unavailable."
+        val info = SecretKeyFactory.getInstance(key.algorithm, "AndroidKeyStore").getKeySpec(key, KeyInfo::class.java) as KeyInfo
+        if (Build.VERSION.SDK_INT >= 31) when (info.securityLevel) {
+            KeyProperties.SECURITY_LEVEL_STRONGBOX -> "Settings key protected by StrongBox."
+            KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "Settings key protected by the trusted execution environment."
+            KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE -> "Settings key is hardware-backed."
+            KeyProperties.SECURITY_LEVEL_SOFTWARE -> "Settings key is software-backed."
+            else -> "Settings key security level is unknown."
+        } else {
+            @Suppress("DEPRECATION")
+            if (info.isInsideSecureHardware) "Settings key is hardware-backed." else "Settings key is software-backed."
+        }
+    }
+
+    private fun parse(plain: ByteArray): Settings {
+        val json = JSONObject(String(plain, Charsets.UTF_8))
+        return Settings(Base64.decode(json.getString("pepper"), Base64.DEFAULT), json.getString("keyId"), json.getString("appKey"), json.getString("authUrl"))
+    }
+
+    private fun decryptCipher(alias: String, bytes: ByteArray, offset: Int): Cipher {
+        val key = store.getKey(alias, null) as? SecretKey ?: error("Settings key unavailable. Re-enter setup using the original pepper.")
+        return Cipher.getInstance("AES/GCM/NoPadding").apply {
+            try { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, bytes, offset, 12)) }
+            catch (e: KeyPermanentlyInvalidatedException) {
+                throw IllegalStateException("Settings key invalidated. Use Change setup with the original pepper.", e)
+            }
+        }
+    }
+
+    private suspend fun replaceSettings(authenticate: suspend (Cipher) -> Cipher, plaintext: () -> ByteArray) {
+        val previous = if (secure.present()) runCatching { alias(secure.readFully()) }.getOrNull() else null
+        val id = UUID.randomUUID()
+        val name = securePrefix + id
+        val key = generateKey(name)
+        var committed = false
         try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
-            writeAtomic(settingsFile, cipher.iv + cipher.doFinal(plain))
-        } finally { plain.fill(0) }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
+            val authorized = authenticate(cipher)
+            val plain = plaintext()
+            val encrypted = try { authorized.doFinal(plain) } finally { plain.fill(0) }
+            val header = ByteBuffer.allocate(16).putLong(id.mostSignificantBits).putLong(id.leastSignificantBits).array()
+            val blob = header + authorized.iv + encrypted
+            writeAtomic(secure, blob)
+            committed = true
+            // Some AtomicFile implementations log a failed rename instead of throwing.
+            // Keep both keys if the committed file cannot be verified.
+            check(secure.readFully().contentEquals(blob)) { "Protected setup was not saved. Retry setup." }
+        } finally {
+            if (!committed) store.deleteEntry(name)
+        }
+        if (previous != null) store.deleteEntry(previous)
+        retireLegacy()
     }
-    fun settings(): Settings {
-        val bytes = settingsFile.readFully()
-        require(bytes.size >= 28) { "Invalid saved settings" }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }
-        val plain = cipher.doFinal(bytes, 12, bytes.size - 12)
-        return try {
-            val json = JSONObject(String(plain, Charsets.UTF_8))
-            Settings(Base64.decode(json.getString("pepper"), Base64.DEFAULT), json.getString("keyId"), json.getString("appKey"), json.getString("authUrl"))
-        } finally { plain.fill(0) }
+
+    private fun retireLegacy() {
+        if (legacy.present()) {
+            store.deleteEntry(legacyAlias)
+            legacy.delete()
+        }
+    }
+
+    suspend fun writeSettings(settings: Settings, authenticate: suspend (Cipher) -> Cipher) = settingsLock.withLock {
+        replaceSettings(authenticate) {
+            JSONObject().put("pepper", Base64.encodeToString(settings.pepper, Base64.NO_WRAP))
+                .put("keyId", settings.keyId).put("appKey", settings.appKey).put("authUrl", settings.authUrl).toString().toByteArray()
+        }
+    }
+
+    suspend fun settings(authenticate: suspend (Cipher) -> Cipher): Settings = settingsLock.withLock {
+        if (secure.present()) {
+            val bytes = secure.readFully()
+            val cipher = authenticate(decryptCipher(alias(bytes), bytes, 16))
+            val plain = cipher.doFinal(bytes, 28, bytes.size - 28)
+            // Finish retiring the old credential if a prior migration was interrupted after commit.
+            return@withLock try { retireLegacy(); parse(plain) } finally { plain.fill(0) }
+        }
+        val bytes = legacy.readFully()
+        require(bytes.size >= 28) { "Invalid legacy settings" }
+        var migrated: Settings? = null
+        try {
+            replaceSettings(authenticate) {
+                val plain = decryptCipher(legacyAlias, bytes, 0).doFinal(bytes, 12, bytes.size - 12)
+                try { migrated = parse(plain); plain } catch (e: Exception) { plain.fill(0); throw e }
+            }
+            checkNotNull(migrated)
+        } catch (e: Exception) {
+            migrated?.pepper?.fill(0)
+            throw e
+        }
     }
     fun file(name: String): File {
         require(name.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "Use a database name containing letters, digits, dots, underscores or hyphens" }

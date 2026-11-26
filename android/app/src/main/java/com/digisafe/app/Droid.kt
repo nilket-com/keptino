@@ -2,6 +2,7 @@ package com.digisafe.app
 
 object Core {
     init { System.loadLibrary("droid") }
+    @JvmStatic external fun preflight(): Array<String>
     @JvmStatic external fun derivePepper(seed: ByteArray, memKib: Int): ByteArray
     @JvmStatic external fun open(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int): Long
     @JvmStatic external fun modifiedTs(h: Long): Long

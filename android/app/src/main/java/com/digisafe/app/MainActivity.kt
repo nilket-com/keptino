@@ -3,11 +3,17 @@ package com.digisafe.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.hardware.biometrics.BiometricManager.Authenticators
+import android.hardware.biometrics.BiometricPrompt
+import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.os.SystemClock
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,6 +28,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.isSensitiveData
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -31,8 +39,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.digisafe.app.ui.theme.DigiSafeTheme
+import javax.crypto.Cipher
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -40,20 +52,105 @@ class MainActivity : ComponentActivity() {
     private val timer = Handler(Looper.getMainLooper())
     private var idleDeadline = 0L
     private var clipboardDeadline = 0L
-    private val idleLock = Runnable { if (SystemClock.elapsedRealtime() >= idleDeadline) vm.lock() }
+    private var ready = false
+    private var promptSignal: CancellationSignal? = null
+    private val idleLock = Runnable {
+        if (SystemClock.elapsedRealtime() >= idleDeadline) { promptSignal?.cancel(); vm.lock() }
+    }
     private var clipboardToken: String? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        setContent { DigiSafeTheme { VaultScreen(vm, ::copySecret) } }
+        window.decorView.apply {
+            filterTouchesWhenObscured = true
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
+            if (Build.VERSION.SDK_INT >= 34) setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+        }
+        if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false)
+        val nativeWarnings = try { Core.preflight().toList() } catch (e: RuntimeException) {
+            viewModelStore.clear()
+            setContent { DigiSafeTheme { Text(e.message ?: "Device security check failed.", Modifier.safeDrawingPadding().padding(20.dp)) } }
+            return
+        }
+        idleDeadline = savedInstanceState?.getLong("idleDeadline") ?: 0L
+        clipboardDeadline = savedInstanceState?.getLong("clipboardDeadline") ?: 0L
+        clipboardToken = savedInstanceState?.getString("clipboardToken")
+        ready = true
+        setContent {
+            var warnings by remember { mutableStateOf(nativeWarnings) }
+            LaunchedEffect(Unit) {
+                warnings = nativeWarnings + withContext(Dispatchers.IO) { deviceWarnings(applicationContext) }
+                vm.refreshKeyProtection()
+            }
+            DigiSafeTheme { VaultScreen(vm, ::copySecret, ::authenticate, warnings) }
+        }
     }
-    override fun onUserInteraction() { super.onUserInteraction(); armIdleLock() }
+    internal suspend fun authenticate(cipher: Cipher): Cipher = withContext(Dispatchers.Main.immediate) {
+        check(ready && !isFinishing && !isDestroyed && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            "Return to DigiSafe and retry device authentication."
+        }
+        suspendCancellableCoroutine { continuation ->
+            val signal = CancellationSignal()
+            check(promptSignal == null) { "Device authentication is already in progress." }
+            promptSignal = signal
+            continuation.invokeOnCancellation { signal.cancel() }
+            val prompt = BiometricPrompt.Builder(this@MainActivity)
+                .setTitle("Authenticate for DigiSafe")
+                .setAllowedAuthenticators(Authenticators.BIOMETRIC_STRONG or Authenticators.DEVICE_CREDENTIAL)
+                .build()
+            try {
+                prompt.authenticate(BiometricPrompt.CryptoObject(cipher), signal, mainExecutor, object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        if (promptSignal === signal) promptSignal = null
+                        if (!continuation.isActive) return
+                        val authorized = result.cryptoObject?.cipher
+                        if (authorized === cipher && !signal.isCanceled) {
+                            armIdleLock()
+                            continuation.resume(authorized)
+                        } else continuation.resumeWithException(IllegalStateException("Device authentication was interrupted."))
+                    }
+                    override fun onAuthenticationError(code: Int, message: CharSequence) {
+                        if (promptSignal === signal) promptSignal = null
+                        val detail = when (code) {
+                            BiometricPrompt.BIOMETRIC_ERROR_CANCELED,
+                            BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED -> "Authentication cancelled."
+                            else -> message.toString()
+                        }
+                        if (continuation.isActive) continuation.resumeWithException(IllegalStateException(detail))
+                    }
+                })
+            } catch (e: Exception) {
+                promptSignal = null
+                throw e
+            }
+        }
+    }
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (event.flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED != 0) return false
+        return super.dispatchTouchEvent(event)
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong("idleDeadline", idleDeadline)
+        outState.putLong("clipboardDeadline", clipboardDeadline)
+        outState.putString("clipboardToken", clipboardToken)
+    }
+    override fun onDestroy() {
+        promptSignal?.cancel()
+        timer.removeCallbacksAndMessages(null)
+        super.onDestroy()
+    }
+    override fun onUserInteraction() { super.onUserInteraction(); if (ready) armIdleLock() }
     override fun onResume() {
         super.onResume()
+        if (!ready) return
         val now = SystemClock.elapsedRealtime()
-        if (idleDeadline != 0L && now >= idleDeadline) vm.lock()
+        if (idleDeadline != 0L && now >= idleDeadline) idleLock.run()
         if (clipboardToken != null && now >= clipboardDeadline) clearClipboard()
         if (idleDeadline == 0L || now >= idleDeadline) armIdleLock()
+        else { timer.removeCallbacks(idleLock); timer.postDelayed(idleLock, idleDeadline - now) }
+        val token = clipboardToken
+        if (token != null && now < clipboardDeadline) timer.postDelayed({ if (clipboardToken == token) clearClipboard() }, clipboardDeadline - now)
     }
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
@@ -90,7 +187,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit) {
+private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, authenticate: suspend (Cipher) -> Cipher, warnings: List<String>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
@@ -136,6 +233,10 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit) {
         Column(Modifier.safeDrawingPadding().imePadding().padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("DigiSafe", style = MaterialTheme.typography.headlineLarge)
             Text(if (vm.unlocked) "${vm.dbName} · ${if (vm.dirty) "unsaved changes" else "unlocked"}" else "Your encrypted vault", style = MaterialTheme.typography.titleMedium)
+            if (!vm.unlocked) {
+                vm.keyProtection?.let { Text(it) }
+                warnings.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
             if (vm.busy) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Working… Password derivation uses 4 GiB of memory.") }
             if (vm.status.isNotEmpty()) Text(vm.status)
             if (!vm.configured) {
@@ -147,12 +248,12 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit) {
                 Input("Application key ID", keyId, { keyId = it }, enabled = !vm.busy)
                 Input("Application key", appKey, { appKey = it }, secret = true, enabled = !vm.busy)
                 if (BuildConfig.DEBUG) Input("Backblaze API base URL", authUrl, { authUrl = it }, enabled = !vm.busy)
-                Button(enabled = !vm.busy, onClick = { vm.setup(seed, pepper, keyId, appKey, authUrl); seed = ""; pepper = ""; appKey = "" }) { Text("Save setup") }
+                Button(enabled = !vm.busy, onClick = { vm.setup(seed, pepper, keyId, appKey, authUrl, authenticate); seed = ""; pepper = ""; appKey = "" }) { Text("Save setup") }
             } else if (!vm.unlocked) {
                 Input("Database name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
                 Input("Master password", password, { password = it }, secret = true, enabled = !vm.busy)
                 Row { Checkbox(offline, { offline = it }, enabled = !vm.busy); Text("Open local copy only", Modifier.padding(top = 12.dp)) }
-                Button(enabled = !vm.busy, onClick = { vm.unlock(password, offline); password = "" }) { Text("Unlock") }
+                Button(enabled = !vm.busy, onClick = { vm.unlock(password, offline, authenticate); password = "" }) { Text("Unlock") }
                 OutlinedButton(enabled = !vm.busy, onClick = { import.launch(arrayOf("*/*")) }) { Text("Import Linux vault") }
                 OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
                 Text("Import preserves the source file and refuses to replace an existing local vault. Production Linux vaults require 4 GiB of available memory to unlock.")
@@ -168,7 +269,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit) {
                     val visible = !secret || id in vm.revealed
                     OutlinedTextField(value = if (visible) vm.fields[id - 1] else "", onValueChange = { vm.edit(id, it) }, label = { Text(label) },
                         placeholder = { if (!visible) Text("Hidden") }, readOnly = !visible, enabled = !vm.busy,
-                        modifier = Modifier.fillMaxWidth(), singleLine = id != 5,
+                        modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret }, singleLine = id != 5,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
                         trailingIcon = if (secret) {{ TextButton(enabled = !vm.busy, onClick = { vm.reveal(id) }) { Text(if (visible) "Hide" else "Reveal") } }} else null)
                     if (id == 3 || id == 4) TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
@@ -193,7 +294,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit) {
 
 @Composable
 private fun Input(label: String, value: String, change: (String) -> Unit, secret: Boolean = false, enabled: Boolean = true) {
-    OutlinedTextField(value, change, label = { Text(label) }, enabled = enabled, singleLine = true, modifier = Modifier.fillMaxWidth(),
+    OutlinedTextField(value, change, label = { Text(label) }, enabled = enabled, singleLine = true, modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret },
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None)
 }

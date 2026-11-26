@@ -34,7 +34,7 @@ fallback to a weaker derivation.
 
 ## Open an existing Linux vault
 
-1. In setup, enter the **original pepper seed** used by Linux, or its original
+1. Configure a device PIN, pattern or password. In DigiSafe setup, enter the **original pepper seed** used by Linux, or its original
    32-byte pepper encoded as 64 hexadecimal characters. A new seed cannot unlock
    an existing vault. Do not paste real credentials into test fixtures or logs.
 2. Optionally enter the Backblaze application key ID and application key. Both
@@ -60,9 +60,37 @@ calculation but does not remove the master-password KDF requirement.
 
 ## Device behavior
 
-Setup (pepper and optional Backblaze credentials) is encrypted with an Android
-Keystore AES-GCM key. On devices with a secure lock screen, using that key also
-requires the device to be unlocked. Android backup is disabled. Screenshots are blocked.
+Android Keystore encrypts the pepper and optional Backblaze credentials with
+AES-GCM. Saving setup and unlocking the vault require the system prompt for a
+strong biometric or the device credential, including offline unlocks. The prompt
+authorizes that specific cipher operation. The master password still unlocks the
+vault separately. Saving an already unlocked vault uses its session credentials.
+Changing cloud credentials while retaining the stored pepper requires authorization
+to read the pepper and again to encrypt the replacement settings.
+
+Setup requests StrongBox when available and falls back to the default Android
+Keystore if StrongBox is unavailable. The locked screen reports the storage key's
+security level. The first authenticated read migrates existing settings and retires
+the legacy key after writing and verifying the replacement. A cancelled prompt
+leaves the existing setup usable. If a lock-screen reset invalidates the key, use
+**Change setup** and enter the original pepper and storage credentials. Android
+can retain this key across biometric enrollment because device credentials are
+also allowed. [Android Keystore authentication](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setUserAuthenticationParameters(int,int))
+
+The native startup check disables process dumps where the kernel permits and
+refuses vault access when it detects tracing or known injected libraries. The
+native master key and derived pepper use dedicated, wiped pages with best-effort
+memory locking. The 4 GiB key-derivation buffer uses dump exclusion where
+supported and may be swapped. The locked screen shows available bootloader,
+Verified Boot, debug-image, developer-options, ADB and native memory warnings.
+These are local observations. OEMs can withhold boot properties.
+
+Android backup is disabled. The window blocks screenshots, filters obscured
+touches and excludes the vault from autofill. Android 13+ also suppresses the
+Recents screenshot, and Android 14+ marks the vault window's accessibility
+data sensitive. Native allocations request synchronous memory tagging on devices
+that support ARM MTE. [Android MTE](https://developer.android.com/ndk/guides/arm-mte)
+
 The app locks after two minutes without interaction, including time spent in the
 background. A monotonic deadline is checked again when the app resumes, so a
 frozen background process does not extend the unlock period. Unsaved changes are
@@ -109,7 +137,11 @@ For the full emulator check, generate the Linux fixtures with
 python3 test-emulator.py --serial emulator-5556
 ```
 
-Use the serial printed by `adb devices`. The script starts an isolated Backblaze
+Use the serial printed by `adb devices` and a dedicated emulator with no existing
+screen lock. The script sets a temporary test PIN (default `1234`, configurable
+with `--device-pin`) and clears it at the end. It exercises the real system
+credential prompt, cancelled reads and writes, and migration of legacy setup.
+The script starts an isolated Backblaze
 mock and connects through `adb reverse`; it does not depend on emulator host-IP
 routing. It checks native error handling, Keystore/local storage, the Linux debug
 fixture, B2 upload/download, and the visible editor with the production Linux
@@ -118,7 +150,9 @@ the UI, uploads it, and asks the unmodified Linux harness to verify all three
 Android-written files. Logs and outputs are under `build/reports/interop/`.
 Fixture credentials are synthetic and listed in `droid/tests/fixtures/manifest.json`.
 
-The verified emulator configuration uses Android 17 / API 37 with 12 GiB RAM:
+The credential, migration and production editor tests passed on the Android 17
+(API 37) x86-64 emulator with 8.5 GiB of guest RAM. The following configuration
+provides 12 GiB:
 
 ```sh
 sdkmanager 'emulator' 'system-images;android-37.0;default;x86_64'

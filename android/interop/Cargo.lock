@@ -971,6 +971,7 @@ dependencies = [
  "chacha20poly1305",
  "getrandom 0.4.3",
  "jni 0.21.1",
+ "libc",
  "lz4",
  "reed-solomon-erasure",
  "sha3",

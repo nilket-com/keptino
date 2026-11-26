@@ -1,7 +1,10 @@
 //! Key derivation, compression and encryption, byte-compatible with the
 //! Linux application.
 
-use crate::error::{Error, Result};
+use crate::{
+	error::{Error, Result},
+	security::{self, LockedKey},
+};
 use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
 use chacha20poly1305::{
 	XChaCha20Poly1305,
@@ -20,7 +23,8 @@ pub const RELEASE_MEM_KIB: u32 = 1 << 22;
 /// Argon2 memory of debug builds of the Linux application: 4 MiB.
 pub const DEBUG_MEM_KIB: u32 = 1 << 12;
 
-pub type Key = Zeroizing<[u8; KEY_SIZE]>;
+/// A key in its own locked, undumpable page. See `security::LockedKey`.
+pub type Key = LockedKey;
 
 fn argon2id(password: &[u8], salt: &[u8], t_cost: u32, mem_kib: u32) -> Result<Key> {
 	let params = ParamsBuilder::new()
@@ -38,7 +42,12 @@ fn argon2id(password: &[u8], salt: &[u8], t_cost: u32, mem_kib: u32) -> Result<K
 		.try_reserve_exact(mem_kib as usize)
 		.map_err(|_| Error::Kdf(format!("cannot allocate {} MiB", mem_kib / 1024)))?;
 	blocks.resize(mem_kib as usize, argon2::Block::default());
-	let mut out = Zeroizing::new([0u8; KEY_SIZE]);
+	// The arena is far beyond what an app may lock; keep it out of dumps.
+	security::exclude_from_dumps(
+		blocks.as_ptr().cast(),
+		blocks.len() * std::mem::size_of::<argon2::Block>(),
+	);
+	let mut out = Key::new()?;
 	let result = hasher.hash_password_into_with_memory(password, salt, &mut *out, &mut blocks);
 	for block in &mut blocks {
 		*block = argon2::Block::default();
@@ -49,7 +58,7 @@ fn argon2id(password: &[u8], salt: &[u8], t_cost: u32, mem_kib: u32) -> Result<K
 
 /// The pepper `linux/setup.sh` derives from the pepper seed with
 /// `argon2 digipepper -id -t 4 -m 22 -p 1 -l 32 -r -v 13`.
-pub fn derive_pepper(seed: &[u8], mem_kib: u32) -> Result<Zeroizing<[u8; PEPPER_SIZE]>> {
+pub fn derive_pepper(seed: &[u8], mem_kib: u32) -> Result<Key> {
 	if seed.is_empty() {
 		return Err(Error::Invalid("empty pepper seed"));
 	}
@@ -78,7 +87,7 @@ pub fn derive_master_key(
 	post_hasher.update(pepper);
 	post_hasher.update(salt);
 	let mut post_hash = post_hasher.finalize();
-	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
+	let mut key = Key::new()?;
 	key.copy_from_slice(&post_hash);
 	post_hash.zeroize();
 	Ok(key)
@@ -168,7 +177,7 @@ mod tests {
 		assert!(compressed.len() < plaintext.len() / 10);
 		// LZ4 frame magic.
 		assert_eq!(&compressed[..4], &[0x04, 0x22, 0x4d, 0x18]);
-		let key = Zeroizing::new([42u8; KEY_SIZE]);
+		let key = Key::copy_from(&[42u8; KEY_SIZE]).unwrap();
 		let nonce = [7u8; NONCE_SIZE];
 		let encrypted = encrypt(&compressed, &key, &nonce);
 		assert_eq!(encrypted.len(), compressed.len() + 16);
