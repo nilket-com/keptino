@@ -98,7 +98,13 @@ fn tick_subscription(app_state: &AppState) -> Subscription<Message> {
 fn keyboard_subscription(_app_state: &AppState) -> Subscription<Message> {
 	iced::event::listen().map(|event| match event {
 		Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-			if key == keyboard::Key::Named(keyboard::key::Named::Tab) {
+			// Ctrl+L locks at once, as in KeePassXC; the locked screen ignores it.
+			if let keyboard::Key::Character(character) = key.as_ref()
+				&& character.eq_ignore_ascii_case("l")
+				&& modifiers.control()
+			{
+				Message::Lock
+			} else if key == keyboard::Key::Named(keyboard::key::Named::Tab) {
 				if modifiers.shift() {
 					Message::FocusPrevious
 				} else {

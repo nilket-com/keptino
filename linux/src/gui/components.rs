@@ -276,6 +276,8 @@ pub fn password_screen<'a>(
 		styled_button("Set", Message::PasswordEntrySet, DEFAULT_BUTTON_SIZE),
 		space::horizontal().width(20),
 		styled_button("Save", Message::Save, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
+		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
 		space::horizontal(),
 	]
 	.padding(16)
