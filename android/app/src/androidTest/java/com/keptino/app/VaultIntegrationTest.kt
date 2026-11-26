@@ -68,6 +68,11 @@ class VaultIntegrationTest {
         try { storage.file("../outside"); fail("Unsafe file name accepted") } catch (_: IllegalArgumentException) {}
         storage.write("atomic-test", byteArrayOf(1, 2, 3)); storage.write("atomic-test", byteArrayOf(4, 5))
         assertArrayEquals(byteArrayOf(4, 5), storage.read("atomic-test"))
+        try {
+            storage.write("atomic-test", ByteArray(MAX_VAULT_BYTES + 1))
+            fail("Saved a vault larger than the reader accepts")
+        } catch (_: IllegalArgumentException) {}
+        assertArrayEquals(byteArrayOf(4, 5), storage.read("atomic-test"))
         storage.file("atomic-test").delete()
     }
 

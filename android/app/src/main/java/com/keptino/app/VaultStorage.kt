@@ -209,7 +209,25 @@ class VaultStorage(private val context: Context) {
             it.readBytes()
         }
     }
-    fun write(name: String, bytes: ByteArray) = writeAtomic(AtomicFile(file(name)), bytes)
+    fun write(name: String, bytes: ByteArray) {
+        require(bytes.size <= MAX_VAULT_BYTES) { "Vault is too large to save" }
+        val target = AtomicFile(file(name))
+        writeAtomic(target, bytes)
+        // AtomicFile can log a failed rename without throwing. Verify the committed
+        // bytes before the caller marks the vault clean or starts a remote upload.
+        target.openRead().use { input ->
+            val buffer = ByteArray(8192)
+            var offset = 0
+            while (offset < bytes.size) {
+                val n = input.read(buffer, 0, minOf(buffer.size, bytes.size - offset))
+                if (n <= 0 || (0 until n).any { buffer[it] != bytes[offset + it] }) {
+                    throw IOException("Could not verify the saved vault")
+                }
+                offset += n
+            }
+            if (input.read() != -1) throw IOException("Could not verify the saved vault")
+        }
+    }
     private fun writeAtomic(file: AtomicFile, bytes: ByteArray) {
         val stream = file.startWrite()
         try { stream.write(bytes); file.finishWrite(stream) }
