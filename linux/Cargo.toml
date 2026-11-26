@@ -37,7 +37,7 @@ iced = { version = "0.14", default-features = false, features = ["advanced", "ca
 libc = "0.2.180"
 lz4 = "1.28.1"
 percent-encoding = "2.3.2"
-quick-xml = { version = "0.38.4", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 reed-solomon-erasure = { version = "6.0.0", features = ["simd-accel"] }
 reqwest = { version = "0.13.1", default-features = false, features = ["charset", "rustls", "json"] }
 serde = { version = "1", features = ["derive"] }

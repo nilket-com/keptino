@@ -54,6 +54,13 @@ being constrained by the desktop session's memlock limit. This is reapplied
 on upgrades. Launch the installed executable; a build in `target/` does not
 have this capability.
 
+Dependencies are pinned by `Cargo.lock` and resolved under a seven-day
+cooldown (`.cargo/config.toml`, Cargo 1.100 or newer): a crate version
+published less than a week ago is not adopted by `cargo update`, so a
+compromised release that is yanked within days never reaches a build. If
+`cargo-audit` is installed (`cargo install cargo-audit --locked`), setup runs
+`cargo audit` before building and prints any advisories without stopping.
+
 Rerunning setup reuses the encrypted credentials in `~/.config/keptino`.
 Setup checks the pepper and the active provider credential. If either file
 is empty or cannot be decrypted, setup stops for repair. Keep the original

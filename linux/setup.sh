@@ -446,6 +446,18 @@ if (( unreadable_credentials )); then
     fail 'Setup stopped before the build. Rerun setup after recovering the listed credentials.'
 fi
 
+# Dependency advisories are reported, never fatal: an offline host or a stale
+# advisory database must not block an install. Install the tool with
+# `cargo install cargo-audit --locked` to enable the check.
+if cargo audit --version >/dev/null 2>&1; then
+    printf 'Checking dependency advisories...\n'
+    if ! cargo audit; then
+        printf 'cargo audit reported advisories above; review them. Setup continues.\n' >&2
+    fi
+else
+    printf 'cargo-audit is not installed; skipping the dependency advisory check.\n'
+fi
+
 printf "Building and installing Keptino before requesting credentials...\n"
 cargo deb --install
 
