@@ -17,6 +17,7 @@ use std::{
 	os::unix::fs::{DirBuilderExt, OpenOptionsExt},
 	path::{Path, PathBuf},
 	process::Command,
+	sync::{Arc, Mutex},
 	time::SystemTime,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -69,12 +70,15 @@ fn remember_revision(db_name: &str, revision: u64) {
 }
 
 /// Refuses a copy older than one already opened here, unless the user has
-/// removed the record to accept it deliberately.
+/// removed the record to accept it deliberately. A format-1 copy carries no
+/// revision and counts as zero: once a revision has been trusted, a file
+/// from before the format change is a rollback too.
 fn check_revision(opened: Option<u64>, last_seen: Option<u64>, db_name: &str) -> Result<(), String> {
 	match (opened, last_seen) {
-		(Some(opened), Some(seen)) if opened < seen => Err(format!(
-			"This copy is revision {opened}, but revision {seen} was already opened here. \
-			 To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again."
+		(opened, Some(seen)) if opened.unwrap_or(0) < seen => Err(format!(
+			"This copy is revision {}, but revision {seen} was already opened here. \
+			 To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again.",
+			opened.unwrap_or(0)
 		)),
 		_ => Ok(()),
 	}
@@ -188,6 +192,11 @@ fn pepper_path() -> String {
 pub struct OpenedVault {
 	pub database: Database,
 	remote: Result<Remote, String>,
+	/// Fingerprint of the remote object this session last loaded or uploaded,
+	/// `None` when the bucket held nothing. A save uploads only over exactly
+	/// that object, so a copy written elsewhere in the meantime is never
+	/// overwritten, and a refused upload stays refused on retry.
+	synced: Arc<Mutex<Option<blake3::Hash>>>,
 }
 
 impl OpenedVault {
@@ -201,12 +210,11 @@ impl OpenedVault {
 	pub fn save(&self) -> impl Future<Output = String> + use<> {
 		let db = &self.database;
 		let db_name = db.get_meta_entry("db_name").unwrap().get_value().to_owned();
-		// The revision this session holds, before the save advances it.
-		let held = current_revision(db);
 		// Snapshot the encrypted vault before the UI can lock and clear its keys.
 		let bytes = db_to_vec(db, WRITE_FORMAT_2);
 		let saved = current_revision(db);
 		let remote = self.remote.clone();
+		let synced = Arc::clone(&self.synced);
 		async move {
 			if to_file(&bytes, &db_name).is_err() {
 				return "Local save failed. Check disk space and file permissions.".into();
@@ -215,13 +223,20 @@ impl OpenedVault {
 				remember_revision(&db_name, revision);
 			}
 			let result = match remote {
-				Ok(provider) => match remote_revision(&provider, &db_name).await {
-					// The remote field is plaintext, so a forged value can only
-					// stop an upload, never cause one.
-					Ok(Some(theirs)) if held.is_none_or(|ours| theirs > ours) => Err(format!(
-						"The remote vault has newer changes (revision {theirs}). Saved locally only; unlock again to load them before uploading."
-					)),
-					Ok(_) => provider.upload(&base_path(), &db_name, &bytes).await,
+				Ok(provider) => match provider.fetch(&base_path(), &db_name).await {
+					Ok(current) => {
+						let current = current.as_deref().map(blake3::hash);
+						if current != *synced.lock().unwrap_or_else(|e| e.into_inner()) {
+							Err("The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.".into())
+						} else {
+							let uploaded = provider.upload(&base_path(), &db_name, &bytes).await;
+							if uploaded.is_ok() {
+								*synced.lock().unwrap_or_else(|e| e.into_inner()) =
+									Some(blake3::hash(&bytes));
+							}
+							uploaded
+						}
+					}
 					Err(err) => Err(err),
 				},
 				Err(_) => Err("Unlock again to reconnect storage.".into()),
@@ -245,6 +260,7 @@ impl OpenedVault {
 		Self {
 			database,
 			remote: Err("Test session".into()),
+			synced: Arc::default(),
 		}
 	}
 }
@@ -264,16 +280,17 @@ pub async fn load(
 	};
 	let download = async {
 		let (remote, bytes) = Remote::download(&dir, db_name).await?;
+		let fingerprint = bytes.as_deref().map(blake3::hash);
 		let envelope = bytes
 			.as_deref()
 			.map(|b| Envelope::decode(b).map_err(|err| format!("Remote vault: {err}")))
 			.transpose()?;
-		Ok::<_, String>((remote, envelope))
+		Ok::<_, String>((remote, envelope, fingerprint))
 	}
 	.await;
-	let (mut provider, remote) = match download {
-		Ok((provider, envelope)) => (Ok(provider), envelope),
-		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None),
+	let (mut provider, remote, synced) = match download {
+		Ok((provider, envelope, fingerprint)) => (Ok(provider), envelope, fingerprint),
+		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None, None),
 		Err(err) => return Err(err),
 	};
 	let local = local.map(|envelope| Candidate {
@@ -319,6 +336,7 @@ pub async fn load(
 	Ok(OpenedVault {
 		database,
 		remote: provider,
+		synced: Arc::new(Mutex::new(synced)),
 	})
 }
 
@@ -369,15 +387,6 @@ fn open_candidates(
 	Err("Cannot decrypt vault. Check the master password and pepper.".into())
 }
 
-/// The revision the remote object carries right now, if it is format 2.
-async fn remote_revision(provider: &Remote, db_name: &str) -> Result<Option<u64>, String> {
-	match provider.fetch(&base_path(), db_name).await? {
-		Some(bytes) => Ok(Envelope::decode(&bytes)
-			.map_err(|err| format!("Remote vault: {err}"))?
-			.revision),
-		None => Ok(None),
-	}
-}
 
 fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database, String> {
 	let created_ts = SystemTime::now()
@@ -1001,8 +1010,12 @@ mod tests {
 		assert!(check_revision(Some(2), Some(5), "x").unwrap_err().contains("revision 2"));
 		assert!(check_revision(Some(5), Some(5), "x").is_ok());
 		assert!(check_revision(Some(6), Some(5), "x").is_ok());
-		assert!(check_revision(None, Some(5), "x").is_ok());
+		assert!(
+			check_revision(None, Some(5), "x").unwrap_err().contains("revision 0"),
+			"a legacy copy after a trusted revision is a rollback"
+		);
 		assert!(check_revision(Some(1), None, "x").is_ok());
+		assert!(check_revision(None, None, "x").is_ok());
 	}
 	#[test]
 	fn existing_compression_and_cipher_format_are_preserved() {

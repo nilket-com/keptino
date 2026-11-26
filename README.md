@@ -122,12 +122,17 @@ Linux or Android. Preserve the object's contents. If the latest vault is on
 your migrated installation, unlock it and save once to upload it under the
 new key. The old object stays available under its original name.
 
-Use one writer at a time. Unlock compares the local and remote modification
-times. Each save uses a fresh nonce, including when editing a local copy offline.
-If the provider is unreachable, an existing local copy opens with a
-status message and saves locally for that session. Unlock again to check the
-remote copy before uploading. A failed upload also leaves a local copy and
-displays the error.
+Unlock compares the local and remote copies by revision, then by modification
+time, and tries the other copy if the preferred one fails to authenticate,
+pausing uploads for the session when that happens. A copy whose revision is
+below the highest one already opened on this machine is refused; remove
+`~/.config/keptino/<database name>.revision` to accept it deliberately. Each
+save uses a fresh nonce, including when editing a local copy offline, and
+uploads only over the exact remote object this session loaded or last
+uploaded: if another device wrote in between, the save stays local and asks
+you to unlock again first. If the provider is unreachable, an existing local
+copy opens with a status message and saves locally for that session. A
+failed upload also leaves a local copy and displays the error.
 
 ### Secrets in memory
 
