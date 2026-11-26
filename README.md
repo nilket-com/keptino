@@ -27,6 +27,7 @@ Android uses Android Keystore and the lifecycle protections documented separatel
  - Secret memory based master key storage.
  - Authenticated in-memory encryption of cached entries, passwords, PINs, and notes.
  - The entire app is unswappable and undumpable.
+ - Landlock filesystem sandbox: the process and the helpers it spawns can reach only system files, devices, the runtime directory, the font cache and `~/.config/keptino`; the rest of the home directory is unreachable. A kernel without Landlock runs unconfined and says so in the journal.
  - Dynamic linker hijacking blockage.
  - Tracing blockage. (ptrace, strace, ltrace, gdb)
  - Forensic-resistant clipboard clearing mechanism that only wipes what Keptino copied.
@@ -146,6 +147,16 @@ protect against an attacker controlling the process. Revealing/editing secrets,
 copying them, and compressing a vault still involves Iced, clipboard, and LZ4
 buffers whose internal copies are not guaranteed to be wiped. Clipboard history
 and receiving applications can also retain copied secrets.
+
+### Deliberate exclusions
+
+Keptino has no browser integration, auto-type, SSH agent, Secret Service
+interface, passkey store, plugin system or breach-database lookup, and no
+quick unlock that keeps a derived key alive across locks. Each is an IPC or
+network surface into the process that holds the master key; several of
+KeePassXC's 2.8.0 security fixes were in such surfaces. The vault talks to
+one thing, the user's own storage bucket, over TLS. Copying through the
+clipboard is the only way a secret leaves the process.
 
 ### Known Weaknesses
 

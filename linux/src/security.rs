@@ -101,6 +101,83 @@ fn sniff_luks() {
 	}
 }
 
+/// Confines the process, and every helper it spawns, to the filesystem it
+/// needs: system files read-only, devices for the TPM and randomness, the
+/// runtime directory for the compositor and buses, the font cache, and the
+/// vault directory. Everything else in the home directory is unreachable
+/// even if the process is compromised. Best effort: a kernel without
+/// Landlock runs unconfined with a warning, and a missing optional path is
+/// skipped.
+fn sandbox_filesystem() {
+	use landlock::{
+		ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+		RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+	};
+	let home = env::home_dir().unwrap_or_default();
+	let runtime = env::var("XDG_RUNTIME_DIR")
+		.ok()
+		.filter(|dir| !dir.is_empty())
+		.unwrap_or_else(|| format!("/run/user/{}", unsafe { libc::getuid() }));
+	let abi = ABI::V5;
+	let read = AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute;
+	let device = AccessFs::ReadFile | AccessFs::WriteFile;
+	let full = AccessFs::from_all(abi);
+	// Writable directories hold data, never programs.
+	let data = full & !AccessFs::Execute;
+	let vault_dir = crate::storage::persistence::base_path();
+	let rules = [
+		("/usr".into(), read),
+		("/etc".into(), read),
+		("/lib".into(), read),
+		("/lib64".into(), read),
+		("/bin".into(), read),
+		("/sbin".into(), read),
+		("/proc".into(), read),
+		("/sys".into(), read),
+		("/var/lib/systemd".into(), read),
+		("/run/dbus".into(), read),
+		("/run/systemd".into(), read),
+		("/dev".into(), device),
+		(runtime, data),
+		(vault_dir.to_string_lossy().into_owned(), data),
+		(home.join(".cache/fontconfig").to_string_lossy().into_owned(), data),
+	];
+	let ruleset = Ruleset::default()
+		.set_compatibility(CompatLevel::BestEffort)
+		.handle_access(full)
+		.and_then(|ruleset| ruleset.create());
+	let mut ruleset = match ruleset {
+		Ok(ruleset) => ruleset,
+		Err(err) => {
+			warn(&format!("Filesystem sandbox unavailable: {err}"));
+			return;
+		}
+	};
+	for (path, access) in rules {
+		// Optional paths (a font cache that was never written) are skipped;
+		// a rule that cannot be added leaves the path unreachable, not open.
+		if let Ok(fd) = PathFd::new(&path) {
+			match ruleset.add_rule(PathBeneath::new(fd, access)) {
+				Ok(next) => ruleset = next,
+				Err(err) => {
+					warn(&format!("Filesystem sandbox unavailable: {err}"));
+					return;
+				}
+			}
+		}
+	}
+	match ruleset.restrict_self() {
+		Ok(status) => match status.ruleset {
+			RulesetStatus::FullyEnforced => info("Filesystem sandbox enforced."),
+			RulesetStatus::PartiallyEnforced => {
+				warn("Filesystem sandbox partially enforced: the kernel is older than this build.")
+			}
+			RulesetStatus::NotEnforced => warn("Filesystem sandbox not enforced: Landlock is unavailable."),
+		},
+		Err(err) => warn(&format!("Filesystem sandbox unavailable: {err}")),
+	}
+}
+
 pub fn preflight() {
 	force_secure_display();
 	lock_memory_pages();
@@ -109,5 +186,31 @@ pub fn preflight() {
 	verify_secure_display();
 	check_tme();
 	sniff_luks();
+	sandbox_filesystem();
 	info("Preflight security checks passed.");
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Landlock binds the calling thread, so the sandbox is tried on a thread
+	/// of its own and the rest of the suite stays unconfined.
+	#[test]
+	fn the_sandbox_keeps_system_files_and_hides_the_rest() {
+		std::thread::spawn(|| {
+			sandbox_filesystem();
+			assert!(fs::read_dir("/usr/share").is_ok());
+			assert!(fs::read("/etc/hostname").is_ok() || fs::read("/etc/os-release").is_ok());
+			let outside = env::temp_dir().join(format!("keptino-sandbox-{}", std::process::id()));
+			let denied = fs::File::create(&outside);
+			assert!(denied.is_err(), "writing outside the allowed paths must fail");
+			assert_eq!(
+				denied.err().map(|e| e.kind()),
+				Some(std::io::ErrorKind::PermissionDenied)
+			);
+		})
+		.join()
+		.unwrap();
+	}
 }

@@ -42,6 +42,7 @@ chrono = "0.4.43"
 getrandom = "0.4.1"
 hex = "0.4.3"
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "highlighter", "svg", "tiny-skia", "tokio", "wayland"] }
+landlock = "0.4"
 libc = "0.2.180"
 lz4 = "1.28.1"
 percent-encoding = "2.3.2"

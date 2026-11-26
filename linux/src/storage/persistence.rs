@@ -154,7 +154,7 @@ impl KdfParams {
 	}
 }
 
-fn base_path() -> PathBuf {
+pub(crate) fn base_path() -> PathBuf {
 	let mut apath = env::home_dir().unwrap_or_default();
 	apath.push(".config/keptino/");
 	// Private to the user from the first run, before setup.sh has chmod'ed it.
