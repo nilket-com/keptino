@@ -122,8 +122,12 @@ Linux or Android. Preserve the object's contents. If the latest vault is on
 your migrated installation, unlock it and save once to upload it under the
 new key. The old object stays available under its original name.
 
-Unlock compares the local and remote copies by revision, then by modification
-time, and tries the other copy if the preferred one fails to authenticate,
+Saving with this release upgrades a vault to format 2: the plaintext
+envelope (salt, nonce, timestamps, name, revision and key-derivation cost) is
+bound to the ciphertext, so a tampered or replayed envelope fails to open.
+Earlier Keptino releases cannot read format 2; update Linux and Android
+before saving on either. Unlock compares the local and remote copies by
+revision, then by modification time, and tries the other copy if the preferred one fails to authenticate,
 pausing uploads for the session when that happens. A copy whose revision is
 below the highest one already opened on this machine is refused; remove
 `~/.config/keptino/<database name>.revision` to accept it deliberately. Each

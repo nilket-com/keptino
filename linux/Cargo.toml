@@ -24,9 +24,9 @@ maintainer-scripts = "debian"
 
 [features]
 # Only android/interop enables these. `harness` finds systemd-creds through
-# PATH so the test harness can stand in for the TPM; `write-format-2` makes
-# saves upgrade format-1 vaults, to generate format-2 fixtures before the
-# default flips.
+# PATH so the test harness can stand in for the TPM and keeps saves at
+# format 1 for the legacy fixtures; `write-format-2` restores the production
+# behaviour of upgrading format-1 vaults on save.
 harness = []
 write-format-2 = []
 

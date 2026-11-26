@@ -11,7 +11,9 @@ use base64ct::{Base64, Encoding};
 use std::{collections::BTreeMap, ops::Bound, time::SystemTime};
 use zeroize::{Zeroize, Zeroizing};
 
-const WRITE_FORMAT_2: bool = false;
+/// Saves upgrade format-1 vaults now that Linux and Android both read
+/// format 2; a format-2 vault is never written back as format 1.
+const WRITE_FORMAT_2: bool = true;
 const TAG_META: u8 = 0;
 const TAG_PASSWORD: u8 = 1;
 const META_NAME: u8 = 1;

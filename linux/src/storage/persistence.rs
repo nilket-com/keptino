@@ -32,11 +32,11 @@ const NONCE_SIZE: usize = 24;
 /// 2 authenticates the metadata as associated data and carries a revision.
 const CURRENT_FORMAT: u32 = 2;
 /// Whether a vault that is still format 1 is rewritten as format 2 on save.
-/// Off until the Android reader understands format 2, so both platforms keep
-/// opening each other's files; a vault that is already format 2 is never
-/// written back as format 1. The interop harness turns it on to produce
-/// format-2 fixtures ahead of the flip.
-const WRITE_FORMAT_2: bool = cfg!(feature = "write-format-2");
+/// On in production since both platforms read format 2; a vault that is
+/// already format 2 is never written back as format 1. The interop harness
+/// keeps writing format 1 unless it asks for format 2, so both fixture sets
+/// can still be regenerated.
+const WRITE_FORMAT_2: bool = !cfg!(feature = "harness") || cfg!(feature = "write-format-2");
 const AAD_PREFIX: &[u8] = b"keptino-envelope-v2";
 
 fn revision_path(db_name: &str) -> PathBuf {
