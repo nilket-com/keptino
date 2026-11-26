@@ -139,7 +139,7 @@ Linux, all on `main`:
 
 | Finding | State |
 | --- | --- |
-| K1 envelope authentication and revision | Closed. Both platforms read and write format 2 (writers flipped together); fixtures for both formats in `android/droid/tests/fixtures`; cross-reading verified on an Android 17 device and through the mock B2 harness. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
+| K1 envelope authentication and revision | Reopened on the user's observation and settled as the mirrored-TLV design: the plaintext meta set must equal the authenticated inner copy after decryption, which protects every existing vault with no re-save and no new format, and lets `revision` and `kdf_*` ride as ordinary TLV fields that older readers preserve. The marked AAD files written on 2026-11-26 still open and convert on save. Linux reader landed; Linux writer stays on the AAD form until the Android reader accepts unmarked revisions, then both writers flip to unmarked in one commit. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
 | K2 dependencies | Updated; seven-day cooldown in `.cargo/config.toml`; `cargo audit` in setup; zero advisories |
 | K3 lock | Lock button, Ctrl+L, logind and screensaver D-Bus listener (verified by Codex on a private bus) |
 | K4 clipboard | Conditional, state-independent wipe; cleared on lock |
