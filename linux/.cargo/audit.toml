@@ -1,0 +1,21 @@
+# Advisories accepted for this build, each with the reason and the condition
+# under which it leaves this list. `cargo audit` in setup.sh reads this file,
+# so a new advisory is still reported while these stay quiet. Review the list
+# whenever a dependency below is upgraded.
+[advisories]
+ignore = [
+	# instant and lru 0.7 are unmaintained/unsound dependencies of
+	# reed-solomon-erasure 6.0.0, the only maintained-enough crate that
+	# reproduces the parity shards in every existing vault file. The lru
+	# use is an internal matrix cache whose unsound case needs a panic
+	# inside pop(). Drop when reed-solomon-erasure updates, or when a
+	# recovery-compatible replacement is adopted on both platforms.
+	"RUSTSEC-2024-0384",
+	"RUSTSEC-2026-0253",
+	# rustybuzz (via resvg in iced_tiny_skia) and ttf-parser (via fontdb in
+	# cosmic-text) are pinned by iced 0.14; both only shape and parse the
+	# bundled UI fonts and icons, never vault content. Drop at the next iced
+	# release that moves to their maintained successors.
+	"RUSTSEC-2026-0206",
+	"RUSTSEC-2026-0192",
+]

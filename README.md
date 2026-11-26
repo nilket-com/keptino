@@ -63,6 +63,8 @@ published less than a week ago is not adopted by `cargo update`, so a
 compromised release that is yanked within days never reaches a build. If
 `cargo-audit` is installed (`cargo install cargo-audit --locked`), setup runs
 `cargo audit` before building and prints any advisories without stopping.
+Advisories that are accepted for now are listed with their reasons in
+`linux/.cargo/audit.toml`, so only new ones appear.
 
 Rerunning setup reuses the encrypted credentials in `~/.config/keptino`.
 Setup checks the pepper and the active provider credential. If either file

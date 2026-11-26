@@ -452,7 +452,7 @@ fi
 # advisory database must not block an install. Install the tool with
 # `cargo install cargo-audit --locked` to enable the check.
 if cargo audit --version >/dev/null 2>&1; then
-    printf 'Checking dependency advisories...\n'
+    printf 'Checking dependency advisories (accepted ones are listed with reasons in .cargo/audit.toml)...\n'
     if ! cargo audit; then
         printf 'cargo audit reported advisories above; review them. Setup continues.\n' >&2
     fi
