@@ -35,7 +35,7 @@ Android uses Android Keystore and the lifecycle protections documented separatel
  - Uniform 24-character password generator; entries are deleted on a confirming second press.
  - Linux vault sync on unlock and save with Backblaze B2, Amazon S3, Google Cloud Storage, or Cloudflare R2. API credentials use systemd-creds.
  - Atomic file io, with the three previous saves kept as `<db>.keptino.1` to `.3` for recovery.
- - Reed-Solomon 8:4 erasure coding with BLAKE3 checksums and 4KiB+ shards.
+ - Reed-Solomon 8:4 erasure coding with BLAKE3 checksums and 4KiB+ shards, implemented in-tree (`erasure/`, no dependencies) and byte-compatible with every vault ever written.
  - XChaCha20Poly1305 encryption.
  - LZ4 level 9 compression.
  - Simple TLV serialization.

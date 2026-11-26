@@ -735,7 +735,7 @@ const ERASURE_TOTAL_SHARDS: usize = ERASURE_DATA_SHARDS + ERASURE_PARITY_SHARDS;
 const ERASURE_MIN_SHARD_SIZE: usize = 4096;
 
 fn encode_erasure(data: &[u8]) -> Vec<u8> {
-	use reed_solomon_erasure::galois_8::ReedSolomon;
+	use keptino_erasure::ReedSolomon;
 	let original_len = data.len() as u64;
 	let shard_size = std::cmp::max(
 		data.len().div_ceil(ERASURE_DATA_SHARDS),
@@ -763,7 +763,7 @@ fn encode_erasure(data: &[u8]) -> Vec<u8> {
 }
 
 fn decode_erasure(encoded: &[u8]) -> Option<Vec<u8>> {
-	use reed_solomon_erasure::galois_8::ReedSolomon;
+	use keptino_erasure::ReedSolomon;
 	let chunk_size = encoded.len() / ERASURE_TOTAL_SHARDS;
 	if chunk_size < 40 + ERASURE_MIN_SHARD_SIZE
 		|| !encoded.len().is_multiple_of(ERASURE_TOTAL_SHARDS)
