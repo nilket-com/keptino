@@ -22,6 +22,14 @@ assets = [
 depends = "argon2, systemd, libcap2-bin"
 maintainer-scripts = "debian"
 
+[features]
+# Only android/interop enables these. `harness` finds systemd-creds through
+# PATH so the test harness can stand in for the TPM; `write-format-2` makes
+# saves upgrade format-1 vaults, to generate format-2 fixtures before the
+# default flips.
+harness = []
+write-format-2 = []
+
 [dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 argon2 = "0.5.3"

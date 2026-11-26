@@ -33,8 +33,9 @@ const CURRENT_FORMAT: u32 = 2;
 /// Whether a vault that is still format 1 is rewritten as format 2 on save.
 /// Off until the Android reader understands format 2, so both platforms keep
 /// opening each other's files; a vault that is already format 2 is never
-/// written back as format 1.
-const WRITE_FORMAT_2: bool = false;
+/// written back as format 1. The interop harness turns it on to produce
+/// format-2 fixtures ahead of the flip.
+const WRITE_FORMAT_2: bool = cfg!(feature = "write-format-2");
 const AAD_PREFIX: &[u8] = b"keptino-envelope-v2";
 
 fn revision_path(db_name: &str) -> PathBuf {
