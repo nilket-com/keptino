@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
     private var ready = false
     private var promptSignal: CancellationSignal? = null
     private val idleLock = Runnable {
-        if (SystemClock.elapsedRealtime() >= idleDeadline) { promptSignal?.cancel(); vm.lock() }
+        if (SystemClock.elapsedRealtime() >= idleDeadline) { lockVault() }
     }
     private var clipboardToken: String? = null
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +75,7 @@ class MainActivity : ComponentActivity() {
         }
         idleDeadline = savedInstanceState?.getLong("idleDeadline") ?: 0L
         clipboardDeadline = savedInstanceState?.getLong("clipboardDeadline") ?: 0L
-        clipboardToken = savedInstanceState?.getString("clipboardToken")
+        clipboardToken = savedInstanceState?.getString("clipboardToken") ?: clipboardCleanup.getString("pending", null)
         ready = true
         setContent {
             var warnings by remember { mutableStateOf(nativeWarnings) }
@@ -83,7 +83,7 @@ class MainActivity : ComponentActivity() {
                 warnings = nativeWarnings + withContext(Dispatchers.IO) { deviceWarnings(applicationContext) }
                 vm.refreshKeyProtection()
             }
-            KeptinoTheme { VaultScreen(vm, ::copySecret, ::authenticate, warnings) }
+            KeptinoTheme { VaultScreen(vm, ::copySecret, ::lockVault, ::authenticate, warnings) }
         }
     }
     internal suspend fun authenticate(cipher: Cipher): Cipher = withContext(Dispatchers.Main.immediate) {
@@ -136,7 +136,23 @@ class MainActivity : ComponentActivity() {
         outState.putLong("clipboardDeadline", clipboardDeadline)
         outState.putString("clipboardToken", clipboardToken)
     }
+    private val clipboardCleanup by lazy { getSharedPreferences("clipboard_cleanup", MODE_PRIVATE) }
+    private fun lockVault() {
+        promptSignal?.cancel()
+        vm.lock()
+        clipboardDeadline = 0L
+        clearClipboard()
+    }
+    override fun finish() {
+        // A finishing window may still have foreground clipboard access here.
+        if (ready) clearClipboard()
+        super.finish()
+    }
     override fun onDestroy() {
+        if (ready && isFinishing) {
+            clearClipboard()
+            clipboardCleanup.edit().putString("pending", clipboardToken).apply()
+        }
         promptSignal?.cancel()
         timer.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -175,12 +191,19 @@ class MainActivity : ComponentActivity() {
         vm.report("Copied; clipboard clears in 30 seconds")
     }
     private fun clearClipboard() {
+        val token = clipboardToken ?: return
         val clipboard = getSystemService(ClipboardManager::class.java)
-        val label = clipboard.primaryClipDescription?.label?.toString()
-        if (label == clipboardToken && clipboardToken != null) {
-            clipboard.clearPrimaryClip(); clipboardToken = null
-        } else if (hasWindowFocus() && label != clipboardToken) {
+        try {
+            val label = clipboard.primaryClipDescription?.label?.toString()
+            if (label == token) {
+                clipboard.clearPrimaryClip()
+            } else if (!hasWindowFocus() || label == null) {
+                return
+            }
             clipboardToken = null
+            clipboardCleanup.edit().remove("pending").apply()
+        } catch (_: SecurityException) {
+            // Keep the token to retry after focus returns.
         }
         // Android can deny clipboard access in the background. Keep the token
         // then, so onResume retries without erasing another application's copy.
@@ -188,7 +211,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, authenticate: suspend (Cipher) -> Cipher, warnings: List<String>) {
+private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Unit, authenticate: suspend (Cipher) -> Cipher, warnings: List<String>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
@@ -283,13 +306,13 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, authenticate: s
                 if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
                 Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
-                OutlinedButton(enabled = !vm.busy, onClick = { if (vm.dirty) confirmLock = true else vm.lock() }) { Text("Lock") }
+                OutlinedButton(enabled = !vm.busy, onClick = { if (vm.dirty) confirmLock = true else lock() }) { Text("Lock") }
             }
         }
     }
     if (confirmLock) AlertDialog(onDismissRequest = { confirmLock = false }, title = { Text("Discard unsaved changes?") },
         text = { Text("Save first to keep changes to this vault.") },
-        confirmButton = { TextButton(onClick = { confirmLock = false; vm.lock() }) { Text("Discard and lock") } },
+        confirmButton = { TextButton(onClick = { confirmLock = false; lock() }) { Text("Discard and lock") } },
         dismissButton = { TextButton(onClick = { confirmLock = false }) { Text("Cancel") } })
 }
 
