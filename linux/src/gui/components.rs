@@ -250,9 +250,18 @@ pub fn password_screen<'a>(
 				username_copy_button
 			],
 			row![
-				styled_tooltip(password_input, "Password", 2),
+				styled_tooltip(password_input, "Password", 3),
 				password_copy_button,
-				password_visibility_toggle
+				password_visibility_toggle,
+				styled_tooltip(
+					styled_button(
+						"Gen",
+						Message::GeneratePassword,
+						(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
+					),
+					"Generate password",
+					0
+				)
 			],
 			row![
 				styled_tooltip(pin_input, "PIN", 2),
@@ -276,6 +285,8 @@ pub fn password_screen<'a>(
 		styled_button("Set", Message::PasswordEntrySet, DEFAULT_BUTTON_SIZE),
 		space::horizontal().width(20),
 		styled_button("Save", Message::Save, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
+		styled_button("Delete", Message::PasswordEntryDelete, DEFAULT_BUTTON_SIZE),
 		space::horizontal().width(20),
 		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
 		space::horizontal(),

@@ -122,6 +122,12 @@ impl EntryAtlas {
 		Some((*tag, sealed.open(&Self::context(id, *tag))))
 	}
 
+	/// Drops a record; its ciphertext goes with it and its key is per-atlas,
+	/// so nothing of the plaintext remains recoverable from this object.
+	pub fn remove(&mut self, id: u32) -> bool {
+		self.entries.remove(&id).is_some()
+	}
+
 	pub fn clear(&mut self) {
 		self.entries.clear();
 		self.key.zeroize().expect("Failed to erase memory key");

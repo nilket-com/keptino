@@ -1,4 +1,4 @@
-use crate::gui::{clipboard, components, messages::Message};
+use crate::gui::{clipboard, components, generator, messages::Message};
 use crate::storage::{
 	entry::PasswordEntry,
 	persistence::{self, OpenedVault},
@@ -34,6 +34,8 @@ struct UnlockedState {
 	status: String,
 	vault: OpenedVault,
 	saving: bool,
+	/// Delete was pressed once; the next press removes the entry.
+	confirm_delete: bool,
 }
 
 enum AppState {
@@ -202,6 +204,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				status: vault.status(),
 				vault,
 				saving: false,
+				confirm_delete: false,
 			});
 		}
 		Message::DbNameChanged(new_db_name) => {
@@ -240,6 +243,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 		status,
 		vault,
 		saving,
+		confirm_delete,
 	}) = app_state
 	else {
 		unreachable!("update_unlocked called with locked state")
@@ -252,6 +256,10 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			*last_interaction_time = Some(Instant::now());
 			if status.starts_with(IDLE_MESSAGE) {
 				*status = "".to_string();
+			}
+			// Anything but the second press cancels a pending delete.
+			if !matches!(message, Message::PasswordEntryDelete) {
+				*confirm_delete = false;
 			}
 		}
 	}
@@ -361,6 +369,32 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			} else {
 				*status = "Name cannot be empty.".to_string();
 			}
+		}
+		Message::PasswordEntryDelete => {
+			let name = password_entry.get_name().to_owned();
+			if name.is_empty() {
+				*status = "Nothing to delete: the entry has no name.".to_string();
+			} else if !*confirm_delete {
+				*confirm_delete = true;
+				*status = format!("Delete '{name}'? Press Delete again to confirm.");
+			} else {
+				*confirm_delete = false;
+				if db.delete_password_entry(&name) {
+					*is_password_visible = false;
+					*is_pin_visible = false;
+					*is_note_visible = false;
+					*password_entry = PasswordEntry::new();
+					*note = text_editor::Content::new();
+					*status = format!("Entry '{name}' deleted. Save to make it permanent.");
+				} else {
+					*status = format!("No saved entry named '{name}'.");
+				}
+			}
+		}
+		Message::GeneratePassword => {
+			password_entry.set_password(&generator::password(generator::LENGTH));
+			*is_password_visible = true;
+			*status = "Password generated. Set the entry to keep it.".to_string();
 		}
 		Message::Save => {
 			if *saving {
@@ -522,6 +556,38 @@ mod tests {
 		assert_eq!(state.password_entry.get_pin().as_str(), "1234");
 		let _ = update(&mut app, Message::Lock);
 		assert!(matches!(app, AppState::Locked(_)));
+	}
+
+	#[test]
+	fn delete_needs_a_second_press_and_generate_reveals_a_fresh_password() {
+		let mut app = unlocked();
+		let _ = update(&mut app, Message::PasswordEntryDelete);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.confirm_delete);
+		assert!(state.vault.database.get_password_entry_by_name("example").is_some());
+		// Any other action cancels the pending delete.
+		let _ = update(&mut app, Message::QueryInput("example".into()));
+		let _ = update(&mut app, Message::PasswordEntryDelete);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.confirm_delete);
+		assert!(state.vault.database.get_password_entry_by_name("example").is_some());
+		let _ = update(&mut app, Message::PasswordEntryDelete);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(!state.confirm_delete);
+		assert!(state.vault.database.get_password_entry_by_name("example").is_none());
+		assert!(state.password_entry.get_name().is_empty());
+		let _ = update(&mut app, Message::GeneratePassword);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.is_password_visible);
+		assert_eq!(state.password_entry.get_password().len(), generator::LENGTH);
 	}
 
 	#[test]

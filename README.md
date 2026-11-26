@@ -29,7 +29,9 @@ Android uses Android Keystore and the lifecycle protections documented separatel
  - The entire app is unswappable and undumpable.
  - Dynamic linker hijacking blockage.
  - Tracing blockage. (ptrace, strace, ltrace, gdb)
- - Forensic-resistant clipboard clearing mechanism.
+ - Forensic-resistant clipboard clearing mechanism that only wipes what Keptino copied.
+ - Lock button and Ctrl+L; idle lock after four minutes.
+ - Uniform 24-character password generator; entries are deleted on a confirming second press.
  - Linux vault sync on unlock and save with Backblaze B2, Amazon S3, Google Cloud Storage, or Cloudflare R2. API credentials use systemd-creds.
  - Atomic file io, with the three previous saves kept as `<db>.keptino.1` to `.3` for recovery.
  - Reed-Solomon 8:4 erasure coding with BLAKE3 checksums and 4KiB+ shards.

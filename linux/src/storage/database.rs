@@ -51,6 +51,9 @@ impl Database {
 	pub fn get_password_entry_by_name(&self, name: &str) -> Option<PasswordEntry> {
 		self.idb.read().unwrap().get_password_entry_by_name(name)
 	}
+	pub fn delete_password_entry(&self, name: &str) -> bool {
+		self.idb.write().unwrap().delete_password_entry(name)
+	}
 	pub fn get_password_entries_by_tag(&self, tag: &str) -> Option<Vec<PasswordEntry>> {
 		self.idb.read().unwrap().get_password_entries_by_tag(tag)
 	}
@@ -167,6 +170,20 @@ impl InteriorDatabase {
 			return Some(PasswordEntry::from(FieldAtlas::deserialize(&entry.1)));
 		}
 		None
+	}
+	/// Removes an entry and every index reference to it. Ids are positions
+	/// on disk, so the next save simply writes one record fewer.
+	fn delete_password_entry(&mut self, name: &str) -> bool {
+		let index_by_name_key = format!("password\x00{}", name);
+		let Some(id) = self.index_by_name.remove(&index_by_name_key) else {
+			return false;
+		};
+		self.entries.remove(id);
+		self.index_by_tag.retain(|_, ids| {
+			ids.retain(|other| *other != id);
+			!ids.is_empty()
+		});
+		true
 	}
 	fn get_password_entries_by_tag(&self, tag: &str) -> Option<Vec<PasswordEntry>> {
 		let index_by_tag_key = format!("tag\x00{}", tag);
@@ -334,5 +351,25 @@ mod tests {
 		db.zeroize();
 		assert!(db.entries.entries.is_empty());
 		assert!(db.index_by_name.is_empty());
+	}
+
+	#[test]
+	fn deleted_entries_leave_no_record_or_index_behind() {
+		let mut db = InteriorDatabase::deserialize(&original_format_fixture());
+		let mut other = PasswordEntry::new();
+		other.set_name("other");
+		other.set_tags("test");
+		db.set_password_entry(other);
+		assert_eq!(db.get_password_entries_by_tag("test").unwrap().len(), 2);
+		assert!(db.delete_password_entry("example"));
+		assert!(!db.delete_password_entry("example"));
+		assert!(db.get_password_entry_by_name("example").is_none());
+		assert_eq!(db.get_password_entries_by_tag("test").unwrap().len(), 1);
+		let reloaded = InteriorDatabase::deserialize(&db.serialize());
+		assert!(reloaded.get_password_entry_by_name("example").is_none());
+		assert!(reloaded.get_password_entry_by_name("other").is_some());
+		assert!(db.delete_password_entry("other"));
+		assert!(db.get_password_entries_by_tag("test").is_none());
+		assert_eq!(db.entries.entries.len(), 0);
 	}
 }
