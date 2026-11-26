@@ -195,30 +195,28 @@ impl PasswordEntry {
 		self.open_secret(PasswordField::Note as u8)
 	}
 	pub fn get_timestamps(&self) -> String {
-		use chrono::{DateTime, Local, TimeZone, Utc};
 		let now = SystemTime::now()
 			.duration_since(SystemTime::UNIX_EPOCH)
 			.unwrap()
 			.as_secs()
 			.to_string();
-		let mts = self
-			.field_atlas
-			.get_str(PasswordField::ModifiedTimestamp as u8)
-			.unwrap_or(&now)
-			.parse::<i64>()
-			.unwrap();
-		let cts = self
-			.field_atlas
-			.get_str(PasswordField::CreatedTimestamp as u8)
-			.unwrap_or(&now)
-			.parse::<i64>()
-			.unwrap();
-		let mdt_utc = Utc.timestamp_opt(mts, 0).unwrap();
-		let cdt_utc = Utc.timestamp_opt(cts, 0).unwrap();
-		let mdt_local = DateTime::<Local>::from(mdt_utc);
-		let cdt_local = DateTime::<Local>::from(cdt_utc);
-		let mdt = mdt_local.format("%Y-%m-%d %H:%M");
-		let cdt = cdt_local.format("%Y-%m-%d %H:%M");
+		let local = |field: PasswordField| {
+			self.field_atlas
+				.get_str(field as u8)
+				.unwrap_or(&now)
+				.parse::<i64>()
+				.ok()
+				.and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+				.map(|instant| {
+					instant
+						.to_zoned_datetime(jiff::tz::TimeZone::system())
+						.strftime("%Y-%m-%d %H:%M")
+						.to_string()
+				})
+				.unwrap_or_else(|| "unknown".to_string())
+		};
+		let mdt = local(PasswordField::ModifiedTimestamp);
+		let cdt = local(PasswordField::CreatedTimestamp);
 		format!("Modified: {mdt} | Created: {cdt} ")
 	}
 	fn open_secret(&self, id: u8) -> Zeroizing<String> {
