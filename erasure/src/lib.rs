@@ -322,11 +322,11 @@ impl ReedSolomon {
 			.iter()
 			.map(|&i| shards[i].clone().expect("valid index"))
 			.collect();
-		for d in 0..self.data {
-			if shards[d].is_none() {
+		for (d, shard) in shards.iter_mut().enumerate().take(self.data) {
+			if shard.is_none() {
 				let mut out = vec![0; len];
 				code_row(decode.row(d), &sources, &mut out, len);
-				shards[d] = Some(out);
+				*shard = Some(out);
 			}
 		}
 		Ok(())
