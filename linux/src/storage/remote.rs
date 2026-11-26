@@ -11,10 +11,12 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
+use super::secret::SecretMemory;
 use std::{
 	fs, io,
 	path::Path,
 	process::Command,
+	sync::Arc,
 	time::{Duration, SystemTime},
 };
 use zeroize::Zeroizing;
@@ -58,6 +60,13 @@ impl Provider {
 			Self::Gcs => "gcs",
 			Self::R2 => "r2",
 		}
+	}
+
+	/// Hash of the encrypted credential file as written by setup.
+	fn credential_file_hash(self, dir: &Path) -> Result<blake3::Hash> {
+		let encrypted = fs::read(dir.join(format!("{}.cred", self.name())))
+			.map_err(|_| format!("Cannot read the {} credential file.", self.name()))?;
+		Ok(blake3::hash(&encrypted))
 	}
 
 	fn credentials(self, dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
@@ -211,33 +220,49 @@ async fn bounded_body(mut resp: Response, what: &str) -> Result<Vec<u8>> {
 	Ok(body)
 }
 
-// Bind uploads to the configuration used to open this vault without retaining the API secret.
+/// The storage session opened with this vault. The API credential is
+/// decrypted once at unlock and kept in secret memory, so a save spawns no
+/// helper and passes no plaintext through a pipe. The encrypted file is
+/// hashed instead, so setup changing the configuration mid-session is still
+/// noticed and forces a fresh unlock.
 #[derive(Clone)]
 pub(super) struct Remote {
 	provider: Provider,
-	credential_hash: blake3::Hash,
+	credential: Arc<SecretMemory>,
+	credential_file: blake3::Hash,
 }
 
 impl Remote {
 	pub(super) async fn download(dir: &Path, db_name: &str) -> Result<(Self, Option<Vec<u8>>)> {
 		let provider = Provider::selected(dir)?;
+		let credential_file = provider.credential_file_hash(dir)?;
 		let credentials = provider.credentials(dir)?;
+		let credential = SecretMemory::new(credentials.len().max(1))
+			.and_then(|memory| memory.write(0, &credentials).map(|()| memory))
+			.map_err(|_| "Cannot hold the storage credential in secret memory.")?;
 		let remote = Self {
 			provider,
-			credential_hash: blake3::hash(&credentials),
+			credential: Arc::new(credential),
+			credential_file,
 		};
 		let bytes = provider.download(&credentials, db_name).await?;
 		Ok((remote, bytes))
 	}
 
+	/// The session credential, after checking that setup has not replaced
+	/// the provider or its credential file since unlock.
 	fn session_credentials(&self, dir: &Path) -> Result<Zeroizing<Vec<u8>>> {
-		let credentials = self.provider.credentials(dir)?;
 		if Provider::selected(dir)? != self.provider
-			|| blake3::hash(&credentials) != self.credential_hash
+			|| self.provider.credential_file_hash(dir)? != self.credential_file
 		{
 			return Err("Storage configuration changed. Unlock again before syncing.".into());
 		}
-		Ok(credentials)
+		// A short-lived copy: the mapping's lock must not be held across a request.
+		let mapped = self
+			.credential
+			.read()
+			.map_err(|_| "Cannot read the storage credential from secret memory.")?;
+		Ok(Zeroizing::new(mapped.to_vec()))
 	}
 
 	/// The current remote object, re-read with the configuration this vault
