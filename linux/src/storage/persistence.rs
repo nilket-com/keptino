@@ -1,8 +1,10 @@
 use crate::{
-	logger::{critical, error, info},
+	logger::{error, info},
 	storage::{
-		database::{Database, InteriorDatabase},
-		entry::MetaEntry,
+		atlas::{FieldAtlas, next_tlv},
+		database::{Database, EntryTag, InteriorDatabase},
+		entry::{MetaEntry, MetaField},
+		remote::Remote,
 		secret::SecretMemory,
 	},
 };
@@ -42,57 +44,112 @@ fn pepper_path() -> String {
 	apath.to_str().unwrap().to_string()
 }
 
-fn backblaze_path() -> String {
-	let mut apath = base_path();
-	apath.push("backblaze.cred");
-	apath.to_str().unwrap().to_string()
+#[derive(Clone)]
+pub struct OpenedVault {
+	pub database: Database,
+	remote: Result<Remote, String>,
 }
 
-pub async fn load(db_name: &str, master_password: Zeroizing<String>) -> Database {
-	let path = db_path(db_name);
-	let db_remote_bin_opt = download_db(db_name).await;
-	match db_remote_bin_opt {
-		None => {
-			if !path.exists() {
-				info("New database created.");
-				new_db(db_name, master_password)
-			} else {
-				info("Local database loaded, no matching remote.");
-				db_from_vec(from_file(db_name), master_password)
-			}
+impl OpenedVault {
+	pub fn status(&self) -> String {
+		match &self.remote {
+			Ok(_) => "Unlocked".into(),
+			Err(err) => format!("Opened local copy. {err} Uploads paused until next unlock."),
 		}
-		Some(db_remote_bin) => {
-			if !path.exists() {
-				info("Remote database loaded, no matching local.");
-				db_from_vec(db_remote_bin, master_password)
-			} else {
-				let db_local_envelope = db_envelope_from_vec(from_file(db_name));
-				let (nonce_local, salt) = parse_decryption_parameters(&db_local_envelope);
-				let db_remote_envelope = db_envelope_from_vec(db_remote_bin);
-				let (nonce_remote, _) = parse_decryption_parameters(&db_remote_envelope);
-				let master_key = master_key_derivation(master_password, salt);
-				let ts_local = db_local_envelope
-					.get_meta_entry("modified_ts")
-					.unwrap()
-					.get_value()
-					.parse::<u64>()
-					.unwrap();
-				let ts_remote = db_remote_envelope
-					.get_meta_entry("modified_ts")
-					.unwrap()
-					.get_value()
-					.parse::<u64>()
-					.unwrap();
-				if ts_local >= ts_remote {
-					info("Local database loaded.");
-					db_from_envelope(db_local_envelope, master_key, nonce_local)
-				} else {
-					info("Remote database loaded.");
-					db_from_envelope(db_remote_envelope, master_key, nonce_remote)
+	}
+
+	pub fn save(&self) -> impl Future<Output = String> + use<> {
+		let db = &self.database;
+		let db_name = db.get_meta_entry("db_name").unwrap().get_value().to_owned();
+		// Snapshot the encrypted vault before the UI can lock and clear its keys.
+		let bytes = db_to_vec(db);
+		let remote = self.remote.clone();
+		async move {
+			if to_file(&bytes, &db_name).is_err() {
+				return "Local save failed. Check disk space and file permissions.".into();
+			}
+			let result = match remote {
+				Ok(provider) => provider.upload(&base_path(), &db_name, &bytes).await,
+				Err(_) => Err("Unlock again to reconnect storage.".into()),
+			};
+			match result {
+				Ok(()) => {
+					info("Database saved and synced.");
+					"Database saved and synced.".into()
+				}
+				Err(err) => {
+					let msg = format!("Saved locally only. {err}");
+					error(&msg);
+					msg
 				}
 			}
 		}
 	}
+
+	#[cfg(test)]
+	pub fn for_test(database: Database) -> Self {
+		Self {
+			database,
+			remote: Err("Test session".into()),
+		}
+	}
+}
+
+pub async fn load(
+	db_name: &str,
+	master_password: Zeroizing<String>,
+) -> Result<OpenedVault, String> {
+	if db_name.contains(['/', '\0']) {
+		return Err("Use a database name without path separators or NUL bytes.".into());
+	}
+	let dir = base_path();
+	let local = match fs::read(db_path(db_name)) {
+		Ok(bytes) => Some(Envelope::decode(&bytes).ok_or("Invalid local vault.")?),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+		Err(_) => return Err("Cannot read local vault.".into()),
+	};
+	let download = async {
+		let (remote, bytes) = Remote::download(&dir, db_name).await?;
+		let envelope = bytes
+			.as_deref()
+			.map(|b| Envelope::decode(b).ok_or("Invalid remote vault."))
+			.transpose()?;
+		Ok::<_, String>((remote, envelope))
+	}
+	.await;
+	let (provider, remote) = match download {
+		Ok((provider, envelope)) => (Ok(provider), envelope),
+		Err(err) if local.is_some() => (Err(err), None),
+		Err(err) => return Err(err),
+	};
+	let selected = match (local, remote) {
+		(Some(local), Some(remote)) => {
+			if local.salt != remote.salt {
+				return Err(
+					"A different vault already uses this name in the selected bucket.".into(),
+				);
+			}
+			Some(if local.modified >= remote.modified {
+				info("Local database loaded.");
+				local
+			} else {
+				info("Remote database loaded.");
+				remote
+			})
+		}
+		(local, remote) => local.or(remote),
+	};
+	let database = match selected {
+		Some(vault) => vault.unlock(master_password)?,
+		None => new_db(db_name, master_password),
+	};
+	// Imported files may have been renamed. Keep subsequent saves at the
+	// validated name the user opened, including for Android exports.
+	database.set_meta_entry(MetaEntry::new("db_name", db_name));
+	Ok(OpenedVault {
+		database,
+		remote: provider,
+	})
 }
 
 fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
@@ -113,63 +170,52 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Database {
 	db
 }
 
-fn db_envelope_from_vec(encoded: Vec<u8>) -> InteriorDatabase {
-	InteriorDatabase::deserialize(&decode_erasure(&encoded))
-}
-
-fn parse_decryption_parameters(
-	db_envelope: &InteriorDatabase,
-) -> ([u8; NONCE_SIZE], [u8; SALT_SIZE]) {
-	let pre_nonce = db_envelope
-		.get_meta_entry("nonce")
-		.unwrap()
-		.get_value()
-		.parse::<u128>()
-		.unwrap();
-	let mut nonce = [0u8; NONCE_SIZE];
-	nonce[..16].copy_from_slice(&pre_nonce.to_le_bytes());
-	let salt: [u8; SALT_SIZE] =
-		from_base64(db_envelope.get_meta_entry("salt").unwrap().get_value())
-			.try_into()
-			.unwrap();
-	(nonce, salt)
-}
-
-fn db_from_envelope(
-	db_envelope: InteriorDatabase,
-	master_key: SecretMemory,
+struct Envelope {
+	modified: u64,
 	nonce: [u8; NONCE_SIZE],
-) -> Database {
-	let db_encrypted_bin = from_base64(db_envelope.get_meta_entry("db").unwrap().get_value());
-	let db_compressed_bin_opt = decrypt(db_encrypted_bin, &master_key, nonce);
-	if db_compressed_bin_opt.is_none() {
-		error("Decryption failure.");
-		critical("Shutting down to prevent corruption.");
-		std::process::exit(1);
+	salt: [u8; SALT_SIZE],
+	ciphertext: Vec<u8>,
+}
+
+impl Envelope {
+	fn decode(bytes: &[u8]) -> Option<Self> {
+		use base64ct::{Base64, Encoding};
+		let recovered = decode_erasure(bytes)?;
+		let mut entries = recovered.as_slice();
+		let mut metadata = HashMap::new();
+		while !entries.is_empty() {
+			let (tag, fields) = next_tlv(&mut entries)?;
+			if tag != EntryTag::Meta as u8 {
+				return None;
+			}
+			let record = FieldAtlas::try_deserialize(fields)?;
+			metadata.insert(
+				record.get_str(MetaField::Name as u8)?.to_owned(),
+				record.get_str(MetaField::Value as u8)?.to_owned(),
+			);
+		}
+		let mut nonce = [0; NONCE_SIZE];
+		nonce[..16].copy_from_slice(&metadata.get("nonce")?.parse::<u128>().ok()?.to_le_bytes());
+		Some(Self {
+			modified: metadata.get("modified_ts")?.parse().ok()?,
+			salt: Base64::decode_vec(metadata.get("salt")?)
+				.ok()?
+				.try_into()
+				.ok()?,
+			nonce,
+			ciphertext: Base64::decode_vec(metadata.get("db")?).ok()?,
+		})
 	}
-	let db_bin = decompress(db_compressed_bin_opt.unwrap());
-	let db_core = InteriorDatabase::deserialize(&db_bin);
-	Database::old(master_key, db_core)
-}
 
-fn db_from_vec(encoded: Vec<u8>, master_password: Zeroizing<String>) -> Database {
-	let db_envelope = db_envelope_from_vec(encoded);
-	let (nonce, salt) = parse_decryption_parameters(&db_envelope);
-	let master_key = master_key_derivation(master_password, salt);
-	db_from_envelope(db_envelope, master_key, nonce)
-}
-
-pub async fn save(db: &Database) -> String {
-	let db_name = db
-		.get_meta_entry("db_name")
-		.unwrap()
-		.get_value()
-		.to_string();
-	let db_bin = db_to_vec(db);
-	to_file(&db_bin, &db_name);
-	upload_db(&db_bin, &db_name).await;
-	info("Database saved.");
-	"Database saved.".to_string()
+	fn unlock(self, password: Zeroizing<String>) -> Result<Database, String> {
+		let key = master_key_derivation(password, self.salt);
+		let compressed = decrypt(self.ciphertext, &key, self.nonce)
+			.ok_or("Cannot decrypt vault. Check the master password and pepper.")?;
+		Ok(Database::old(
+			key,
+			InteriorDatabase::deserialize(&decompress(compressed)),
+		))
+	}
 }
 
 fn db_to_vec(db: &Database) -> Vec<u8> {
@@ -179,15 +225,12 @@ fn db_to_vec(db: &Database) -> Vec<u8> {
 		.as_secs()
 		.to_string();
 	db.set_meta_entry(MetaEntry::new("modified_ts", &modified_ts));
-	let num_nonce =
-		db.get_meta_entry("nonce")
-			.unwrap()
-			.get_value()
-			.parse::<u128>()
-			.unwrap() + 1;
+	// Local copies can be saved independently while a provider is unavailable.
+	// Keep the existing decimal u128 field while giving each save a fresh nonce.
 	let mut nonce = [0u8; NONCE_SIZE];
-	nonce[..16].copy_from_slice(&num_nonce.to_le_bytes());
-	db.set_meta_entry(MetaEntry::new("nonce", &num_nonce.to_string()));
+	getrandom::fill(&mut nonce[..16]).unwrap();
+	let stored_nonce = u128::from_le_bytes(nonce[..16].try_into().unwrap());
+	db.set_meta_entry(MetaEntry::new("nonce", &stored_nonce.to_string()));
 	let db_core = db.serialize();
 	let db_core_compressed = compress(&db_core);
 	let db_core_encrypted = encrypt(
@@ -263,11 +306,6 @@ fn master_key_derivation(password: Zeroizing<String>, salt: [u8; SALT_SIZE]) -> 
 fn to_base64(msg: &[u8]) -> String {
 	use base64ct::{Base64, Encoding};
 	Base64::encode_string(msg)
-}
-
-fn from_base64(msg_enc: &str) -> Vec<u8> {
-	use base64ct::{Base64, Encoding};
-	Base64::decode_vec(msg_enc).unwrap()
 }
 
 // Grow by copying into a new wiping allocation, so a realloc never abandons
@@ -389,9 +427,14 @@ fn encode_erasure(data: &[u8]) -> Vec<u8> {
 	output
 }
 
-fn decode_erasure(encoded: &[u8]) -> Vec<u8> {
+fn decode_erasure(encoded: &[u8]) -> Option<Vec<u8>> {
 	use reed_solomon_erasure::galois_8::ReedSolomon;
 	let chunk_size = encoded.len() / ERASURE_TOTAL_SHARDS;
+	if chunk_size < 40 + ERASURE_MIN_SHARD_SIZE
+		|| !encoded.len().is_multiple_of(ERASURE_TOTAL_SHARDS)
+	{
+		return None;
+	}
 	let mut original_len = None;
 	let mut shards: Vec<Option<Vec<u8>>> = Vec::new();
 	for chunk in encoded.chunks_exact(chunk_size) {
@@ -406,7 +449,7 @@ fn decode_erasure(encoded: &[u8]) -> Vec<u8> {
 		}
 	}
 	let rs = ReedSolomon::new(ERASURE_DATA_SHARDS, ERASURE_PARITY_SHARDS).unwrap();
-	rs.reconstruct_data(&mut shards).unwrap();
+	rs.reconstruct_data(&mut shards).ok()?;
 	let mut recovered: Vec<u8> = shards
 		.iter()
 		.take(ERASURE_DATA_SHARDS)
@@ -414,145 +457,57 @@ fn decode_erasure(encoded: &[u8]) -> Vec<u8> {
 		.flatten()
 		.copied()
 		.collect();
-	recovered.truncate(original_len.unwrap() as usize);
-	recovered
+	let length = usize::try_from(original_len?).ok()?;
+	if length > recovered.len() {
+		return None;
+	}
+	recovered.truncate(length);
+	Some(recovered)
 }
 
-fn to_file(dat: &[u8], db_name: &str) {
+fn to_file(dat: &[u8], db_name: &str) -> std::io::Result<()> {
 	let tmp_path = temp_path(db_name);
-	let mut file = fs::File::create(&tmp_path).unwrap();
-	file.write_all(dat).unwrap();
-	file.sync_all().unwrap();
+	let mut file = fs::File::create(&tmp_path)?;
+	file.write_all(dat)?;
+	file.sync_all()?;
 	mem::drop(file);
 	let path = db_path(db_name);
-	fs::rename(&tmp_path, &path).unwrap();
+	fs::rename(&tmp_path, &path)?;
 	if let Some(parent) = path.parent() {
-		let dir = fs::File::open(parent).unwrap();
-		dir.sync_all().unwrap();
+		let dir = fs::File::open(parent)?;
+		dir.sync_all()?;
 	}
-}
-
-fn from_file(db_name: &str) -> Vec<u8> {
-	let path = db_path(db_name);
-	fs::read(path).unwrap()
-}
-
-fn load_backblaze_creds() -> Vec<String> {
-	String::from_utf8(
-		Command::new("systemd-creds")
-			.args(["decrypt", "--user", "--name=backblaze", &backblaze_path()])
-			.output()
-			.unwrap()
-			.stdout,
-	)
-	.unwrap()
-	.split("\0")
-	.map(|x| x.to_owned())
-	.collect()
-}
-
-async fn upload_db(db_bin: &[u8], db_name: &str) -> Option<String> {
-	use sha1::{Digest, Sha1};
-	let backblaze_creds = load_backblaze_creds();
-	let api_key = to_base64(format!("{}:{}", backblaze_creds[1], backblaze_creds[2]).as_bytes());
-	let auth_url = "https://api.backblazeb2.com/b2api/v2/b2_authorize_account";
-	let b2 = reqwest::Client::new();
-	let auth_req = b2
-		.get(auth_url)
-		.header("Authorization", format!("Basic {api_key}"))
-		.build()
-		.unwrap();
-	let auth_resp = b2.execute(auth_req).await.unwrap().text().await.unwrap();
-	let auth: HashMap<String, serde_json::Value> = serde_json::from_str(&auth_resp).unwrap();
-	let auth_token = auth["authorizationToken"]
-		.clone()
-		.as_str()
-		.unwrap()
-		.to_string();
-	let bucket_id = auth["allowed"]["bucketId"]
-		.clone()
-		.as_str()
-		.unwrap()
-		.to_string();
-	let api_url = auth["apiUrl"].clone().as_str().unwrap().to_string();
-	let upload_url_req = b2
-		.post(format!("{api_url}/b2api/v2/b2_get_upload_url"))
-		.body(format!("{{\"bucketId\":\"{bucket_id}\"}}"))
-		.header("Authorization", auth_token)
-		.build()
-		.unwrap();
-	let upload_url_resp = b2
-		.execute(upload_url_req)
-		.await
-		.unwrap()
-		.text()
-		.await
-		.unwrap();
-	let upload_url_resp_map: HashMap<String, serde_json::Value> =
-		serde_json::from_str(&upload_url_resp).unwrap();
-	let upload_url = upload_url_resp_map["uploadUrl"]
-		.clone()
-		.as_str()
-		.unwrap()
-		.to_string();
-	let upload_token = upload_url_resp_map["authorizationToken"]
-		.clone()
-		.as_str()
-		.unwrap()
-		.to_string();
-	let mut sha1_hasher: Sha1 = Sha1::new();
-	let body = to_base64(db_bin);
-	sha1_hasher.update(body.as_bytes());
-	let sha1_hash = hex::encode(sha1_hasher.finalize());
-	let file_path = format!("{db_name}.digisafe");
-	let upload_req = b2
-		.post(upload_url)
-		.body(body)
-		.header("Authorization", upload_token)
-		.header("X-Bz-File-Name", file_path)
-		.header("Content-Type", "text/plain")
-		.header("X-Bz-Content-Sha1", sha1_hash)
-		.header("X-Bz-Info-Author", "DigiSafe")
-		.header("X-Bz-Server-Side-Encryption", "AES256")
-		.build()
-		.unwrap();
-	b2.execute(upload_req).await.unwrap().text().await.ok()
-}
-
-async fn download_db(db_name: &str) -> Option<Vec<u8>> {
-	let backblaze_creds = load_backblaze_creds();
-	let api_key = to_base64(format!("{}:{}", backblaze_creds[1], backblaze_creds[2]).as_bytes());
-	let auth_url = "https://api.backblazeb2.com/b2api/v2/b2_authorize_account";
-	let b2 = reqwest::Client::new();
-	let auth_req = b2
-		.get(auth_url)
-		.header("Authorization", format!("Basic {api_key}"))
-		.build()
-		.unwrap();
-	let auth_resp = b2.execute(auth_req).await.unwrap().text().await.unwrap();
-	let auth: HashMap<String, serde_json::Value> = serde_json::from_str(&auth_resp).unwrap();
-	let auth_token = auth["authorizationToken"]
-		.clone()
-		.as_str()
-		.unwrap()
-		.to_string();
-	let download_url = auth["downloadUrl"].clone().as_str().unwrap().to_string();
-	let download_req = b2
-		.get(format!("{download_url}/file/digisafe/{db_name}.digisafe"))
-		.header("Authorization", auth_token)
-		.build()
-		.unwrap();
-	let download_resp = b2.execute(download_req).await.unwrap();
-	if download_resp.status() == 200 {
-		Some(from_base64(&download_resp.text().await.unwrap()))
-	} else {
-		None
-	}
+	Ok(())
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn cloud_envelopes_roundtrip_and_reject_damaged_input() {
+		let db = Database::test_database();
+		db.set_meta_entry(MetaEntry::new("salt", &to_base64(&[42; SALT_SIZE])));
+		db.set_meta_entry(MetaEntry::new("nonce", "7"));
+		let encoded = db_to_vec(&db);
+		let envelope = Envelope::decode(&encoded).unwrap();
+		assert_eq!(envelope.salt, [42; SALT_SIZE]);
+		assert!(
+			decrypt(
+				envelope.ciphertext,
+				&db.clone_master_key().read().unwrap(),
+				envelope.nonce
+			)
+			.is_some()
+		);
+		db.set_meta_entry(MetaEntry::new("nonce", "7"));
+		assert_ne!(
+			Envelope::decode(&db_to_vec(&db)).unwrap().nonce,
+			envelope.nonce
+		);
+		assert!(Envelope::decode(&encoded[1..]).is_none());
+		assert!(Envelope::decode(&[]).is_none());
+		assert!(Envelope::decode(&encode_erasure(&[0, 100, 0, 0, 0])).is_none());
+	}
 	#[test]
 	fn existing_compression_and_cipher_format_are_preserved() {
 		use chacha20poly1305::{

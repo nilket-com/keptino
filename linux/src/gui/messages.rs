@@ -1,4 +1,4 @@
-use crate::storage::database::Database;
+use crate::storage::persistence::OpenedVault;
 use iced::widget::text_editor;
 use zeroize::Zeroizing;
 
@@ -36,5 +36,5 @@ pub enum Message {
 	TogglePasswordVisibility,
 	TogglePinVisibility,
 	ToggleNoteVisibility,
-	UnlockResult(Database),
+	UnlockResult(Result<OpenedVault, String>),
 }

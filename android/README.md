@@ -38,7 +38,8 @@ fallback to a weaker derivation.
    32-byte pepper encoded as 64 hexadecimal characters. A new seed cannot unlock
    an existing vault. Do not paste real credentials into test fixtures or logs.
 2. Optionally enter the Backblaze application key ID and application key. Both
-   must be supplied to enable sync. The bucket name is `digisafe`, matching Linux.
+   must be supplied to enable sync. For sync between Android and Linux, configure
+   Linux to use Backblaze and scope the key to the `digisafe` bucket.
    Leaving both empty enables local import/export use.
 3. Enter the database name. Import a Linux `.digisafe` file, or unlock with
    Backblaze enabled to download it. Import refuses to overwrite an existing local
@@ -132,10 +133,8 @@ test script. The test script replaces the debug application's test setup and
 vault files; use a dedicated emulator with no personal vaults. A real phone has
 not been used to validate memory availability or OEM lifecycle behavior.
 
-Android saves use a fresh random nonce rather than Linux's incrementing counter,
-avoiding nonce reuse between devices saving from the same starting file. The
-modified timestamp never moves backwards. Both remain readable by Linux without
-a format conversion. ARM64 and x86-64 libraries are built; only x86-64 has been
+Both apps choose a fresh random nonce on every save. Android also advances the
+modification timestamp on each save so Linux can recognize the newer copy. ARM64 and x86-64 libraries are built; only x86-64 has been
 executed in the emulator. `assembleRelease` produces an unsigned APK: distribution
 requires a signing configuration and key, which this repository does not contain.
 

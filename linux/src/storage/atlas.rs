@@ -6,6 +6,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+pub(super) fn next_tlv<'a>(bytes: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
+	let (header, rest) = bytes.split_at_checked(5)?;
+	let length = u32::from_le_bytes(header[1..].try_into().ok()?) as usize;
+	let (value, remaining) = rest.split_at_checked(length)?;
+	*bytes = remaining;
+	Some((header[0], value))
+}
+
 #[derive(Clone, Default)]
 pub struct FieldAtlas {
 	fields: BTreeMap<u8, Zeroizing<Vec<u8>>>,
@@ -13,19 +21,15 @@ pub struct FieldAtlas {
 
 impl FieldAtlas {
 	pub fn deserialize(data: &[u8]) -> Self {
+		Self::try_deserialize(data).expect("Invalid field record")
+	}
+	pub(super) fn try_deserialize(mut data: &[u8]) -> Option<Self> {
 		let mut fields = BTreeMap::new();
-		let mut cursor = 0;
-		while cursor < data.len() {
-			let field_type = data[cursor];
-			cursor += 1;
-			let len_bytes = &data[cursor..cursor + 4];
-			let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-			cursor += 4;
-			let value = &data[cursor..cursor + len];
-			fields.insert(field_type, value.to_vec().into());
-			cursor += len;
+		while !data.is_empty() {
+			let (tag, value) = next_tlv(&mut data)?;
+			fields.insert(tag, value.to_vec().into());
 		}
-		FieldAtlas { fields }
+		Some(Self { fields })
 	}
 	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
 		let mut buffer = Vec::with_capacity(self.fields.values().map(|v| 5 + v.len()).sum());

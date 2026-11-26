@@ -430,10 +430,8 @@ impl Vault {
 		// one is strictly newer, so a slow clock here must not hide a save.
 		let modified_ts = now().max(self.modified_ts().saturating_add(1));
 		self.store.set_meta("modified_ts", &modified_ts.to_string());
-		// Linux counts the nonce up by one per save. Two devices saving from
-		// the same state would then encrypt different data under one nonce,
-		// so draw it at random instead; Linux reads any u128 and keeps
-		// counting from it. The top byte stays clear so that never overflows.
+		// Older Linux versions increment this field after loading the vault.
+		// Leave room for that increment when choosing a fresh nonce.
 		let mut random = [0u8; 16];
 		getrandom::fill(&mut random[..15]).map_err(|_| Error::Kdf("no system randomness".into()))?;
 		let counter = u128::from_le_bytes(random).max(1);

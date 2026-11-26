@@ -93,6 +93,7 @@ pub fn unlock_screen<'a>(
 	db_name: &str,
 	db_password: &str,
 	is_processing: &bool,
+	status: &'a str,
 ) -> Element<'a, Message> {
 	let unlock_panel = container(center(
 		column![
@@ -114,7 +115,7 @@ pub fn unlock_screen<'a>(
 				DEFAULT_BUTTON_SIZE,
 			))
 			.height(40),
-			space().height(100),
+			center(text(status).color(colors::TEXT_STATUS)).height(100),
 		]
 		.spacing(20)
 		.width(600),

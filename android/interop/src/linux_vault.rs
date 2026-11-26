@@ -63,17 +63,19 @@ fn main() {
 		.enable_all()
 		.build()
 		.unwrap();
-	let db = runtime.block_on(persistence::load(db_name, Zeroizing::new(password.clone())));
+	let vault = runtime
+		.block_on(persistence::load(db_name, Zeroizing::new(password.clone())))
+		.expect("open Linux vault");
 	match command.as_str() {
-		"read" => println!("{}", read(&db)),
+		"read" => println!("{}", read(&vault.database)),
 		"write" => {
 			let mut input = String::new();
 			std::io::stdin().read_to_string(&mut input).unwrap();
 			let entries: Vec<Map<String, Value>> = serde_json::from_str(&input).unwrap();
 			for fields in &entries {
-				set(&db, fields);
+				set(&vault.database, fields);
 			}
-			runtime.block_on(persistence::save(&db));
+			assert_eq!(runtime.block_on(vault.save()), "Database saved and synced.");
 		}
 		_ => std::process::exit(2),
 	}

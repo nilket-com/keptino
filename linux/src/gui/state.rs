@@ -1,5 +1,8 @@
 use crate::gui::{components, messages::Message};
-use crate::storage::{database::Database, entry::PasswordEntry, persistence};
+use crate::storage::{
+	entry::PasswordEntry,
+	persistence::{self, OpenedVault},
+};
 use iced::{
 	Element, Event, Size, Subscription, Task, application, keyboard,
 	widget::{
@@ -19,6 +22,7 @@ struct LockedState {
 	db_name: String,
 	db_password: Zeroizing<String>,
 	is_processing: bool,
+	status: String,
 }
 
 struct UnlockedState {
@@ -31,7 +35,8 @@ struct UnlockedState {
 	last_interaction_time: Option<Instant>,
 	note: text_editor::Content,
 	status: String,
-	db: Database,
+	vault: OpenedVault,
+	saving: bool,
 }
 
 enum AppState {
@@ -70,6 +75,7 @@ fn new() -> AppState {
 		db_name: "".into(),
 		db_password: Zeroizing::new(String::new()),
 		is_processing: false,
+		status: String::new(),
 	})
 }
 
@@ -123,7 +129,8 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			db_name,
 			db_password,
 			is_processing,
-		}) => components::unlock_screen(db_name, db_password, is_processing),
+			status,
+		}) => components::unlock_screen(db_name, db_password, is_processing, status),
 		AppState::Unlocked(UnlockedState {
 			query,
 			password_entry,
@@ -134,7 +141,7 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			last_interaction_time: _,
 			note,
 			status,
-			db: _,
+			..
 		}) => components::password_screen(
 			query,
 			password_entry,
@@ -152,6 +159,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 		db_name,
 		db_password,
 		is_processing,
+		status,
 	}) = app_state
 	else {
 		unreachable!("update_locked called with non-Locked state")
@@ -162,6 +170,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				return Task::none();
 			}
 			*is_processing = true;
+			status.clear();
 			let db_name_clone = db_name.clone();
 			let unlock_password = std::mem::replace(db_password, Zeroizing::new(String::new()));
 			return Task::perform(
@@ -169,7 +178,11 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				Message::UnlockResult,
 			);
 		}
-		Message::UnlockResult(db) => {
+		Message::UnlockResult(Err(err)) => {
+			*is_processing = false;
+			*status = err;
+		}
+		Message::UnlockResult(Ok(vault)) => {
 			*app_state = AppState::Unlocked(UnlockedState {
 				query: "".into(),
 				password_entry: PasswordEntry::new(),
@@ -179,8 +192,9 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				last_copy_time: None,
 				last_interaction_time: Some(Instant::now()),
 				note: text_editor::Content::new(),
-				status: "Unlocked".into(),
-				db,
+				status: vault.status(),
+				vault,
+				saving: false,
 			});
 		}
 		Message::DbNameChanged(new_db_name) => {
@@ -217,11 +231,13 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 		last_interaction_time,
 		note,
 		status,
-		db,
+		vault,
+		saving,
 	}) = app_state
 	else {
 		unreachable!("update_unlocked called with locked state")
 	};
+	let db = &vault.database;
 	const IDLE_MESSAGE: &str = "Idle time remaining:";
 	match message {
 		Message::None | Message::Tick => {}
@@ -340,14 +356,15 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 		}
 		Message::Save => {
+			if *saving {
+				return Task::none();
+			}
+			*saving = true;
 			*status = "Saving Database...".to_string();
-			let db_clone = db.clone();
-			return Task::perform(
-				async move { persistence::save(&db_clone).await },
-				Message::SaveResult,
-			);
+			return Task::perform(vault.save(), Message::SaveResult);
 		}
 		Message::SaveResult(msg) => {
+			*saving = false;
 			*status = msg;
 		}
 		Message::CloseWindow => {
@@ -469,6 +486,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				db_name: "".into(),
 				db_password: Zeroizing::new(String::new()),
 				is_processing: false,
+				status: String::new(),
 			});
 		}
 		_ => {}
@@ -481,7 +499,7 @@ mod tests {
 	use super::*;
 
 	fn unlocked() -> AppState {
-		let db = Database::test_database();
+		let db = crate::storage::database::Database::test_database();
 		let mut entry = PasswordEntry::new();
 		entry.set_name("example");
 		entry.set_password("secret");
@@ -489,7 +507,10 @@ mod tests {
 		entry.set_note("private note");
 		db.set_password_entry(entry);
 		let mut app = new();
-		let _ = update(&mut app, Message::UnlockResult(db));
+		let _ = update(
+			&mut app,
+			Message::UnlockResult(Ok(OpenedVault::for_test(db))),
+		);
 		let _ = update(&mut app, Message::QueryInput("example".into()));
 		let _ = update(&mut app, Message::PasswordEntryGet);
 		app
@@ -512,7 +533,11 @@ mod tests {
 		let AppState::Unlocked(state) = &app else {
 			panic!()
 		};
-		let saved = state.db.get_password_entry_by_name("example").unwrap();
+		let saved = state
+			.vault
+			.database
+			.get_password_entry_by_name("example")
+			.unwrap();
 		assert_eq!(saved.get_password().as_str(), "secret");
 		assert_eq!(saved.get_note().as_str(), "private note");
 		let _ = update(&mut app, Message::TogglePasswordVisibility);
