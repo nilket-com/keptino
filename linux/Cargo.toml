@@ -17,8 +17,7 @@ assets = [
     ["target/release/keptino", "/usr/bin/keptino", "755"],
     ["debian/digisafe", "/usr/bin/digisafe", "755"],
     ["keptino.png", "/usr/share/pixmaps/keptino.png", "644"],
-    # Keep the desktop ID used by existing pinned launchers.
-    ["keptino.desktop", "/usr/share/applications/digisafe.desktop", "644"],
+    ["keptino.desktop", "/usr/share/applications/keptino.desktop", "644"],
 ]
 depends = "argon2, systemd, libcap2-bin"
 maintainer-scripts = "debian"

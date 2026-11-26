@@ -3,8 +3,9 @@
 A password vault by nilket for Linux and Android.
 
 Keptino was previously named DigiSafe. On Linux, launch it with `keptino`. The
-Debian package replaces `digisafe` and keeps the old command and pinned desktop
-launcher working. Run `./linux/setup.sh` before opening Keptino. If
+Debian package replaces `digisafe` and keeps the old command working. If you
+pinned DigiSafe to your dock, remove the old pin and pin Keptino after upgrading.
+Run `./linux/setup.sh` before opening Keptino. If
 `~/.config/keptino` is absent, setup moves `~/.config/digisafe` there with its
 cloud credentials. It renames vaults to `.keptino` and re-wraps the TPM-sealed
 pepper under its new credential name without writing the plaintext to disk.

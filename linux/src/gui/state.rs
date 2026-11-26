@@ -65,6 +65,10 @@ pub fn run() -> Result {
 			position: window::Position::Centered,
 			decorations: false,
 			transparent: false,
+			platform_specific: window::settings::PlatformSpecific {
+				application_id: "keptino".into(),
+				..Default::default()
+			},
 			..Default::default()
 		})
 		.run()
