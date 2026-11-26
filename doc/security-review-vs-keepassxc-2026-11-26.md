@@ -140,7 +140,7 @@ Linux, all on `main`:
 | Finding | State |
 | --- | --- |
 | K1 envelope authentication and revision | Reopened on the user's observation and settled as the mirrored-TLV design: the plaintext meta set must equal the authenticated inner copy after decryption, which protects every existing vault with no re-save and no new format, and lets `revision` and `kdf_*` ride as ordinary TLV fields that older readers preserve. The marked AAD files written on 2026-11-26 still open and convert on save. Both readers landed and both writers now emit the unmarked mirrored form (flipped together); the marked AAD fixtures stay as regression tests. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
-| K2 dependencies | Updated; seven-day cooldown in `.cargo/config.toml`; `cargo audit` in setup; zero vulnerabilities. Of the eight unmaintained/unsound warnings, two left with iced's unused `highlighter` feature (syntect) and one with chrono (replaced by jiff); the remaining four, under reed-solomon-erasure and iced's text and SVG stack, are accepted with reasons in `linux/.cargo/audit.toml` until those upstreams move |
+| K2 dependencies | Updated; seven-day cooldown in `.cargo/config.toml`; `cargo audit` in setup; zero vulnerabilities. Of the eight unmaintained/unsound warnings, two left with iced's unused `highlighter` feature (syntect) and one with chrono (replaced by jiff); reed-solomon-erasure and its instant and lru dependencies left when the Reed-Solomon code moved in-tree (`erasure/`, no dependencies, parity proven byte-identical against the old crate and every committed fixture); the two under iced's text and SVG stack, plus a lockfile-only lru listing, are accepted with reasons in `linux/.cargo/audit.toml` until iced moves |
 | K3 lock | Lock button, Ctrl+L, logind and screensaver D-Bus listener (verified by Codex on a private bus) |
 | K4 clipboard | Conditional, state-independent wipe; cleared on lock |
 | K5 file mode | 0600 files, 0700 directory |
@@ -150,7 +150,7 @@ Linux, all on `main`:
 | K10 KDF parameters | `kdf_m`, `kdf_t`, `kdf_p` written and honoured in format 2 |
 | K11 lifetimes | Absolute tool paths, clean error for a missing pepper, provider credential kept in secret memory for the session |
 | K13 minor | WAYLAND_DISPLAY only defaulted, lsblk optional, cargo-deb pinned, unused dependency dropped |
-| S1 Landlock | Done; needs one desktop launch to confirm fonts and the compositor under the sandbox |
+| S1 Landlock | Done; Codex confirmed live Wayland rendering and lock events under the sandbox |
 | Commit hygiene | ket's commit preflight and hooks adopted; full history re-signed |
 
 Android (Codex): Phase 1 landed (K4 clipboard on lock and finish, K3 immediate session revocation, K6 bounded and verified writes, K2 dependency refresh under the cooldown). K1 reader, K10 costs and the rollback guard in progress at the time of writing; interop harness wired for `harness` and `write-format-2` features.
