@@ -139,7 +139,7 @@ Linux, all on `main`:
 
 | Finding | State |
 | --- | --- |
-| K1 envelope authentication and revision | Reader and writer done; writer upgrade switch (`WRITE_FORMAT_2`) stays off until the Android reader and format-2 fixtures land. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
+| K1 envelope authentication and revision | Closed. Both platforms read and write format 2 (writers flipped together); fixtures for both formats in `android/droid/tests/fixtures`; cross-reading verified on an Android 17 device and through the mock B2 harness. Upload guard uses the remote object fingerprint seen at unlock. A legacy copy counts as revision 0 against a trusted revision. |
 | K2 dependencies | Updated; seven-day cooldown in `.cargo/config.toml`; `cargo audit` in setup; zero advisories |
 | K3 lock | Lock button, Ctrl+L, logind and screensaver D-Bus listener (verified by Codex on a private bus) |
 | K4 clipboard | Conditional, state-independent wipe; cleared on lock |
@@ -155,4 +155,4 @@ Linux, all on `main`:
 
 Android (Codex): Phase 1 landed (K4 clipboard on lock and finish, K3 immediate session revocation, K6 bounded and verified writes, K2 dependency refresh under the cooldown). K1 reader, K10 costs and the rollback guard in progress at the time of writing; interop harness wired for `harness` and `write-format-2` features.
 
-Open: K1 writer flip (joint, one release), K7 Android memory layer, K9 Android limits, S2 FIDO2, password health report, TOTP.
+Open: K7 Android memory layer, K9 Android limits, S2 FIDO2, password health report, TOTP.
