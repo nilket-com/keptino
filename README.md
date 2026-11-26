@@ -30,7 +30,7 @@ Android uses Android Keystore and the lifecycle protections documented separatel
  - Dynamic linker hijacking blockage.
  - Tracing blockage. (ptrace, strace, ltrace, gdb)
  - Forensic-resistant clipboard clearing mechanism that only wipes what Keptino copied.
- - Lock button and Ctrl+L; idle lock after four minutes.
+ - Lock button and Ctrl+L; idle lock after four minutes; locks when the session locks or the machine sleeps (logind and screensaver D-Bus signals).
  - Uniform 24-character password generator; entries are deleted on a confirming second press.
  - Linux vault sync on unlock and save with Backblaze B2, Amazon S3, Google Cloud Storage, or Cloudflare R2. API credentials use systemd-creds.
  - Atomic file io, with the three previous saves kept as `<db>.keptino.1` to `.3` for recovery.

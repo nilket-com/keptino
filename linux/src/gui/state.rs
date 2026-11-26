@@ -1,4 +1,4 @@
-use crate::gui::{clipboard, components, generator, messages::Message};
+use crate::gui::{clipboard, components, generator, messages::Message, session_lock};
 use crate::storage::{
 	entry::PasswordEntry,
 	persistence::{self, OpenedVault},
@@ -91,7 +91,10 @@ fn update(app_state: &mut AppState, message: Message) -> Task<Message> {
 
 fn tick_subscription(app_state: &AppState) -> Subscription<Message> {
 	if let AppState::Unlocked(_) = &app_state {
-		iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+		Subscription::batch(vec![
+			iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+			session_lock::subscription(),
+		])
 	} else {
 		Subscription::none()
 	}
