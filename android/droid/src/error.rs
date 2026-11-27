@@ -7,6 +7,8 @@ pub enum Error {
 	Corrupt(&'static str),
 	/// Authentication failed: wrong password or pepper, or altered data.
 	Decryption,
+	/// None of the candidate's security-key slots could be opened.
+	SecurityKeyUnavailable,
 	/// A caller-supplied argument is unusable.
 	Invalid(&'static str),
 	/// Key derivation could not run, typically for lack of memory.
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
 		match self {
 			Error::Corrupt(what) => write!(f, "Corrupt vault: {what}."),
 			Error::Decryption => write!(f, "Decryption failure."),
+			Error::SecurityKeyUnavailable => write!(f, "Security key unavailable."),
 			Error::Invalid(what) => write!(f, "Invalid argument: {what}."),
 			Error::Kdf(what) => write!(f, "Key derivation failure: {what}."),
 			Error::Memory(what) => write!(f, "Memory failure: {what}."),

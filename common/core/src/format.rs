@@ -326,6 +326,10 @@ pub struct Envelope {
 	/// Every plaintext meta entry except the ciphertext itself, as stored.
 	pub mirror: Vec<(String, String)>,
 	pub aad: Vec<u8>,
+	/// The enrolled security keys' slots, in order; empty for a vault
+	/// without them. Read from the plaintext and vouched for by the mirror
+	/// check, like the cost.
+	pub slots: Vec<crate::roaming::KeySlot>,
 }
 
 impl Envelope {
@@ -392,6 +396,12 @@ impl Envelope {
 			.map_err(|_| damaged())?;
 		let ciphertext =
 			Base64::decode_vec(metadata.get("db").ok_or_else(damaged)?).map_err(|_| damaged())?;
+		let slots = crate::roaming::slots_from_meta(
+			pairs
+				.iter()
+				.map(|(name, value)| (name.as_str(), value.as_str())),
+		)
+		.map_err(|_| damaged())?;
 		Ok(Self {
 			modified: metadata
 				.get("modified_ts")
@@ -405,6 +415,7 @@ impl Envelope {
 			ciphertext,
 			mirror,
 			aad,
+			slots,
 		})
 	}
 
@@ -915,6 +926,7 @@ mod tests {
 			FIXTURE_PASSWORD,
 			&pepper,
 			&envelope.salt,
+			None,
 			envelope.kdf,
 			&mut key,
 		)
@@ -951,6 +963,63 @@ mod tests {
 			if name.starts_with("linux-release") {
 				open_fixture(name, file);
 			}
+		}
+	}
+
+	#[test]
+	fn key_slots_ride_in_the_meta_set_and_a_bad_set_is_damaged() {
+		use crate::roaming::{KeySlot, UvMode};
+		let slot = |n: u8| {
+			KeySlot::wrap(UvMode::TouchOnly, &[n; 8], [n; 32], &[n; 32], &[9; 32])
+				.unwrap()
+				.encode()
+		};
+		let default = KdfParams::DEBUG;
+		let build = |extra: &[(&str, &str)]| {
+			let mut meta: Vec<(&str, &str)> = vec![
+				("db_name", "example"),
+				("modified_ts", "100"),
+				("nonce", "7"),
+				("salt", "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio="),
+				("db", "AAAA"),
+			];
+			meta.extend_from_slice(extra);
+			let mut recovered = Vec::new();
+			for (name, value) in &meta {
+				push_record(&mut recovered, TAG_META, &meta_entry(name, value));
+			}
+			encode_shards(&recovered)
+		};
+		let (one, two, three) = (slot(1), slot(2), slot(3));
+		assert!(
+			Envelope::parse(&build(&[]), default)
+				.unwrap()
+				.slots
+				.is_empty()
+		);
+		let slots = Envelope::parse(
+			&build(&[("fido_slot_1", &one), ("fido_slot_2", &two)]),
+			default,
+		)
+		.unwrap()
+		.slots;
+		assert_eq!(slots.len(), 2);
+		assert_eq!(slots[0].cred_id, vec![1; 8]);
+		assert_eq!(slots[1].cred_id, vec![2; 8]);
+		for bad in [
+			vec![("fido_slot_2", two.as_str())],
+			vec![
+				("fido_slot_1", one.as_str()),
+				("fido_slot_3", three.as_str()),
+			],
+			vec![("fido_slot_5", one.as_str())],
+			vec![("fido_slot_1", "bm90IGEgc2xvdA==")],
+		] {
+			assert_eq!(
+				Envelope::parse(&build(&bad), default).err(),
+				Some(FormatError::Damaged),
+				"{bad:?}"
+			);
 		}
 	}
 

@@ -291,8 +291,15 @@ impl KeyStore for LockedKey {
 	}
 }
 
+#[cfg(test)]
+std::thread_local! {
+	pub(crate) static ARENA_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Allocate the core's Argon2 arena and exclude its pages from process dumps.
 fn derivation_arena(mem_kib: u32) -> Result<Vec<Block>> {
+	#[cfg(test)]
+	ARENA_ENTRIES.set(ARENA_ENTRIES.get() + 1);
 	#[cfg(target_os = "android")]
 	if let Ok(info) = std::fs::read_to_string("/proc/meminfo")
 		&& let Some(available) = info.lines().find_map(|line| {
@@ -331,11 +338,20 @@ pub(crate) fn derive_master_key(
 	password: &[u8],
 	pepper: &[u8; PEPPER_SIZE],
 	salt: &[u8; SALT_SIZE],
+	roaming: Option<&[u8; 32]>,
 	cost: KdfParams,
 ) -> Result<LockedKey> {
 	let mut key = LockedKey::new()?;
 	let mut blocks = derivation_arena(cost.m_cost)?;
-	crypto::derive_master_key_in(password, pepper, salt, cost, &mut blocks, key.bytes_mut())?;
+	crypto::derive_master_key_in(
+		password,
+		pepper,
+		salt,
+		roaming,
+		cost,
+		&mut blocks,
+		key.bytes_mut(),
+	)?;
 	Ok(key)
 }
 

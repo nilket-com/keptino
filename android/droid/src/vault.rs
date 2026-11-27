@@ -10,7 +10,7 @@ use keptino_core::{
 	format::{Envelope, KdfParams, field},
 	generator::{self, Kind},
 	health,
-	vault::{self, Database, OpenError, PasswordEntry, UnlockError, unlock},
+	vault::{self, Candidate, Database, Derived, OpenError, PasswordEntry, UnlockError, unlock},
 };
 use zeroize::Zeroizing;
 /// Where an opened database came from.
@@ -52,13 +52,14 @@ impl Vault {
 		remote: Option<&[u8]>,
 		mem_kib: u32,
 	) -> Result<Self> {
-		Self::open_at(
+		Self::open_with_security_key(
 			db_name,
 			password,
 			pepper,
 			local,
 			remote,
 			KdfParams::memory_only(mem_kib),
+			|_| Derived::Unavailable,
 		)
 	}
 
@@ -71,16 +72,21 @@ impl Vault {
 		pepper: &[u8; PEPPER_SIZE],
 		cost: KdfParams,
 	) -> Result<Self> {
-		Self::open_at(db_name, password, pepper, None, None, cost)
+		Self::open_with_security_key(db_name, password, pepper, None, None, cost, |_| {
+			Derived::Unavailable
+		})
 	}
 
-	fn open_at(
+	/// Resolve a protected candidate's slots before entering the Android KDF.
+	/// Slotless candidates follow the original password-and-pepper path.
+	pub fn open_with_security_key(
 		db_name: &str,
 		password: &[u8],
 		pepper: &[u8; PEPPER_SIZE],
 		local: Option<&[u8]>,
 		remote: Option<&[u8]>,
 		default_cost: KdfParams,
+		mut resolve: impl FnMut(&Candidate<'_>) -> Derived<Zeroizing<[u8; 32]>, Error>,
 	) -> Result<Self> {
 		let parse = |file: &[u8]| Envelope::parse(file, default_cost).map_err(Error::from);
 		let local = local.map(parse);
@@ -100,8 +106,28 @@ impl Vault {
 			(Some(Err(err)), _) | (_, Some(Err(err))) => return Err(err),
 			(local, remote) => (local.map(Result::unwrap), remote.map(Result::unwrap)),
 		};
-		let derive =
-			|salt: &[u8; 32], cost: KdfParams| derive_master_key(password, pepper, salt, cost);
+		let derive = |candidate: &Candidate<'_>| {
+			let roaming = if candidate.slots.is_empty() {
+				None
+			} else {
+				match resolve(candidate) {
+					Derived::Key(secret) => Some(secret),
+					Derived::Unavailable => return Derived::Unavailable,
+					Derived::Canceled => return Derived::Canceled,
+					Derived::Failed(err) => return Derived::Failed(err),
+				}
+			};
+			match derive_master_key(
+				password,
+				pepper,
+				candidate.salt,
+				roaming.as_deref(),
+				candidate.cost,
+			) {
+				Ok(key) => Derived::Key(key),
+				Err(err) => Derived::Failed(err),
+			}
+		};
 		let unlocked =
 			unlock(db_name, local, remote, default_cost, derive).map_err(|err| match err {
 				UnlockError::DifferentVault => {
@@ -113,6 +139,8 @@ impl Vault {
 				UnlockError::Open(OpenError::Memory(_)) => {
 					Error::Memory("cannot allocate vault key memory")
 				}
+				UnlockError::Unavailable => Error::SecurityKeyUnavailable,
+				UnlockError::Canceled => Error::Invalid("unlock canceled"),
 			})?;
 		let source = match unlocked.source {
 			vault::Source::New => Source::New,
@@ -264,6 +292,10 @@ impl Vault {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/fido.rs"]
+mod fixture_key;
+
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use keptino_core::format::{FormatError, decode_shards, encode_shards};
@@ -298,6 +330,76 @@ mod tests {
 		)
 		.unwrap();
 		pepper
+	}
+
+	#[test]
+	fn security_key_fixture_rejects_unavailable_slots_before_the_android_arena() {
+		use super::fixture_key::{FILE, PIN, assert_slots, backup_key, daily_key};
+		use crate::security::ARENA_ENTRIES;
+		use keptino_core::roaming::{KeySlot, UvMode};
+		use keptino_fido::sim::{Authenticator, Device, HidDevice};
+
+		let run = |file: &[u8], key, pin, expected_slot, remote: Option<&[u8]>| {
+			let mut device = Device::Hid(HidDevice::new(key));
+			ARENA_ENTRIES.set(0);
+			let result = Vault::open_with_security_key(
+				"vaultfido",
+				b"correct horse battery staple",
+				&fixture_pepper(),
+				Some(file),
+				remote,
+				KdfParams::DEBUG,
+				|candidate| assert_slots(&mut device, candidate.slots, pin, expected_slot),
+			);
+			(
+				result.map(|v| (v.source(), v.uploads_paused)),
+				ARENA_ENTRIES.get(),
+			)
+		};
+		assert_eq!(
+			run(FILE, daily_key(), Some(PIN), 0, None),
+			(Ok((Source::Local, false)), 1)
+		);
+		assert_eq!(
+			run(FILE, backup_key(), None, 1, None),
+			(Ok((Source::Local, false)), 1)
+		);
+		assert_eq!(
+			run(
+				FILE,
+				Authenticator::new([9; 32]).with_pin(PIN),
+				Some(PIN),
+				0,
+				None
+			),
+			(Err(Error::SecurityKeyUnavailable), 0)
+		);
+
+		let mut header = Store::<LockedKey>::deserialize(&decode_shards(FILE).unwrap()).unwrap();
+		header.remove_meta_entry("fido_slot_2");
+		let meta = header.get_meta_entry("fido_slot_1").unwrap();
+		let mut slot = KeySlot::decode(meta.get_value()).unwrap();
+		slot.uv_mode = UvMode::TouchOnly;
+		header.set_meta_entry(MetaEntry::new("fido_slot_1", &slot.encode()));
+		let flipped = encode_shards(&header.serialize());
+		assert_eq!(
+			run(&flipped, daily_key(), Some(PIN), 0, None),
+			(Err(Error::SecurityKeyUnavailable), 0)
+		);
+		assert_eq!(
+			run(&flipped, daily_key(), Some(PIN), 0, Some(FILE)),
+			(Ok((Source::Remote, true)), 1)
+		);
+		header.remove_meta_entry("fido_slot_1");
+		let stripped = encode_shards(&header.serialize());
+		assert_eq!(
+			run(&stripped, daily_key(), None, 0, None),
+			(Err(Error::Decryption), 1)
+		);
+		assert_eq!(
+			run(FILE, daily_key(), None, 0, Some(&stripped)),
+			(Err(Error::Invalid("unlock canceled")), 0)
+		);
 	}
 
 	#[test]

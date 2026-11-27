@@ -3,7 +3,12 @@
 
 use droid::{Commit, Error, Source, Vault, field, security};
 use keptino_core::format::KdfParams;
+use keptino_core::roaming::UvMode;
 use keptino_core::vault::KeyStore;
+use keptino_fido::sim::{Device, HidDevice, NfcDevice};
+
+#[path = "support/fido.rs"]
+mod fixture_key;
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 const PEPPER_SEED: &[u8] = b"digisafe test pepper seed";
@@ -66,6 +71,65 @@ fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 		Vault::open(name, b"wrong", &pepper(), Some(file), None, mem_kib).err(),
 		Some(Error::Decryption)
 	);
+}
+
+#[test]
+fn opens_the_two_slot_fixture_with_either_enrolled_key() {
+	use fixture_key::{FILE, PIN, assert_slots, backup_key, daily_key};
+
+	for (mut device, index, mode, pin) in [
+		(
+			Device::Hid(HidDevice::new(daily_key())),
+			0,
+			UvMode::Verified,
+			Some(PIN),
+		),
+		(
+			Device::Nfc(NfcDevice::new(backup_key())),
+			1,
+			UvMode::TouchOnly,
+			None,
+		),
+	] {
+		let mut vault = Vault::open_with_security_key(
+			"vaultfido",
+			PASSWORD,
+			&pepper(),
+			Some(FILE),
+			None,
+			KdfParams::DEBUG,
+			|candidate| {
+				assert_eq!(candidate.slots.len(), 2);
+				let slot = &candidate.slots[index];
+				assert_eq!(slot.uv_mode, mode);
+				assert_slots(&mut device, candidate.slots, pin, index)
+			},
+		)
+		.unwrap();
+		assert_eq!(vault.source(), Source::Local);
+		assert_eq!(vault.revision(), 1);
+		assert_eq!(vault.meta("db_name").as_deref(), Some("vaultfido"));
+		assert_eq!(vault.names(), ["bank", "mail"]);
+		for (entry, user, password, url) in [
+			(
+				"bank",
+				"alice",
+				"hunter2 ünïcödé 🔑",
+				"https://bank.example",
+			),
+			(
+				"mail",
+				"alice@example.com",
+				"a long passphrase here",
+				"https://mail.example",
+			),
+		] {
+			assert!(vault.query(entry));
+			assert_eq!(text(&vault, field::USERNAME), user);
+			assert_eq!(text(&vault, field::PASSWORD), password);
+			assert_eq!(text(&vault, field::URL), url);
+		}
+	}
 }
 
 #[test]

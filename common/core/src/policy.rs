@@ -58,6 +58,7 @@ mod tests {
 			ciphertext: Vec::new(),
 			mirror: Vec::new(),
 			aad: Vec::new(),
+			slots: Vec::new(),
 		}
 	}
 

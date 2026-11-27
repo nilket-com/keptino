@@ -12,7 +12,7 @@ use keptino_core::{
 	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
 	format::{Envelope, KdfParams, MAX_FILE_BYTES},
 	policy,
-	vault::{Caution, KeyStore, Source, UnlockError, unlock},
+	vault::{Candidate, Caution, Derived, KeyStore, Source, UnlockError, unlock},
 };
 use std::{
 	env, fs,
@@ -219,8 +219,17 @@ pub async fn load(
 	// across a rekey, a cost; the password is wiped when the closure drops.
 	let password = master_password;
 	let pepper = load_pepper()?;
-	let derive = |salt: &[u8; SALT_SIZE], cost: KdfParams| {
-		master_key_derivation(&password, &pepper, salt, cost)
+	// Security keys arrive with ADR 0012; until then every copy derives
+	// from the password and pepper alone.
+	let derive = |candidate: &Candidate<'_>| match master_key_derivation(
+		&password,
+		&pepper,
+		candidate.salt,
+		None,
+		candidate.cost,
+	) {
+		Ok(key) => Derived::Key(key),
+		Err(err) => Derived::Failed(err),
 	};
 	let unlocked = unlock(db_name, local, remote, KdfParams::BUILD_DEFAULT, derive).map_err(
 		|err| match err {
@@ -306,10 +315,11 @@ fn master_key_derivation(
 	password: &str,
 	pepper: &[u8; PEPPER_SIZE],
 	salt: &[u8; SALT_SIZE],
+	roaming: Option<&[u8; crypto::ROAMING_SIZE]>,
 	kdf: KdfParams,
 ) -> Result<SecretMemory, String> {
 	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
-	crypto::derive_master_key(password.as_bytes(), pepper, salt, kdf, &mut key)
+	crypto::derive_master_key(password.as_bytes(), pepper, salt, roaming, kdf, &mut key)
 		.map_err(|err| err.to_string())?;
 	SecretMemory::from_bytes(&key).map_err(|_| "Secret memory unavailable.".into())
 }
@@ -432,6 +442,74 @@ mod tests {
 			0o600
 		);
 		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	/// The ADR 0011 fixture through the shared unlock with secret memory
+	/// keys: a simulated security key answers for the slots, the roaming
+	/// secret goes into the derivation, and a stranger's key never reaches
+	/// the Argon2 arena.
+	#[test]
+	fn the_two_slot_fixture_opens_through_unlock_with_a_simulated_key() {
+		use keptino_core::vault::{Candidate, Derived, unlock};
+		use keptino_fido::ceremony::{Ceremony, Failure, Outcome, Step};
+		use keptino_fido::sim::{Authenticator, Device, HidDevice};
+		const FIXTURE: &[u8] =
+			include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
+		const SEED: [u8; 32] = *b"keptino-fixture-security-key-001";
+		let mut pepper = [0u8; PEPPER_SIZE];
+		hex::decode_to_slice(
+			"3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1",
+			&mut pepper,
+		)
+		.unwrap();
+		let derivations = std::cell::Cell::new(0);
+		let open_with = |seed: [u8; 32]| {
+			let mut device = Device::Hid(HidDevice::new(Authenticator::new(seed).with_pin("1234")));
+			let derive = |candidate: &Candidate<'_>| {
+				let (mut ceremony, step) =
+					Ceremony::assert(device.transport(), candidate.slots.to_vec());
+				match device.drive(&mut ceremony, step, Some("1234")) {
+					Step::Done(Outcome::Asserted { roaming, .. }) => {
+						derivations.set(derivations.get() + 1);
+						match master_key_derivation(
+							"correct horse battery staple",
+							&pepper,
+							candidate.salt,
+							Some(&roaming),
+							candidate.cost,
+						) {
+							Ok(key) => Derived::Key(key),
+							Err(err) => Derived::Failed(err),
+						}
+					}
+					Step::Failed(Failure::Canceled) => Derived::Canceled,
+					_ => Derived::Unavailable,
+				}
+			};
+			let envelope = Envelope::parse(FIXTURE, KdfParams::DEBUG).unwrap();
+			unlock("vaultfido", Some(envelope), None, KdfParams::DEBUG, derive)
+		};
+		let opened = open_with(SEED).unwrap();
+		assert_eq!(derivations.get(), 1);
+		assert_eq!(
+			opened.database.names(),
+			vec!["bank".to_string(), "mail".to_string()]
+		);
+		assert_eq!(
+			opened
+				.database
+				.get_password_entry_by_name("mail")
+				.unwrap()
+				.get_username(),
+			"alice@example.com"
+		);
+		opened.database.zeroize();
+		assert_eq!(open_with([9; 32]).err(), Some(UnlockError::Unavailable));
+		assert_eq!(
+			derivations.get(),
+			1,
+			"a stranger's key never reached the arena"
+		);
 	}
 
 	/// The core model over real secret memory: the save path and the reopen

@@ -506,6 +506,10 @@ mod tests {
 					"../../../android/droid/tests/fixtures/linux-release-unmarked.keptino"
 				)[..],
 			),
+			(
+				"linux-debug-fido",
+				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino")[..],
+			),
 		] {
 			let stored = fixture_shards(file);
 			let mut recomputed = stored.clone();

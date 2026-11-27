@@ -58,6 +58,7 @@ Pick the established term and keep it; a new word reads as a new concept.
 | passphrase | hyphen-joined random words drawn from the EFF large wordlist | word password, mnemonic |
 | character class | one of the four switchable character sets: uppercase, lowercase, digits, symbols | charset, pool |
 | health report | the offline summary of reused, weak, stale and empty passwords in a vault | audit, security score |
+| roaming secret | the 32-byte random secret wrapped into each key slot and folded into key derivation | slot secret, key material |
 
 Add a term here before introducing it.
 

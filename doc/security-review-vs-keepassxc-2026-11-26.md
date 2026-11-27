@@ -169,4 +169,4 @@ All on `main`:
 
 Android (Codex): K1, K2, K3 (session revocation), K4, K6 (bounded and verified writes), K7 (sealed in-memory vault via `common/core::vault`), K9 (shared core budgets plus separate metadata and vault response caps), K10, and the Keystore-backed rollback guard are on `main`; interop harness runs against both heads.
 
-Open: S2 FIDO2 security keys (design in `plans/proposals/optional_fido2_security_keys.md`), a custom S3 endpoint (`plans/proposals/custom_s3_sync.md`), TOTP.
+Open: S2 FIDO2 security keys: the roaming secret in the key derivation, the key slots and the CTAP2 protocol crate landed in ADR 0011 (design in `plans/proposals/optional_fido2_security_keys.md`); the Linux transport and screens are ADR 0012 and the Android transports ADR 0013. A custom S3 endpoint (`plans/proposals/custom_s3_sync.md`) is ADR 0014. TOTP stays out unless asked.

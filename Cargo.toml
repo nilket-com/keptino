@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["linux", "android/droid", "android/interop", "common/erasure", "common/core"]
+members = ["linux", "android/droid", "android/interop", "common/erasure", "common/core", "common/fido"]
 
 # Profiles live here because Cargo ignores them in member manifests.
 # The Linux head aborts on panic: nothing may unwind past a locked,

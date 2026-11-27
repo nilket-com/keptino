@@ -948,6 +948,29 @@ pub struct Unlocked<K: KeyStore> {
 	pub caution: Option<Caution>,
 }
 
+/// The copy `unlock` is about to open, for the head's key derivation: a
+/// head with security keys reads the slots and asks a key for the roaming
+/// secret before it derives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Candidate<'a> {
+	pub source: Source,
+	pub salt: &'a [u8; crypto::SALT_SIZE],
+	pub cost: KdfParams,
+	pub slots: &'a [crate::roaming::KeySlot],
+}
+
+/// What a head's key derivation came back with.
+pub enum Derived<K, E> {
+	Key(K),
+	/// No key could be made for this copy, say none of its slots opened; the
+	/// other copy is tried and the head pauses uploads if it opens.
+	Unavailable,
+	/// The user gave up; the unlock ends here, whatever the other copy.
+	Canceled,
+	/// The derivation itself failed; the unlock ends here.
+	Failed(E),
+}
+
 /// Why no copy opened. `E` is the head's key derivation error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnlockError<E> {
@@ -957,6 +980,17 @@ pub enum UnlockError<E> {
 	Derive(E),
 	/// The last copy tried did not open.
 	Open(OpenError),
+	/// No key could be made for the last copy tried.
+	Unavailable,
+	/// The user canceled the key derivation.
+	Canceled,
+}
+
+impl<E> UnlockError<E> {
+	/// Whether the other copy is still worth trying after this one.
+	fn is_recoverable(&self) -> bool {
+		matches!(self, Self::Open(_) | Self::Unavailable)
+	}
 }
 
 impl<E: std::fmt::Display> std::fmt::Display for UnlockError<E> {
@@ -967,6 +1001,8 @@ impl<E: std::fmt::Display> std::fmt::Display for UnlockError<E> {
 			}
 			Self::Derive(err) => write!(f, "{err}"),
 			Self::Open(err) => write!(f, "{err}"),
+			Self::Unavailable => f.write_str("No security key opened this vault."),
+			Self::Canceled => f.write_str("Unlock canceled."),
 		}
 	}
 }
@@ -984,13 +1020,24 @@ pub fn unlock<K: KeyStore, E>(
 	local: Option<Envelope>,
 	remote: Option<Envelope>,
 	default_cost: KdfParams,
-	mut derive: impl FnMut(&[u8; crypto::SALT_SIZE], KdfParams) -> Result<K, E>,
+	mut derive: impl FnMut(&Candidate<'_>) -> Derived<K, E>,
 ) -> Result<Unlocked<K>, UnlockError<E>> {
+	let mut derive = |candidate: &Candidate<'_>| match derive(candidate) {
+		Derived::Key(key) => Ok(key),
+		Derived::Unavailable => Err(UnlockError::Unavailable),
+		Derived::Canceled => Err(UnlockError::Canceled),
+		Derived::Failed(err) => Err(UnlockError::Derive(err)),
+	};
 	let (first, second, caution) = match (local, remote) {
 		(None, None) => {
 			let mut salt = [0u8; crypto::SALT_SIZE];
 			getrandom::fill(&mut salt).expect("Salt generation failed");
-			let key = derive(&salt, default_cost).map_err(UnlockError::Derive)?;
+			let key = derive(&Candidate {
+				source: Source::New,
+				salt: &salt,
+				cost: default_cost,
+				slots: &[],
+			})?;
 			let database = Database::try_new(key, db_name, &salt)
 				.map_err(|err| UnlockError::Open(OpenError::Memory(err.to_string())))?;
 			return Ok(Unlocked {
@@ -1018,48 +1065,63 @@ pub fn unlock<K: KeyStore, E>(
 			}
 		}
 	};
-	// A key that failed on one copy serves the other when the costs match.
-	let mut spare: Option<(KdfParams, K)> = None;
-	let mut open = |envelope: &Envelope| -> Result<(Database<K>, KdfParams), UnlockError<E>> {
-		let cost = envelope.kdf;
-		let key = match spare.take() {
-			Some((previous, key)) if previous == cost => key,
-			other => {
-				if let Some((_, key)) = other {
-					key.zeroize();
+	// A key that failed on one copy serves the other only when it was made
+	// in the same context: same salt, same cost, same slots. Two copies of
+	// one vault can differ in their slots after a backup key was added.
+	let same_context = second.as_ref().is_some_and(|(alternate, _)| {
+		alternate.salt == first.0.salt
+			&& alternate.kdf == first.0.kdf
+			&& alternate.slots == first.0.slots
+	});
+	let mut spare: Option<K> = None;
+	let mut open =
+		|envelope: &Envelope, source: Source| -> Result<(Database<K>, KdfParams), UnlockError<E>> {
+			let cost = envelope.kdf;
+			let key = match spare.take() {
+				Some(key) if same_context => key,
+				other => {
+					if let Some(key) = other {
+						key.zeroize();
+					}
+					derive(&Candidate {
+						source,
+						salt: &envelope.salt,
+						cost,
+						slots: &envelope.slots,
+					})?
 				}
-				derive(&envelope.salt, cost).map_err(UnlockError::Derive)?
+			};
+			match Database::open(envelope, key) {
+				Ok(database) if database.meta("db_name").is_some() => Ok((database, cost)),
+				Ok(database) => {
+					database.zeroize();
+					Err(UnlockError::Open(OpenError::Format(FormatError::Damaged)))
+				}
+				Err((key, err)) => {
+					spare = Some(key);
+					Err(UnlockError::Open(err))
+				}
 			}
 		};
-		match Database::open(envelope, key) {
-			Ok(database) if database.meta("db_name").is_some() => Ok((database, cost)),
-			Ok(database) => {
-				database.zeroize();
-				Err(UnlockError::Open(OpenError::Format(FormatError::Damaged)))
-			}
-			Err((key, err)) => {
-				spare = Some((cost, key));
-				Err(UnlockError::Open(err))
-			}
-		}
-	};
 	let (candidate, source) = first;
-	let outcome = match open(&candidate) {
+	let outcome = match open(&candidate, source) {
 		Ok((database, cost)) => Ok((database, cost, source, caution)),
 		Err(err) => match second {
-			None => Err(err),
-			Some((alternate, alternate_source)) => open(&alternate).map(|(database, cost)| {
-				(
-					database,
-					cost,
-					alternate_source,
-					Some(Caution::OtherCopyFailed(source)),
-				)
-			}),
+			Some((alternate, alternate_source)) if err.is_recoverable() => {
+				open(&alternate, alternate_source).map(|(database, cost)| {
+					(
+						database,
+						cost,
+						alternate_source,
+						Some(Caution::OtherCopyFailed(source)),
+					)
+				})
+			}
+			_ => Err(err),
 		},
 	};
 	// A key left over from a failed attempt is wiped on every path out.
-	if let Some((_, key)) = spare.take() {
+	if let Some(key) = spare.take() {
 		key.zeroize();
 	}
 	let (database, source, cost, caution) = outcome.map(|(d, c, s, w)| (d, s, c, w))?;
@@ -1079,18 +1141,11 @@ pub(crate) mod tests {
 	/// A heap key for tests: a wiping array behind a mutex.
 	pub struct HeapKey(Mutex<Zeroizing<[u8; KEY_SIZE]>>);
 
-	#[derive(Debug, PartialEq, Eq)]
-	pub struct Never;
-	impl std::fmt::Display for Never {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			f.write_str("never")
-		}
-	}
-	impl std::error::Error for Never {}
+	use std::convert::Infallible;
 
 	impl KeyStore for HeapKey {
-		type Error = Never;
-		fn from_bytes(key: &[u8; KEY_SIZE]) -> Result<Self, Never> {
+		type Error = Infallible;
+		fn from_bytes(key: &[u8; KEY_SIZE]) -> Result<Self, Infallible> {
 			Ok(Self(Mutex::new(Zeroizing::new(*key))))
 		}
 		fn with_key<T>(&self, f: impl FnOnce(&[u8; KEY_SIZE]) -> T) -> T {
@@ -1430,19 +1485,191 @@ pub(crate) mod tests {
 		db.write().entries.entries.remove(&(id + 1));
 	}
 
+	/// A deterministic test key from the salt and cost, as a head's
+	/// derivation would make one.
+	fn test_key(salt: &[u8; 32], cost: KdfParams) -> HeapKey {
+		let mut bytes = [0u8; KEY_SIZE];
+		bytes.copy_from_slice(
+			blake3::hash(&[salt.as_slice(), &cost.m_cost.to_le_bytes()].concat()).as_bytes(),
+		);
+		HeapKey::from_bytes(&bytes).unwrap()
+	}
+
+	/// A vault whose envelope carries key slots, as a head with security keys
+	/// would save it: the slots are meta entries, the key takes the roaming
+	/// secret.
+	fn slotted_vault(roaming: &[u8; 32], hmac_secrets: &[[u8; 32]]) -> (Vec<u8>, HeapKey) {
+		use crate::roaming::{KeySlot, UvMode};
+		let salt = [5u8; crypto::SALT_SIZE];
+		let key = test_roaming_key(&salt, roaming);
+		let db = Database::new(key, "example", &salt);
+		for (index, secret) in hmac_secrets.iter().enumerate() {
+			let slot = KeySlot::wrap(
+				UvMode::Verified,
+				&[index as u8 + 1; 16],
+				[index as u8; 32],
+				secret,
+				roaming,
+			)
+			.unwrap();
+			db.set_meta_entry(MetaEntry::new(&KeySlot::entry_name(index), &slot.encode()));
+		}
+		let file = db.encode(false, KdfParams::DEBUG).unwrap();
+		(file, test_roaming_key(&salt, roaming))
+	}
+
+	fn test_roaming_key(salt: &[u8; 32], roaming: &[u8; 32]) -> HeapKey {
+		let mut bytes = [0u8; KEY_SIZE];
+		bytes.copy_from_slice(blake3::hash(&[salt.as_slice(), roaming].concat()).as_bytes());
+		HeapKey::from_bytes(&bytes).unwrap()
+	}
+
+	#[test]
+	fn unlock_hands_the_slots_to_the_head_and_reuses_a_key_only_in_the_same_context() {
+		let roaming = [0x33u8; 32];
+		let secret_a = [0xA1u8; 32];
+		let secret_b = [0xB2u8; 32];
+		let (one_slot, _) = slotted_vault(&roaming, &[secret_a]);
+		let (two_slots, _) = slotted_vault(&roaming, &[secret_a, secret_b]);
+		let parse = |file: &[u8]| Envelope::parse(file, KdfParams::DEBUG).unwrap();
+		assert_eq!(parse(&one_slot).slots.len(), 1);
+		assert_eq!(parse(&two_slots).slots.len(), 2);
+
+		// A head that holds key B: it opens only the copy that has B's slot.
+		let seen = std::cell::RefCell::new(Vec::new());
+		let mut with_b = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			seen.borrow_mut()
+				.push((candidate.source, candidate.slots.len()));
+			match candidate
+				.slots
+				.iter()
+				.find_map(|slot| slot.unwrap(&secret_b))
+			{
+				Some(r) => Derived::Key(test_roaming_key(candidate.salt, &r)),
+				None => Derived::Unavailable,
+			}
+		};
+		// Local (one slot) is preferred by timestamp order? Both were made in
+		// the same second; local wins a tie. It has no slot for B, so the
+		// remote copy opens and uploads are paused.
+		let opened = unlock(
+			"example",
+			Some(parse(&one_slot)),
+			Some(parse(&two_slots)),
+			KdfParams::DEBUG,
+			&mut with_b,
+		)
+		.unwrap();
+		assert_eq!(opened.source, Source::Remote);
+		assert_eq!(
+			opened.caution,
+			Some(Caution::OtherCopyFailed(Source::Local))
+		);
+		assert_eq!(
+			*seen.borrow(),
+			vec![(Source::Local, 1), (Source::Remote, 2)]
+		);
+		opened.database.zeroize();
+
+		// Alone, the copy without B's slot is unavailable, not a decryption error.
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&one_slot)),
+				None,
+				KdfParams::DEBUG,
+				&mut with_b
+			)
+			.err(),
+			Some(UnlockError::Unavailable)
+		);
+
+		// A wrong roaming secret opens neither copy; the key made for the
+		// first copy is not reused on the second because their slots differ.
+		let derivations = std::cell::Cell::new(0);
+		let mut wrong = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			derivations.set(derivations.get() + 1);
+			Derived::Key(test_roaming_key(candidate.salt, &[0x34u8; 32]))
+		};
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&one_slot)),
+				Some(parse(&two_slots)),
+				KdfParams::DEBUG,
+				&mut wrong
+			)
+			.err(),
+			Some(UnlockError::Open(OpenError::Decryption))
+		);
+		assert_eq!(derivations.get(), 2, "different slots, no reuse");
+		derivations.set(0);
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&two_slots)),
+				Some(parse(&two_slots)),
+				KdfParams::DEBUG,
+				&mut wrong
+			)
+			.err(),
+			Some(UnlockError::Open(OpenError::Decryption))
+		);
+		assert_eq!(derivations.get(), 1, "same slots, the key is reused");
+
+		// Cancellation ends the unlock even with a second copy present.
+		let asked = std::cell::Cell::new(0);
+		let mut cancel = |_: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			asked.set(asked.get() + 1);
+			Derived::Canceled
+		};
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&one_slot)),
+				Some(parse(&two_slots)),
+				KdfParams::DEBUG,
+				&mut cancel
+			)
+			.err(),
+			Some(UnlockError::Canceled)
+		);
+		assert_eq!(asked.get(), 1);
+
+		// Stripping the slots leaves a file the password alone cannot open.
+		let stripped = {
+			let envelope = parse(&two_slots);
+			let db = Database::open(&envelope, test_roaming_key(&envelope.salt, &roaming))
+				.map_err(|(_, e)| e)
+				.unwrap();
+			db.remove_meta_entry("fido_slot_1");
+			db.remove_meta_entry("fido_slot_2");
+			db.encode(false, KdfParams::DEBUG).unwrap()
+		};
+		let envelope = parse(&stripped);
+		assert!(envelope.slots.is_empty());
+		let mut plain = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			Derived::Key(test_key(candidate.salt, candidate.cost))
+		};
+		assert_eq!(
+			unlock(
+				"example",
+				Some(envelope),
+				None,
+				KdfParams::DEBUG,
+				&mut plain
+			)
+			.err(),
+			Some(UnlockError::Open(OpenError::Decryption))
+		);
+	}
+
 	#[test]
 	fn unlock_orders_the_copies_falls_back_and_derives_once() {
-		let key = |salt: &[u8; 32], cost: KdfParams| -> Result<HeapKey, Never> {
-			let mut bytes = [0u8; KEY_SIZE];
-			bytes.copy_from_slice(
-				blake3::hash(&[salt.as_slice(), &cost.m_cost.to_le_bytes()].concat()).as_bytes(),
-			);
-			HeapKey::from_bytes(&bytes)
-		};
 		let derivations = std::cell::Cell::new(0);
-		let mut counted = |salt: &[u8; 32], cost: KdfParams| {
+		let mut counted = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
 			derivations.set(derivations.get() + 1);
-			key(salt, cost)
+			Derived::Key(test_key(candidate.salt, candidate.cost))
 		};
 		let created = unlock("example", None, None, KdfParams::DEBUG, &mut counted).unwrap();
 		assert_eq!((created.source, created.caution), (Source::New, None));
@@ -1526,7 +1753,9 @@ pub(crate) mod tests {
 			.err(),
 			Some(UnlockError::Open(OpenError::Decryption))
 		);
-		let wrong = |_: &[u8; 32], _: KdfParams| HeapKey::from_bytes(&[1; KEY_SIZE]);
+		let wrong = |_: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			Derived::Key(HeapKey::from_bytes(&[1; KEY_SIZE]).unwrap())
+		};
 		assert_eq!(
 			unlock(
 				"example",
@@ -1539,7 +1768,7 @@ pub(crate) mod tests {
 			Some(UnlockError::Open(OpenError::Decryption))
 		);
 		let failing =
-			|_: &[u8; 32], _: KdfParams| -> Result<HeapKey, &'static str> { Err("no memory") };
+			|_: &Candidate<'_>| -> Derived<HeapKey, &'static str> { Derived::Failed("no memory") };
 		assert_eq!(
 			unlock(
 				"example",

@@ -24,6 +24,35 @@
 		"linux-release-unmarked.keptino": {
 			"mem_kib": 4194304,
 			"revision": 1
+		},
+		"linux-debug-fido.keptino": {
+			"mem_kib": 4096,
+			"revision": 1,
+			"db_name": "vaultfido",
+			"fido_slot_1": {
+				"uv_mode": "verified",
+				"seed": "keptino-fixture-security-key-001",
+				"pin": "1234"
+			},
+			"fido_slot_2": {
+				"uv_mode": "touch-only",
+				"seed": "keptino-fixture-security-key-002",
+				"pin": null
+			},
+			"entries": [
+				{
+					"name": "bank",
+					"username": "alice",
+					"password": "hunter2 ünïcödé 🔑",
+					"url": "https://bank.example"
+				},
+				{
+					"name": "mail",
+					"username": "alice@example.com",
+					"password": "a long passphrase here",
+					"url": "https://mail.example"
+				}
+			]
 		}
 	},
 	"entries": [

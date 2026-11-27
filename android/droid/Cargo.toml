@@ -17,3 +17,4 @@ zeroize = "1.8.2"
 
 [dev-dependencies]
 hex = "0.4.3"
+keptino-fido = { path = "../../common/fido", features = ["test-support"] }

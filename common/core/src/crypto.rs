@@ -21,6 +21,10 @@ pub const KEY_SIZE: usize = 32;
 pub const SALT_SIZE: usize = 32;
 pub const PEPPER_SIZE: usize = 32;
 pub const NONCE_SIZE: usize = 24;
+/// The roaming secret a security key releases; see ADR 0011.
+pub const ROAMING_SIZE: usize = 32;
+/// Domain string of the post-hash when a roaming secret is in play.
+const ROAMING_DOMAIN: &[u8] = b"keptino-roaming-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KdfError {
@@ -68,16 +72,20 @@ pub fn arena(kdf: KdfParams) -> Result<Vec<Block>, KdfError> {
 
 /// The master key: SHA3-256 of salt, pepper and password, through Argon2id
 /// salted with salt and pepper, then SHA3-256 with pepper and salt again.
-/// `out` receives the key; every intermediate is wiped.
+/// With a roaming secret, Argon2id takes it as its secret input and the
+/// final hash is domain-separated over the secret too, so a vault with key
+/// slots derives nothing a vault without them could. `out` receives the
+/// key; every intermediate is wiped.
 pub fn derive_master_key(
 	password: &[u8],
 	pepper: &[u8; PEPPER_SIZE],
 	salt: &[u8; SALT_SIZE],
+	roaming: Option<&[u8; ROAMING_SIZE]>,
 	kdf: KdfParams,
 	out: &mut [u8; KEY_SIZE],
 ) -> Result<(), KdfError> {
 	let mut blocks = arena(kdf)?;
-	let result = derive_master_key_in(password, pepper, salt, kdf, &mut blocks, out);
+	let result = derive_master_key_in(password, pepper, salt, roaming, kdf, &mut blocks, out);
 	wipe(&mut blocks);
 	result
 }
@@ -106,7 +114,7 @@ pub fn derive_pepper_in(
 	out: &mut [u8; PEPPER_SIZE],
 ) -> Result<(), KdfError> {
 	let cost = pepper_cost(seed, mem_kib)?;
-	let result = argon2id(seed, b"digipepper", cost, blocks, out);
+	let result = argon2id(seed, b"digipepper", None, cost, blocks, out);
 	wipe(blocks);
 	result
 }
@@ -122,10 +130,12 @@ fn pepper_cost(seed: &[u8], mem_kib: u32) -> Result<KdfParams, KdfError> {
 	})
 }
 
-/// Argon2id version 0x13 into `out`, over a caller-provided arena.
+/// Argon2id version 0x13 into `out`, over a caller-provided arena, with an
+/// optional secret input (RFC 9106 `K`).
 fn argon2id(
 	password: &[u8],
 	salt: &[u8],
+	secret: Option<&[u8]>,
 	cost: KdfParams,
 	blocks: &mut Vec<Block>,
 	out: &mut [u8],
@@ -137,7 +147,14 @@ fn argon2id(
 		.output_len(out.len())
 		.build()
 		.map_err(|_| KdfError::Params)?;
-	Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+	let argon2 = match secret {
+		Some(secret) => {
+			Argon2::new_with_secret(secret, Algorithm::Argon2id, Version::V0x13, params)
+				.map_err(|_| KdfError::Params)?
+		}
+		None => Argon2::new(Algorithm::Argon2id, Version::V0x13, params),
+	};
+	argon2
 		.hash_password_into_with_memory(password, salt, out, blocks.as_mut_slice())
 		.map_err(|_| KdfError::Params)
 }
@@ -148,6 +165,7 @@ pub fn derive_master_key_in(
 	password: &[u8],
 	pepper: &[u8; PEPPER_SIZE],
 	salt: &[u8; SALT_SIZE],
+	roaming: Option<&[u8; ROAMING_SIZE]>,
 	kdf: KdfParams,
 	blocks: &mut Vec<Block>,
 	out: &mut [u8; KEY_SIZE],
@@ -163,15 +181,22 @@ pub fn derive_master_key_in(
 	// The Argon2 output lands straight in the caller's destination, is read
 	// from there for the final hash, and is overwritten by it: no intermediate
 	// copy of the key material exists outside memory the caller controls.
-	let derived = argon2id(&pre_hash, &*derivation_salt, kdf, blocks, out);
+	let secret = roaming.map(|r| r.as_slice());
+	let derived = argon2id(&pre_hash, &*derivation_salt, secret, kdf, blocks, out);
 	pre_hash.zeroize();
 	// Wiped on every path, including a refused cost, since the caller may
 	// reuse the arena.
 	wipe(blocks);
 	derived?;
 	let mut post_hasher = Sha3_256::new();
+	if roaming.is_some() {
+		post_hasher.update(ROAMING_DOMAIN);
+	}
 	post_hasher.update(out.as_slice());
 	post_hasher.update(pepper);
+	if let Some(r) = roaming {
+		post_hasher.update(r);
+	}
 	post_hasher.update(salt);
 	let mut post_hash = post_hasher.finalize();
 	out.copy_from_slice(&post_hash);
@@ -303,12 +328,21 @@ mod tests {
 		let salt = [3u8; SALT_SIZE];
 		let mut first = [0u8; KEY_SIZE];
 		let mut second = [0u8; KEY_SIZE];
-		derive_master_key(b"master", &pepper, &salt, KdfParams::DEBUG, &mut first).unwrap();
+		derive_master_key(
+			b"master",
+			&pepper,
+			&salt,
+			None,
+			KdfParams::DEBUG,
+			&mut first,
+		)
+		.unwrap();
 		let mut blocks = arena(KdfParams::DEBUG).unwrap();
 		derive_master_key_in(
 			b"master",
 			&pepper,
 			&salt,
+			None,
 			KdfParams::DEBUG,
 			&mut blocks,
 			&mut second,
@@ -326,6 +360,7 @@ mod tests {
 			b"master",
 			&pepper,
 			&salt,
+			None,
 			KdfParams {
 				m_cost: 8192,
 				t_cost: 1,
@@ -339,6 +374,7 @@ mod tests {
 			b"master",
 			&[8; PEPPER_SIZE],
 			&salt,
+			None,
 			KdfParams::DEBUG,
 			&mut other,
 		)
@@ -349,6 +385,7 @@ mod tests {
 				b"x",
 				&pepper,
 				&salt,
+				None,
 				KdfParams {
 					m_cost: 4096,
 					t_cost: 0,
@@ -357,6 +394,59 @@ mod tests {
 				&mut other
 			),
 			Err(KdfError::Params)
+		);
+	}
+
+	/// The vector pinned in ADR 0011: password, salt of 0x11, pepper of 0x22,
+	/// roaming secret of 0x33, cost 4096, 1, 1.
+	#[test]
+	fn the_roaming_vector_is_pinned_and_differs_from_the_plain_key() {
+		let salt = [0x11u8; SALT_SIZE];
+		let pepper = [0x22u8; PEPPER_SIZE];
+		let roaming = [0x33u8; ROAMING_SIZE];
+		let cost = KdfParams {
+			m_cost: 4096,
+			t_cost: 1,
+			p_cost: 1,
+		};
+		let mut master = [0u8; KEY_SIZE];
+		derive_master_key(
+			b"correct horse battery staple",
+			&pepper,
+			&salt,
+			Some(&roaming),
+			cost,
+			&mut master,
+		)
+		.unwrap();
+		assert_eq!(
+			hex::encode(master),
+			"35276f16657b2e7184e8f0575e20a4a462b1f8efc22dff15b19877b7505fe8da"
+		);
+		let mut plain = [0u8; KEY_SIZE];
+		derive_master_key(
+			b"correct horse battery staple",
+			&pepper,
+			&salt,
+			None,
+			cost,
+			&mut plain,
+		)
+		.unwrap();
+		assert_ne!(plain, master);
+		let mut other = [0u8; KEY_SIZE];
+		derive_master_key(
+			b"correct horse battery staple",
+			&pepper,
+			&salt,
+			Some(&[0x34u8; ROAMING_SIZE]),
+			cost,
+			&mut other,
+		)
+		.unwrap();
+		assert_ne!(
+			other, master,
+			"a different roaming secret is a different key"
 		);
 	}
 

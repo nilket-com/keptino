@@ -247,9 +247,10 @@ case "${1:-debug}" in
 	fixtures)
 		fixtures=${2:-../droid/tests/fixtures}
 		mkdir -p "$fixtures"
-		# These four files are compatibility inputs from historical writers.
+		# Keep the historical writes and the enrolled two-slot fixture byte for byte.
 		if [[ ! "$fixtures" -ef ../droid/tests/fixtures ]]; then
 			cp ../droid/tests/fixtures/linux-{debug,release}{,-v2}.keptino "$fixtures/"
+			cp ../droid/tests/fixtures/linux-debug-fido.keptino "$fixtures/"
 		fi
 		roundtrip debug 4096 unmarked "$fixtures"
 		roundtrip release 4194304 unmarked "$fixtures"
@@ -267,6 +268,15 @@ manifest = {
 		"linux-release-v2.keptino": {"mem_kib": 4194304, "format": 2},
 		"linux-debug-unmarked.keptino": {"mem_kib": 4096, "revision": 1},
 		"linux-release-unmarked.keptino": {"mem_kib": 4194304, "revision": 1},
+		"linux-debug-fido.keptino": {
+			"mem_kib": 4096, "revision": 1, "db_name": "vaultfido",
+			"fido_slot_1": {"uv_mode": "verified", "seed": "keptino-fixture-security-key-001", "pin": "1234"},
+			"fido_slot_2": {"uv_mode": "touch-only", "seed": "keptino-fixture-security-key-002", "pin": None},
+			"entries": [
+				{"name": "bank", "username": "alice", "password": "hunter2 ünïcödé 🔑", "url": "https://bank.example"},
+				{"name": "mail", "username": "alice@example.com", "password": "a long passphrase here", "url": "https://mail.example"},
+			],
+		},
 	},
 	"entries": json.load(open("entries.json")),
 }
