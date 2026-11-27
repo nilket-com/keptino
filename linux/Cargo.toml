@@ -1,6 +1,6 @@
 [package]
 name = "keptino"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["nilket.com"]
 description = "A password vault by nilket."
@@ -18,7 +18,7 @@ assets = [
     ["keptino.png", "/usr/share/pixmaps/keptino.png", "644"],
     ["keptino.desktop", "/usr/share/applications/keptino.desktop", "644"],
 ]
-depends = "argon2, systemd, libcap2-bin"
+depends = "systemd, libcap2-bin"
 maintainer-scripts = "debian"
 
 [features]

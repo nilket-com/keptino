@@ -48,10 +48,12 @@ Android uses Android Keystore and the lifecycle protections documented separatel
 
 On Debian/Ubuntu, install a Rust toolchain and run `./linux/setup.sh` as your
 normal user. Setup uses sudo to install missing system dependencies
-(`build-essential`, `pkg-config`, `dpkg-dev`, `argon2`, `systemd`, `libcap2-bin`,
+(`build-essential`, `pkg-config`, `dpkg-dev`, `systemd`, `libcap2-bin`,
 `libwayland-dev`, and `libxkbcommon-dev`) and installs `cargo-deb` if needed.
 It checks credential encryption and builds/installs Keptino before asking
-for the pepper seed and credentials for your selected storage provider.
+for the pepper seed and credentials for your selected storage provider. The
+pepper is derived by the installed binary itself, `keptino --derive-pepper`,
+in locked memory; no external `argon2` tool is involved.
 
 Package installation grants `/usr/bin/keptino` the `CAP_IPC_LOCK` capability
 so it can lock its memory, including the 4 GiB password derivation, without

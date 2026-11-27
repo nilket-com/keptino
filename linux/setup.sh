@@ -211,10 +211,21 @@ choose_provider() {
     esac
 }
 
+# The pepper is derived by the installed keptino binary, which locks its
+# memory for the 4 GiB derivation; --restore-pepper runs before the build, so
+# it needs a package that already has --derive-pepper.
+require_installed_keptino() {
+    local installed
+    installed=$(dpkg-query -W -f='${Version}' keptino 2>/dev/null) || installed=''
+    if [[ -z "$installed" || ! -x /usr/bin/keptino ]] || ! dpkg --compare-versions "$installed" ge 0.2.2; then
+        fail "Restoring the pepper needs Keptino 0.2.2 or newer installed (found '${installed:-none}'). Run $0 without arguments first to build and install it."
+    fi
+}
+
 provision_pepper() {
     printf 'Deriving pepper from your original seed (requires 4 GiB of memory)...\n'
     systemd-ask-password -n "Enter original pepper seed:" | \
-        argon2 digipepper -id -t 4 -m 22 -p 1 -l 32 -r -v 13 | \
+        /usr/bin/keptino --derive-pepper | \
         systemd-creds encrypt --user --name=pepper - "$temp_dir/pepper.cred"
     local pepper
     pepper=$(systemd-creds decrypt --user --name=pepper "$temp_dir/pepper.cred" -)
@@ -337,7 +348,8 @@ if [[ -n "${1:-}" ]]; then
     prepare_config_dir
     case "$1" in
         --restore-pepper)
-            require_credential_tools argon2 systemd-creds systemd-ask-password
+            require_installed_keptino
+            require_credential_tools systemd-creds systemd-ask-password
             provision_pepper
             printf 'Pepper credential restored. Try opening your existing vault.\n'
             ;;
@@ -373,7 +385,7 @@ done
 cargo --version
 rustc --version
 
-packages=(build-essential pkg-config dpkg-dev argon2 systemd libcap2-bin libwayland-dev libxkbcommon-dev)
+packages=(build-essential pkg-config dpkg-dev systemd libcap2-bin libwayland-dev libxkbcommon-dev)
 missing=()
 for package in "${packages[@]}"; do
     if [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) != 'install ok installed' ]]; then
@@ -391,7 +403,7 @@ if ! cargo deb --version >/dev/null 2>&1; then
     cargo install cargo-deb --version 3.6.3 --locked --force
     cargo deb --version >/dev/null
 fi
-require_credential_tools argon2 systemd-creds systemd-ask-password
+require_credential_tools systemd-creds systemd-ask-password
 pkg-config --exists wayland-client xkbcommon
 
 prepare_config_dir

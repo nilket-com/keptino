@@ -185,6 +185,15 @@ fn sandbox_filesystem() {
 	}
 }
 
+/// The hardening a command line form needs before it touches a secret:
+/// locked memory, no core dump, no preloaded library. The display, TME,
+/// LUKS and filesystem steps belong to the GUI.
+pub fn preflight_command_line() {
+	lock_memory_pages();
+	set_not_dumpable();
+	enforce_no_preload();
+}
+
 pub fn preflight() {
 	force_secure_display();
 	lock_memory_pages();
