@@ -13,6 +13,7 @@ use iced::{
 	window,
 };
 use keptino_core::generator::{self, Classes, Kind};
+use keptino_core::health;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -69,6 +70,8 @@ struct UnlockedState {
 	saving: bool,
 	/// Delete was pressed once; the next press removes the entry.
 	confirm_delete: bool,
+	/// The health report on screen in place of the editor, if any.
+	health: Option<Box<health::Report>>,
 }
 
 enum AppState {
@@ -187,19 +190,23 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			last_interaction_time: _,
 			note,
 			status,
+			health,
 			..
-		}) => components::password_screen(
-			query,
-			password_entry,
-			generator,
-			components::Revealed {
-				password: *is_password_visible,
-				pin: *is_pin_visible,
-				note: *is_note_visible,
-			},
-			note,
-			status,
-		),
+		}) => match health {
+			Some(report) => components::health_screen(report, status),
+			None => components::password_screen(
+				query,
+				password_entry,
+				generator,
+				components::Revealed {
+					password: *is_password_visible,
+					pin: *is_pin_visible,
+					note: *is_note_visible,
+				},
+				note,
+				status,
+			),
+		},
 	}
 }
 
@@ -246,6 +253,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				vault,
 				saving: false,
 				confirm_delete: false,
+				health: None,
 			});
 		}
 		Message::DbNameChanged(new_db_name) => {
@@ -286,6 +294,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 		vault,
 		saving,
 		confirm_delete,
+		health,
 	}) = app_state
 	else {
 		unreachable!("update_unlocked called with locked state")
@@ -478,6 +487,30 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				4 => c.digits = !c.digits,
 				_ => c.symbols = !c.symbols,
 			}
+		}
+		Message::ShowHealth => {
+			let now = std::time::SystemTime::now()
+				.duration_since(std::time::SystemTime::UNIX_EPOCH)
+				.map(|d| d.as_secs())
+				.unwrap_or_default();
+			let report = health::report(db, now);
+			*status = if report.is_clean() {
+				format!("{} entries, nothing to fix.", report.entries)
+			} else {
+				format!(
+					"{} entries: {} reused groups, {} weak, {} stale, {} empty.",
+					report.entries,
+					report.reused.len(),
+					report.weak.len(),
+					report.stale.len(),
+					report.empty.len()
+				)
+			};
+			*health = Some(Box::new(report));
+		}
+		Message::HideHealth => {
+			*health = None;
+			*status = String::new();
 		}
 		Message::Save => {
 			if *saving {
@@ -694,6 +727,48 @@ mod tests {
 				.status
 				.starts_with("Generated 24 characters, 152 bits.")
 		);
+	}
+
+	#[test]
+	fn the_health_report_shows_in_place_of_the_editor_and_comes_back() {
+		let mut app = unlocked();
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		for (name, password) in [("shop", "secret"), ("pin", "1234")] {
+			let mut entry = PasswordEntry::new();
+			entry.set_name(name);
+			entry.set_password(password);
+			state.vault.database.set_password_entry(entry);
+		}
+		let _ = update(&mut app, Message::ShowHealth);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		let report = state.health.as_deref().expect("report on screen");
+		assert_eq!(report.entries, 3);
+		assert_eq!(
+			state.status,
+			"3 entries: 1 reused groups, 3 weak, 0 stale, 0 empty."
+		);
+		let lines = components::health_lines(report);
+		assert_eq!(lines[0], "Reused password 1");
+		assert_eq!(&lines[1..3], ["  example", "  shop"]);
+		assert!(lines[3].starts_with("Weak passwords"));
+		assert_eq!(lines[4], "  pin: 13 bits");
+		assert!(
+			lines
+				.iter()
+				.all(|l| !l.contains("secret") && !l.contains("1234"))
+		);
+		let _ = view(&app);
+		let _ = update(&mut app, Message::HideHealth);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.health.is_none());
+		assert!(state.status.is_empty());
+		let _ = view(&app);
 	}
 
 	#[test]

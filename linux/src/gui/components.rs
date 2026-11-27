@@ -6,11 +6,11 @@ use iced::{
 	border, font,
 	theme::{Palette, Theme},
 	widget::{
-		TextEditor, TextInput, button, center, checkbox, column, container, mouse_area, row, space,
-		svg, text, text_editor, text_input, tooltip,
+		TextEditor, TextInput, button, center, checkbox, column, container, mouse_area, row,
+		scrollable, space, svg, text, text_editor, text_input, tooltip,
 	},
 };
-use keptino_core::generator;
+use keptino_core::{generator, health};
 use zeroize::Zeroizing;
 
 const DEFAULT_BUTTON_SIZE: (u32, u32) = (120, 40);
@@ -293,6 +293,8 @@ pub fn password_screen<'a>(
 		space::horizontal().width(20),
 		styled_button("Delete", Message::PasswordEntryDelete, DEFAULT_BUTTON_SIZE),
 		space::horizontal().width(20),
+		styled_button("Health", Message::ShowHealth, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
 		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
 		space::horizontal(),
 	]
@@ -313,6 +315,87 @@ pub fn password_screen<'a>(
 	.width(Fill);
 
 	column![title_bar(), header, main_content, button_bar, status_bar].into()
+}
+
+/// The health report in place of the editor: four lists, names and figures
+/// only, and the way back.
+pub fn health_screen<'a>(report: &'a health::Report, status: &'a str) -> Element<'a, Message> {
+	let mut lines = column![].spacing(2);
+	for line in health_lines(report) {
+		lines = lines.push(text(line).size(16).color(colors::TEXT_STATUS));
+	}
+	let body = container(scrollable(lines).height(Fill))
+		.padding(12)
+		.width(Fill)
+		.height(Fill);
+	let button_bar = row![
+		space::horizontal(),
+		styled_button("Back", Message::HideHealth, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
+		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
+		space::horizontal(),
+	]
+	.padding(16)
+	.align_y(Center);
+	let status_bar = container(center(
+		row![
+			text("> ").color(colors::NAUTILUS_CYAN),
+			text(status).color(colors::TEXT_STATUS),
+			text(" <").color(colors::NAUTILUS_CYAN)
+		]
+		.spacing(1),
+	))
+	.height(30)
+	.padding(1)
+	.width(Fill);
+	column![title_bar(), body, button_bar, status_bar].into()
+}
+
+/// The report as lines of text, in its one order: a heading, then one entry
+/// per line, so a name with a comma in it stays whole.
+pub fn health_lines(report: &health::Report) -> Vec<String> {
+	let mut lines = Vec::new();
+	if report.is_clean() {
+		lines.push(format!(
+			"{} entries. No reused, weak, stale or empty passwords.",
+			report.entries
+		));
+		return lines;
+	}
+	if !report.reused.is_empty() {
+		for (n, group) in report.reused.iter().enumerate() {
+			lines.push(format!("Reused password {}", n + 1));
+			for name in group {
+				lines.push(format!("  {name}"));
+			}
+		}
+	}
+	if !report.weak.is_empty() {
+		lines.push(format!(
+			"Weak passwords, estimated under {} bits",
+			health::WEAK_BITS
+		));
+		for weak in &report.weak {
+			lines.push(format!("  {}: {} bits", weak.name, weak.bits));
+		}
+	}
+	if !report.stale.is_empty() {
+		lines.push("Not edited in a year".to_string());
+		for stale in &report.stale {
+			lines.push(format!(
+				"  {}: last edited {}",
+				stale.name,
+				local_date(Some(stale.last_edited))
+			));
+		}
+	}
+	if !report.empty.is_empty() {
+		lines.push("No password".to_string());
+		for name in &report.empty {
+			lines.push(format!("  {name}"));
+		}
+	}
+	lines
 }
 
 /// The die's settings: characters or words, how many, and which classes.
@@ -562,20 +645,22 @@ pub fn styled_text_editor<'a>(
 
 /// "Modified: … | Created: …" in the local time zone, for the status bar.
 fn timestamps(entry: &PasswordEntry) -> String {
-	let local = |seconds: Option<i64>| {
-		seconds
-			.and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
-			.map(|instant| {
-				instant
-					.to_zoned_datetime(jiff::tz::TimeZone::system())
-					.strftime("%Y-%m-%d %H:%M")
-					.to_string()
-			})
-			.unwrap_or_else(|| "unknown".to_string())
-	};
 	format!(
 		"Modified: {} | Created: {} ",
-		local(entry.modified()),
-		local(entry.created())
+		local_date(entry.modified()),
+		local_date(entry.created())
 	)
+}
+
+/// Seconds since the Unix epoch as a local date and time, or "unknown".
+fn local_date(seconds: Option<i64>) -> String {
+	seconds
+		.and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+		.map(|instant| {
+			instant
+				.to_zoned_datetime(jiff::tz::TimeZone::system())
+				.strftime("%Y-%m-%d %H:%M")
+				.to_string()
+		})
+		.unwrap_or_else(|| "unknown".to_string())
 }

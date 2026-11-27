@@ -16,11 +16,13 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -222,6 +224,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     var authUrl by remember { mutableStateOf("https://api.backblazeb2.com") }
     var offline by remember { mutableStateOf(false) }
     var confirmLock by remember(vm.unlocked) { mutableStateOf(false) }
+    val requestLock = { if (vm.dirty) confirmLock = true else lock() }
     val deletableName = vm.deletableName
     var confirmDelete by remember(deletableName) { mutableStateOf(false) }
     val owner = LocalLifecycleOwner.current
@@ -256,6 +259,23 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
         }
     }
     Surface(Modifier.fillMaxSize()) {
+        val rows = vm.healthRows
+        if (vm.unlocked && rows != null) {
+            BackHandler(enabled = !confirmLock, onBack = vm::closeHealth)
+            Column(Modifier.safeDrawingPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Password health report", style = MaterialTheme.typography.headlineMedium)
+                if (vm.editing) Text("Set the current entry to include its edits in the report.")
+                LazyColumn(Modifier.weight(1f).fillMaxWidth().semantics { isSensitiveData = true },
+                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(rows.size) { index -> Text(rows[index]) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = vm::closeHealth) { Text("Back to editor") }
+                    OutlinedButton(onClick = requestLock) { Text("Lock") }
+                }
+            }
+            return@Surface
+        }
         Column(Modifier.safeDrawingPadding().imePadding().padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineLarge)
             Text(if (vm.unlocked) "${vm.dbName} · ${if (vm.dirty) "unsaved changes" else "unlocked"}" else "Your encrypted vault", style = MaterialTheme.typography.titleMedium)
@@ -284,6 +304,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
                 Text("Import preserves the source file and refuses to replace an existing local vault. Default production vaults require 4 GiB of available memory to unlock.")
             } else {
+                OutlinedButton(enabled = !vm.busy, onClick = vm::showHealth) { Text("Health") }
                 Input("Find by name or tag", vm.query, { vm.query = it }, enabled = !vm.busy)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !vm.busy, onClick = { vm.navigate(-1) }) { Text("Previous") }
@@ -310,7 +331,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
                 Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
-                OutlinedButton(onClick = { if (vm.dirty && !vm.busy) confirmLock = true else lock() }) { Text("Lock") }
+                OutlinedButton(onClick = requestLock) { Text("Lock") }
             }
         }
     }

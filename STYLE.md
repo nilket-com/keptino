@@ -57,6 +57,7 @@ Pick the established term and keep it; a new word reads as a new concept.
 | key slot | one enrolled security key's wrapped copy of a vault's roaming secret | credential blob, wrapper |
 | passphrase | hyphen-joined random words drawn from the EFF large wordlist | word password, mnemonic |
 | character class | one of the four switchable character sets: uppercase, lowercase, digits, symbols | charset, pool |
+| health report | the offline summary of reused, weak, stale and empty passwords in a vault | audit, security score |
 
 Add a term here before introducing it.
 

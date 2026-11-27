@@ -14,6 +14,7 @@ use jni::{
 };
 use keptino_core::crypto::PEPPER_SIZE;
 use keptino_core::generator::{Classes, Kind};
+use keptino_core::health::{Report, WEAK_BITS};
 use keptino_core::vault::KeyStore;
 use std::{
 	collections::HashMap,
@@ -102,6 +103,19 @@ fn byte_array(env: &JNIEnv, value: &[u8]) -> Result<jbyteArray> {
 		.map_err(|_| Error::Invalid("result does not fit in memory"))
 }
 
+fn string_array(env: &mut JNIEnv, rows: Vec<String>) -> Result<jobjectArray> {
+	let count = jint::try_from(rows.len()).map_err(|_| Error::Invalid("too many rows"))?;
+	let array = env
+		.new_object_array(count, "java/lang/String", JObject::null())
+		.map_err(jni_error)?;
+	for (index, row) in rows.into_iter().enumerate() {
+		let text = env.auto_local(env.new_string(row).map_err(jni_error)?);
+		env.set_object_array_element(&array, index as jint, &*text)
+			.map_err(jni_error)?;
+	}
+	Ok(array.into_raw())
+}
+
 fn mem_kib(value: jint) -> Result<u32> {
 	u32::try_from(value).map_err(|_| Error::Invalid("memory size"))
 }
@@ -144,18 +158,73 @@ pub extern "system" fn Java_com_keptino_app_Core_preflight<'local>(
 	_this: JObject<'local>,
 ) -> jobjectArray {
 	guard(&mut env, std::ptr::null_mut(), |env| {
-		let warnings = security::preflight()?;
-		let count =
-			jint::try_from(warnings.len()).map_err(|_| Error::Invalid("too many warnings"))?;
-		let array = env
-			.new_object_array(count, "java/lang/String", JObject::null())
-			.map_err(jni_error)?;
-		for (index, warning) in warnings.iter().enumerate() {
-			let text = env.new_string(warning).map_err(jni_error)?;
-			env.set_object_array_element(&array, index as jint, text)
-				.map_err(jni_error)?;
-		}
-		Ok(array.into_raw())
+		string_array(env, security::preflight()?)
+	})
+}
+
+fn local_date(seconds: libc::time_t) -> String {
+	let mut date = std::mem::MaybeUninit::uninit();
+	// localtime_r writes a complete tm into our buffer on success.
+	let Some(date) = (unsafe { libc::localtime_r(&seconds, date.as_mut_ptr()).as_ref() }) else {
+		return "unknown".into();
+	};
+	format!(
+		"{:04}-{:02}-{:02} {:02}:{:02}",
+		date.tm_year + 1900,
+		date.tm_mon + 1,
+		date.tm_mday,
+		date.tm_hour,
+		date.tm_min
+	)
+}
+
+fn health_rows(report: Report) -> Vec<String> {
+	let entries = report.entries;
+	if report.is_clean() {
+		return vec![format!(
+			"{entries} entries. No reused, weak, stale or empty passwords."
+		)];
+	}
+	let mut rows = vec![format!("{entries} entries")];
+	for (index, group) in report.reused.into_iter().enumerate() {
+		rows.push(format!("Reused password {}", index + 1));
+		rows.extend(group);
+	}
+	if !report.weak.is_empty() {
+		rows.push(format!("Weak passwords, estimated under {WEAK_BITS} bits"));
+		rows.extend(
+			report
+				.weak
+				.into_iter()
+				.map(|entry| format!("{}: {} bits", entry.name, entry.bits)),
+		);
+	}
+	if !report.stale.is_empty() {
+		rows.push("Not edited in a year".into());
+		rows.extend(report.stale.into_iter().map(|entry| {
+			format!(
+				"{}: last edited {}",
+				entry.name,
+				local_date(entry.last_edited)
+			)
+		}));
+	}
+	if !report.empty.is_empty() {
+		rows.push("No password".into());
+		rows.extend(report.empty);
+	}
+	rows
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_healthReport<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let report = with(handle, |vault| Ok(vault.health_report()))?;
+		string_array(env, health_rows(report))
 	})
 }
 

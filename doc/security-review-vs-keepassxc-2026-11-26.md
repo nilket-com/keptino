@@ -89,7 +89,7 @@ Two devices editing offline silently lose one side. KeePassXC merges. With K1's 
 | Entry deletion, history, recycle bin | Add delete now (K8); history later with K6 generations |
 | Backup before save | Add (K6) |
 | Lock on sleep and session lock, manual lock | Add (K3) |
-| Password health and reuse report | Later, M |
+| Password health and reuse report | Done in ADR 0009: offline report of reused, weak, stale and empty passwords on both heads |
 | Have I Been Pwned check | Deliberate exclusion: it adds a third-party endpoint to an app that otherwise talks only to the user's bucket. Offline-only option at most |
 | TOTP | Optional, M. It stores the second factor next to the first; leave out unless requested |
 | Key file and YubiKey HMAC-SHA1 | The TPM pepper is a stronger mandatory equivalent locally but not roaming. See supremacy item S2 |
@@ -159,7 +159,7 @@ All on `main`:
 | K5 file mode | 0600 files, 0700 directory |
 | K6 generations | Three previous saves kept as `.keptino.1` to `.3` on Linux; bounded and verified atomic writes on Android |
 | K7 Android memory layer | Closed in ADR 0003: `common/core::vault` seals every record under an atlas key and secret fields under per-entry keys on both heads (`SecretMemory` on Linux, `Mutex<LockedPage>` on Android), verified by `an_opened_store_holds_only_ciphertext` and API 37 device checks |
-| K8 generator and delete | Both heads use the shared 24-character password generator and confirm deletion before Save (ADR 0007). Configurable generation and passphrases remain open. |
+| K8 generator and delete | Both heads use the shared password generator and confirm deletion before Save (ADR 0007); ADR 0008 added character classes, length and EFF passphrases with the entropy shown |
 | K9 limits | Closed in ADR 0006: `common/core::format` enforces shared reader and writer budgets (64 MiB vault file, 30 MiB decompressed database, 100 000 records, 16 MiB record or field) with bounded decompression and pre-allocation checks; Linux bounds local reads to the file budget alongside the 64 MiB remote cap; Android separates metadata and vault response caps with a `Content-Length` check against the file budget |
 | K10 KDF parameters | `kdf_m`, `kdf_t`, `kdf_p` written and honored across both heads; Argon2 arena wiped with `zeroize` on every exit |
 | K11 lifetimes | Absolute tool paths, clean error for a missing pepper, provider credential kept in secret memory for the session on Linux |
@@ -169,4 +169,4 @@ All on `main`:
 
 Android (Codex): K1, K2, K3 (session revocation), K4, K6 (bounded and verified writes), K7 (sealed in-memory vault via `common/core::vault`), K9 (shared core budgets plus separate metadata and vault response caps), K10, and the Keystore-backed rollback guard are on `main`; interop harness runs against both heads.
 
-Open: S2 FIDO2 security keys (design in `plans/proposals/optional_fido2_security_keys.md`), configurable password generation and passphrases, password health report, TOTP.
+Open: S2 FIDO2 security keys (design in `plans/proposals/optional_fido2_security_keys.md`), a custom S3 endpoint (`plans/proposals/custom_s3_sync.md`), TOTP.

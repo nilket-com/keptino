@@ -33,6 +33,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var fields by mutableStateOf(List(9) { "" }); private set
     var revealed by mutableStateOf(setOf<Int>()); private set
     var dirty by mutableStateOf(false); private set
+    var healthRows by mutableStateOf<Array<String>?>(null); private set
     internal var generator by mutableStateOf(GeneratorOptions())
     var keyProtection by mutableStateOf<String?>(null); private set
     private var sessionSync: BackblazeSession? = null
@@ -136,6 +137,13 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         if (!found) status = "No matching entry"
     }
     fun newEntry() = action { check(!editing) { "Set the current entry before creating another" }; Core.clear(handle); refresh(); status = "New entry" }
+    fun showHealth() = task { started ->
+        check(unlocked) { "Unlock first" }
+        val openHandle = handle
+        val rows = withContext(Dispatchers.Default) { Core.healthReport(openHandle) }
+        if (started == generation) healthRows = rows
+    }
+    fun closeHealth() { healthRows = null }
     fun edit(id: Int, text: String) = action {
         val bytes = text.toByteArray(); try { Core.setField(handle, id, bytes) } finally { bytes.fill(0) }
         fields = fields.toMutableList().also { it[id - 1] = text }; editing = true; dirty = true
@@ -215,6 +223,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun report(message: String) { status = message }
     fun lock() {
         generation++
+        closeHealth()
         generator = GeneratorOptions()
         if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null

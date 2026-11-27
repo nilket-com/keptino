@@ -95,6 +95,9 @@ them against the authenticated inner copy before opening the vault.
 6. Use **Set entry**, then **Save**. Save writes the encrypted local file atomically
    before uploading. An upload failure reports that the local save succeeded.
    **Export saved vault** exports the last saved encrypted file for Linux to open.
+7. Choose **Health** to see which entries have reused, potentially weak, stale,
+   or empty passwords. The report runs offline and includes edits made with
+   **Set entry**. **Back to editor** returns to your working entry.
 
 The default production vault requires **4 GiB of available memory** for password
 derivation. Deriving the pepper from its seed also needs 4 GiB. Importing the

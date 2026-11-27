@@ -9,6 +9,7 @@ object Core {
     @JvmStatic external fun revision(h: Long): Long
     @JvmStatic external fun uploadsPaused(h: Long): Boolean
     @JvmStatic external fun source(h: Long): Int
+    @JvmStatic external fun healthReport(h: Long): Array<String>
     @JvmStatic external fun query(h: Long, q: String): Boolean
     @JvmStatic external fun next(h: Long): Boolean
     @JvmStatic external fun previous(h: Long): Boolean

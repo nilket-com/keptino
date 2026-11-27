@@ -9,6 +9,7 @@ use keptino_core::{
 	crypto::PEPPER_SIZE,
 	format::{Envelope, KdfParams, field},
 	generator::{self, Kind},
+	health,
 	vault::{self, Database, OpenError, PasswordEntry, UnlockError, unlock},
 };
 use zeroize::Zeroizing;
@@ -137,6 +138,14 @@ impl Vault {
 
 	pub fn modified_ts(&self) -> u64 {
 		self.database.modified_ts()
+	}
+
+	pub fn health_report(&self) -> health::Report {
+		let now = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_secs();
+		health::report(&self.database, now)
 	}
 
 	/// The names of all password entries, in navigation order.

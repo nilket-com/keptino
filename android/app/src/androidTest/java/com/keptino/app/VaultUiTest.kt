@@ -24,6 +24,57 @@ class VaultUiTest {
     }
     private fun shown(text: String) = compose.onAllNodesWithText(text, substring = false).fetchSemanticsNodes().isNotEmpty()
 
+    @Test fun healthReportUsesSetEntriesAndClosesOnLock() {
+        val credential = DeviceCredential.fromArguments()
+        val name = "health-" + java.util.UUID.randomUUID()
+        val storage = VaultStorage(context)
+        val pepper = pepper()
+        val master = "synthetic-health-master"
+        val handle = Core.open(name, master.toByteArray(), pepper, null, null, 4096)
+        try {
+            LegacySettings.write(context, Settings(pepper))
+            org.junit.Assert.assertArrayEquals(arrayOf("0 entries. No reused, weak, stale or empty passwords."), Core.healthReport(handle))
+            for ((entry, password) in listOf("bank, joint" to "123456", "mail" to "123456", "blank" to "")) {
+                Core.clear(handle)
+                Core.setField(handle, 1, entry.toByteArray())
+                Core.setField(handle, 3, password.toByteArray())
+                Core.commit(handle)
+            }
+            val expected = arrayOf("3 entries", "Reused password 1", "bank, joint", "mail",
+                "Weak passwords, estimated under 50 bits", "bank, joint: 19 bits", "mail: 19 bits",
+                "No password", "blank")
+            org.junit.Assert.assertArrayEquals(expected, Core.healthReport(handle))
+            storage.write(name, Core.save(handle))
+        } finally { Core.close(handle); pepper.fill(0) }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            fun click(label: String) = compose.onNodeWithText(label).performScrollTo().performClick()
+            fun openReport() {
+                click("Health")
+                compose.waitUntil(10_000) { shown("Password health report") }
+                compose.onNodeWithText("Find by name or tag").assertDoesNotExist()
+                compose.onNodeWithText("bank, joint: 19 bits").assertExists()
+            }
+            compose.onNodeWithText("Database name").performTextReplacement(name)
+            compose.onNodeWithText("Master password").performTextReplacement(master)
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            click("Unlock")
+            credential.enterPin()
+            compose.waitUntil(30_000) { shown("Health") }
+            compose.onNodeWithText("Name").performScrollTo().performTextReplacement("draft")
+            openReport()
+            compose.onNodeWithText("Back to editor").performClick()
+            compose.onNodeWithText("Name").assertTextContains("draft")
+            openReport()
+            androidx.test.espresso.Espresso.pressBack()
+            compose.onNodeWithText("Name").assertTextContains("draft")
+            openReport()
+            compose.onNodeWithText("Lock").performClick()
+            compose.onNodeWithText("Discard and lock").performClick()
+            compose.onNodeWithText("Master password").assertExists()
+            compose.onNodeWithText("Password health report").assertDoesNotExist()
+        }
+    }
+
     @Test fun cancelledCredentialPromptKeepsVaultLocked() {
         val credential = DeviceCredential.fromArguments()
         LegacySettings.clear(context)

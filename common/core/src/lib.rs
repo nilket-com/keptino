@@ -9,6 +9,7 @@
 pub mod crypto;
 pub mod format;
 pub mod generator;
+pub mod health;
 pub mod policy;
 pub mod vault;
 mod wordlist;
