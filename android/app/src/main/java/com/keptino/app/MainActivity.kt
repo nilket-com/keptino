@@ -114,7 +114,7 @@ class MainActivity : ComponentActivity() {
                         if (promptSignal === signal) promptSignal = null
                         val detail = when (code) {
                             BiometricPrompt.BIOMETRIC_ERROR_CANCELED,
-                            BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED -> "Authentication cancelled."
+                            BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED -> "Authentication canceled."
                             else -> message.toString()
                         }
                         if (continuation.isActive) continuation.resumeWithException(IllegalStateException(detail))
@@ -298,10 +298,8 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                         modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret }, singleLine = id != 5,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
                         trailingIcon = if (secret) {{ TextButton(enabled = !vm.busy, onClick = { vm.reveal(id) }) { Text(if (visible) "Hide" else "Reveal") } }} else null)
-                    if (id == 3 || id == 4) Row {
-                        TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
-                        if (id == 3) TextButton(enabled = !vm.busy, onClick = vm::generatePassword) { Text("Generate password") }
-                    }
+                    if (id == 3) PasswordActions(vm) { copy(id) }
+                    if (id == 4) TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !vm.busy, onClick = vm::newEntry) { Text("New") }
@@ -325,6 +323,46 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
         text = { Text("Save first to keep changes to this vault.") },
         confirmButton = { TextButton(onClick = { confirmLock = false; lock() }) { Text("Discard and lock") } },
         dismissButton = { TextButton(onClick = { confirmLock = false }) { Text("Cancel") } })
+}
+
+@Composable
+private fun PasswordActions(vm: VaultViewModel, copy: () -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = vm.generator
+    val enabled = !vm.busy
+    FlowRow {
+        TextButton(enabled = enabled, onClick = copy) { Text("Copy Password") }
+        TextButton(enabled = enabled && options.valid, onClick = vm::generatePassword) {
+            Text(if (options.passphrase) "Generate passphrase" else "Generate password")
+        }
+        TextButton(enabled = enabled, onClick = { expanded = !expanded }) {
+            Text(if (expanded) "Hide options" else "Generator options")
+        }
+    }
+    if (expanded) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !options.passphrase, enabled = enabled,
+                onClick = { vm.generator = options.copy(passphrase = false) }, label = { Text("Characters") })
+            FilterChip(selected = options.passphrase, enabled = enabled,
+                onClick = { vm.generator = options.copy(passphrase = true) }, label = { Text("Words") })
+        }
+        OutlinedTextField(
+            value = if (options.passphrase) options.words else options.length,
+            onValueChange = { value ->
+                if (value.all { it in '0'..'9' }) {
+                    vm.generator = if (options.passphrase) options.copy(words = value) else options.copy(length = value)
+                }
+            },
+            label = { Text(if (options.passphrase) "Word count (1–32)" else "Length (1–256)") },
+            enabled = enabled, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        )
+        if (!options.passphrase) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for ((bit, label) in listOf(1 to "Uppercase", 2 to "Lowercase", 4 to "Digits", 8 to "Symbols")) {
+                FilterChip(selected = options.classes and bit != 0, enabled = enabled,
+                    onClick = { vm.generator = options.copy(classes = options.classes xor bit) }, label = { Text(label) })
+            }
+        }
+    }
 }
 
 @Composable

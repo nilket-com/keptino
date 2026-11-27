@@ -11,3 +11,4 @@ pub mod format;
 pub mod generator;
 pub mod policy;
 pub mod vault;
+mod wordlist;

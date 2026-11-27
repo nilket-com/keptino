@@ -1,4 +1,4 @@
-use crate::gui::messages::Message;
+use crate::gui::{messages::Message, state::GeneratorChoice};
 use crate::{gui::colors, storage::PasswordEntry};
 use iced::{
 	Alignment, Background, Center, Color, Element, Fill, Font, Padding,
@@ -6,10 +6,11 @@ use iced::{
 	border, font,
 	theme::{Palette, Theme},
 	widget::{
-		TextEditor, TextInput, button, center, column, container, mouse_area, row, space, svg,
-		text, text_editor, text_input, tooltip,
+		TextEditor, TextInput, button, center, checkbox, column, container, mouse_area, row, space,
+		svg, text, text_editor, text_input, tooltip,
 	},
 };
+use keptino_core::generator;
 use zeroize::Zeroizing;
 
 const DEFAULT_BUTTON_SIZE: (u32, u32) = (120, 40);
@@ -146,15 +147,24 @@ fn styled_tooltip<'a, Message: 'a>(
 	.into()
 }
 
+/// Which hidden fields the user has revealed.
+#[derive(Clone, Copy)]
+pub struct Revealed {
+	pub password: bool,
+	pub pin: bool,
+	pub note: bool,
+}
+
 pub fn password_screen<'a>(
 	query: &str,
 	password_entry: &PasswordEntry,
-	is_password_visible: &bool,
-	is_pin_visible: &bool,
-	is_note_visible: &bool,
+	generator: &'a GeneratorChoice,
+	revealed: Revealed,
 	note: &'a text_editor::Content,
 	status: &'a str,
 ) -> Element<'a, Message> {
+	let (is_password_visible, is_pin_visible, is_note_visible) =
+		(&revealed.password, &revealed.pin, &revealed.note);
 	let query_input = styled_tooltip(
 		styled_query_input("query...", query)
 			.on_input(Message::QueryInput)
@@ -241,6 +251,7 @@ pub fn password_screen<'a>(
 		note_editor
 	};
 	let note_toggle = visibility_button(*is_note_visible, Message::ToggleNoteVisibility);
+	let generator_row = generator_controls(generator);
 	let note_row = row![styled_tooltip(note_editor, "Note", 1), note_toggle].height(Fill);
 
 	let main_content = container(
@@ -256,6 +267,7 @@ pub fn password_screen<'a>(
 				password_visibility_toggle,
 				icon_button(DIE, Message::GeneratePassword)
 			],
+			generator_row,
 			row![
 				styled_tooltip(pin_input, "PIN", 2),
 				pin_copy_button,
@@ -301,6 +313,42 @@ pub fn password_screen<'a>(
 	.width(Fill);
 
 	column![title_bar(), header, main_content, button_bar, status_bar].into()
+}
+
+/// The die's settings: characters or words, how many, and which classes.
+fn generator_controls(choice: &GeneratorChoice) -> Element<'_, Message> {
+	let kind_button = styled_button(
+		if choice.words { "Words" } else { "Characters" },
+		Message::GeneratorKindToggled,
+		(130, 32),
+	);
+	let count_input = styled_tooltip(
+		styled_text_input("count", &choice.count)
+			.on_input(Message::GeneratorCountInput)
+			.width(64),
+		if choice.words { "Words" } else { "Length" },
+		0,
+	);
+	let bits =
+		text(format!("{} bits", generator::whole_bits(&choice.kind()))).color(colors::TEXT_STATUS);
+	let mut controls = row![kind_button, count_input].spacing(8).align_y(Center);
+	if !choice.words {
+		let c = choice.classes;
+		for (label, on, bit) in [
+			("A-Z", c.upper, 1u8),
+			("a-z", c.lower, 2),
+			("0-9", c.digits, 4),
+			("#%&", c.symbols, 8),
+		] {
+			controls = controls.push(
+				checkbox(on)
+					.label(label)
+					.text_size(14)
+					.on_toggle(move |_| Message::GeneratorClassToggled(bit)),
+			);
+		}
+	}
+	controls.push(bits).into()
 }
 
 fn visibility_button(visible: bool, msg: Message) -> Element<'static, Message> {

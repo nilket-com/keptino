@@ -12,7 +12,7 @@ use iced::{
 	},
 	window,
 };
-use keptino_core::generator;
+use keptino_core::generator::{self, Classes, Kind};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -23,9 +23,41 @@ struct LockedState {
 	status: String,
 }
 
+/// What the die makes: characters from the chosen classes, or EFF words.
+/// A session choice; nothing of it is stored in the vault.
+pub struct GeneratorChoice {
+	pub words: bool,
+	/// The length or word count as typed; empty or out of range refuses.
+	pub count: String,
+	pub classes: Classes,
+}
+
+impl GeneratorChoice {
+	fn new() -> Self {
+		Self {
+			words: false,
+			count: generator::LENGTH.to_string(),
+			classes: Classes::ALL,
+		}
+	}
+
+	pub fn kind(&self) -> Kind {
+		let count = self.count.parse().unwrap_or(0);
+		if self.words {
+			Kind::Passphrase { words: count }
+		} else {
+			Kind::Characters {
+				length: count,
+				classes: self.classes,
+			}
+		}
+	}
+}
+
 struct UnlockedState {
 	query: String,
 	password_entry: PasswordEntry,
+	generator: GeneratorChoice,
 	is_password_visible: bool,
 	is_pin_visible: bool,
 	is_note_visible: bool,
@@ -147,6 +179,7 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 		AppState::Unlocked(UnlockedState {
 			query,
 			password_entry,
+			generator,
 			is_password_visible,
 			is_pin_visible,
 			is_note_visible,
@@ -158,9 +191,12 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 		}) => components::password_screen(
 			query,
 			password_entry,
-			is_password_visible,
-			is_pin_visible,
-			is_note_visible,
+			generator,
+			components::Revealed {
+				password: *is_password_visible,
+				pin: *is_pin_visible,
+				note: *is_note_visible,
+			},
 			note,
 			status,
 		),
@@ -199,6 +235,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 			*app_state = AppState::Unlocked(UnlockedState {
 				query: "".into(),
 				password_entry: PasswordEntry::new(),
+				generator: GeneratorChoice::new(),
 				is_password_visible: false,
 				is_pin_visible: false,
 				is_note_visible: false,
@@ -238,6 +275,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 	let AppState::Unlocked(UnlockedState {
 		query,
 		password_entry,
+		generator: choice,
 		is_password_visible,
 		is_pin_visible,
 		is_note_visible,
@@ -396,9 +434,50 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 		}
 		Message::GeneratePassword => {
-			password_entry.set_password(&generator::password(generator::LENGTH));
-			*is_password_visible = true;
-			*status = "Password generated. Set the entry to keep it.".to_string();
+			let kind = choice.kind();
+			match generator::generate(&kind) {
+				Some(secret) => {
+					password_entry.set_password(&secret);
+					*is_password_visible = true;
+					let made = match kind {
+						Kind::Characters { length, .. } => format!("{length} characters"),
+						Kind::Passphrase { words } => format!("{words} words"),
+					};
+					*status = format!(
+						"Generated {made}, {} bits. Set the entry to keep it.",
+						generator::whole_bits(&kind)
+					);
+				}
+				None => {
+					*status = format!(
+						"Nothing generated: choose a class and 1 to {} characters, or 1 to {} words.",
+						generator::MAX_LENGTH,
+						generator::MAX_WORDS
+					);
+				}
+			}
+		}
+		Message::GeneratorKindToggled => {
+			choice.words = !choice.words;
+			choice.count = if choice.words {
+				generator::WORD_COUNT.to_string()
+			} else {
+				generator::LENGTH.to_string()
+			};
+		}
+		Message::GeneratorCountInput(text) => {
+			if text.len() <= 3 && text.bytes().all(|b| b.is_ascii_digit()) {
+				choice.count = text;
+			}
+		}
+		Message::GeneratorClassToggled(bit) => {
+			let c = &mut choice.classes;
+			match bit {
+				1 => c.upper = !c.upper,
+				2 => c.lower = !c.lower,
+				4 => c.digits = !c.digits,
+				_ => c.symbols = !c.symbols,
+			}
 		}
 		Message::Save => {
 			if *saving {
@@ -610,6 +689,55 @@ mod tests {
 		};
 		assert!(state.is_password_visible);
 		assert_eq!(state.password_entry.get_password().len(), generator::LENGTH);
+		assert!(
+			state
+				.status
+				.starts_with("Generated 24 characters, 152 bits.")
+		);
+	}
+
+	#[test]
+	fn the_die_follows_the_generator_choice() {
+		let mut app = unlocked();
+		let _ = update(&mut app, Message::GeneratorKindToggled);
+		let _ = update(&mut app, Message::GeneratePassword);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.generator.count, "6");
+		assert!(state.status.starts_with("Generated 6 words, 77 bits."));
+		// Six words of 3 to 9 letters joined by five hyphens; four table
+		// words carry a hyphen of their own, so the count is a lower bound.
+		let phrase = state.password_entry.get_password();
+		assert!(phrase.split(generator::SEPARATOR).count() >= 6);
+		assert!((23..=59).contains(&phrase.len()), "{}", *phrase);
+		assert!(phrase.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
+		let _ = view(&app);
+
+		let _ = update(&mut app, Message::GeneratorKindToggled);
+		for bit in [1u8, 2, 8] {
+			let _ = update(&mut app, Message::GeneratorClassToggled(bit));
+		}
+		let _ = update(&mut app, Message::GeneratorCountInput("6x".into()));
+		let _ = update(&mut app, Message::GeneratorCountInput("6".into()));
+		let _ = update(&mut app, Message::GeneratePassword);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.generator.count, "6");
+		assert!(state.status.starts_with("Generated 6 characters, 19 bits."));
+		let pin = state.password_entry.get_password();
+		assert_eq!(pin.len(), 6);
+		assert!(pin.bytes().all(|b| b.is_ascii_digit()));
+		let _ = view(&app);
+
+		let _ = update(&mut app, Message::GeneratorClassToggled(4));
+		let _ = update(&mut app, Message::GeneratePassword);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.status.starts_with("Nothing generated"));
+		assert_eq!(state.password_entry.get_password().len(), 6);
 	}
 
 	#[test]

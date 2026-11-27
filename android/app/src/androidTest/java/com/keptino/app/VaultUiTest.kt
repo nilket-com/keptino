@@ -40,7 +40,7 @@ class VaultUiTest {
             compose.onNodeWithText("Master password").assertExists()
             compose.onAllNodesWithText("Find by name or tag").assertCountEquals(0)
         }
-        assertTrue("A cancelled prompt must leave the saved setup untouched", LegacySettings.stillLegacy(context))
+        assertTrue("A canceled prompt must leave the saved setup untouched", LegacySettings.stillLegacy(context))
         LegacySettings.clear(context)
     }
 
@@ -69,6 +69,7 @@ class VaultUiTest {
             unlock()
             find("bank")
             click("Generate password")
+            compose.onNodeWithText("Generated 24 characters, 152 bits", substring = true).assertExists()
             compose.onNodeWithText("Delete entry").assertDoesNotExist()
             compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
             val passwordField = compose.onNodeWithText("Password", substring = false)
@@ -77,7 +78,30 @@ class VaultUiTest {
             click("Revert entry edits")
             compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
             passwordField.assertTextContains("hunter2 ünïcödé 🔑")
+            click("Generator options")
+            click("Words")
+            val wordCount = compose.onNodeWithText("Word count (1–32)")
+            wordCount.performScrollTo().performTextReplacement("33")
+            compose.onNodeWithText("Generate passphrase").assertIsNotEnabled()
+            wordCount.performTextReplacement("6")
+            click("Generate passphrase")
+            compose.onNodeWithText("Generated 6 words, 77 bits", substring = true).assertExists()
+            val phrase = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
+            // Some EFF words contain their own hyphen.
+            assertTrue(phrase.count { it == '-' } >= 5 && phrase.all { it in 'a'..'z' || it == '-' })
+            click("Characters")
+            click("Uppercase")
+            click("Lowercase")
+            click("Symbols")
+            click("Digits")
+            compose.onNodeWithText("Generate password").assertIsNotEnabled()
+            click("Digits")
+            compose.onNodeWithText("Length (1–256)").performScrollTo().performTextReplacement("6")
             click("Generate password")
+            compose.onNodeWithText("Generated 6 characters, 19 bits", substring = true).assertExists()
+            val digits = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
+            assertTrue(digits.length == 6 && digits.all { it in '0'..'9' })
+            click("Hide options")
             click("Set entry")
             click("Save")
             compose.waitUntil(30_000) { shown("Saved locally") }

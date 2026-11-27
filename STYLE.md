@@ -55,6 +55,8 @@ Pick the established term and keep it; a new word reads as a new concept.
 | record | one numbered decision: its plan and its implementations | ticket, task, PR |
 | security key | a FIDO2 hardware authenticator enrolled with `hmac-secret` | token, dongle, YubiKey (except when naming a specific device) |
 | key slot | one enrolled security key's wrapped copy of a vault's roaming secret | credential blob, wrapper |
+| passphrase | hyphen-joined random words drawn from the EFF large wordlist | word password, mnemonic |
+| character class | one of the four switchable character sets: uppercase, lowercase, digits, symbols | charset, pool |
 
 Add a term here before introducing it.
 

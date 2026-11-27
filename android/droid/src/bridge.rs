@@ -13,6 +13,7 @@ use jni::{
 	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
 use keptino_core::crypto::PEPPER_SIZE;
+use keptino_core::generator::{Classes, Kind};
 use keptino_core::vault::KeyStore;
 use std::{
 	collections::HashMap,
@@ -305,12 +306,22 @@ pub extern "system" fn Java_com_keptino_app_Core_generatePassword<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	handle: jlong,
-) {
-	guard(&mut env, (), |_| {
-		with(handle, |vault| {
-			vault.generate_password();
-			Ok(())
-		})
+	kind: jint,
+	count: jint,
+	classes: jint,
+) -> jint {
+	guard(&mut env, 0, |_| {
+		let count =
+			usize::try_from(count).map_err(|_| Error::Invalid("invalid generator count"))?;
+		let kind = match kind {
+			0 if (0..=15).contains(&classes) => Kind::Characters {
+				length: count,
+				classes: Classes::from_bits(classes as u8),
+			},
+			1 => Kind::Passphrase { words: count },
+			_ => return Err(Error::Invalid("invalid generator options")),
+		};
+		with(handle, |vault| Ok(vault.generate_password(kind)? as jint))
 	})
 }
 

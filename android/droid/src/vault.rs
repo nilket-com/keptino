@@ -8,6 +8,7 @@ use crate::{
 use keptino_core::{
 	crypto::PEPPER_SIZE,
 	format::{Envelope, KdfParams, field},
+	generator::{self, Kind},
 	vault::{self, Database, OpenError, PasswordEntry, UnlockError, unlock},
 };
 use zeroize::Zeroizing;
@@ -172,9 +173,11 @@ impl Vault {
 	}
 
 	/// Generate into the sealed working entry. Commit and save remain explicit.
-	pub fn generate_password(&mut self) {
-		use keptino_core::generator::{LENGTH, password};
-		self.working.set_password(&password(LENGTH));
+	pub fn generate_password(&mut self, kind: Kind) -> Result<u32> {
+		let password =
+			generator::generate(&kind).ok_or(Error::Invalid("invalid generator options"))?;
+		self.working.set_password(&password);
+		Ok(generator::whole_bits(&kind))
 	}
 
 	pub fn delete_selected(&mut self, confirmed_name: &str) -> Result<bool> {
@@ -412,7 +415,7 @@ mod tests {
 		add(&mut vault, "first", "original", "one");
 		add(&mut vault, "second", "untouched", "two");
 		assert!(vault.query("first"));
-		vault.generate_password();
+		assert_eq!(vault.generate_password(Kind::DEFAULT).unwrap(), 152);
 		let generated = vault.get_field(field::PASSWORD).unwrap();
 		assert_eq!(generated.len(), keptino_core::generator::LENGTH);
 		assert!(vault.query("one"));
@@ -420,7 +423,12 @@ mod tests {
 			vault.get_field(field::PASSWORD).unwrap().as_slice(),
 			b"original"
 		);
-		vault.generate_password();
+		assert_eq!(
+			vault
+				.generate_password(Kind::Passphrase { words: 6 })
+				.unwrap(),
+			77
+		);
 		let generated = vault.get_field(field::PASSWORD).unwrap();
 		assert_eq!(vault.commit(), Commit::Updated);
 		let saved = vault.save().unwrap();

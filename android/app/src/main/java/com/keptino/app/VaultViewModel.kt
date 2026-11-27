@@ -12,6 +12,16 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal data class GeneratorOptions(
+    val passphrase: Boolean = false,
+    val length: String = "24",
+    val words: String = "6",
+    val classes: Int = 15,
+) {
+    val count: Int? get() = (if (passphrase) words else length).toIntOrNull()
+    val valid: Boolean get() = if (passphrase) (count ?: 0) in 1..32 else (count ?: 0) in 1..256 && classes != 0
+}
+
 class VaultViewModel(application: Application) : AndroidViewModel(application) {
     val storage = VaultStorage(application)
     var configured by mutableStateOf(storage.configured()); private set
@@ -23,6 +33,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var fields by mutableStateOf(List(9) { "" }); private set
     var revealed by mutableStateOf(setOf<Int>()); private set
     var dirty by mutableStateOf(false); private set
+    internal var generator by mutableStateOf(GeneratorOptions())
     var keyProtection by mutableStateOf<String?>(null); private set
     private var sessionSync: BackblazeSession? = null
     private var heldRevision = 0uL
@@ -130,11 +141,14 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         fields = fields.toMutableList().also { it[id - 1] = text }; editing = true; dirty = true
     }
     fun generatePassword() = action {
-        Core.generatePassword(handle)
+        val options = generator
+        val count = requireNotNull(options.count) { "Enter a generator count" }
+        val bits = Core.generatePassword(handle, if (options.passphrase) 1 else 0, count, options.classes)
         editing = true
         dirty = true
         if (3 in revealed) fields = fields.toMutableList().also { it[2] = read(3) }
-        status = "Password generated. Set the entry to keep it."
+        val unit = if (options.passphrase) "word" else "character"
+        status = "Generated $count $unit${if (count == 1) "" else "s"}, $bits bits. Set the entry to keep it."
     }
     fun deleteEntry(confirmedName: String) = action {
         if (deletableName != confirmedName || !Core.deleteSelected(handle, confirmedName)) return@action
@@ -201,6 +215,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun report(message: String) { status = message }
     fun lock() {
         generation++
+        generator = GeneratorOptions()
         if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null
         handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; committedDirty = false; currentEntryName = ""

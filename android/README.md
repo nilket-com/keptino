@@ -86,7 +86,10 @@ them against the authenticated inner copy before opening the vault.
    access explicitly. Failed remote requests do not silently create an empty vault.
 5. Find an entry by name or tag; previous/next navigate the entries. Password,
    PIN and note start hidden. Reveal a field to edit it; copy does not require reveal.
-   **Generate password** fills the working password with 24 random characters.
+   **Generate password** fills the working password with 24 random characters by default.
+   Under **Generator options**, choose the length and character classes, or choose
+   **Words** for a hyphen-joined passphrase. The status shows the entropy in bits.
+   Your choices last until you lock the vault.
    **Revert entry edits** restores the stored value. **Delete entry** asks you
    to confirm the selected name and takes effect on disk when you save.
 6. Use **Set entry**, then **Save**. Save writes the encrypted local file atomically
@@ -128,7 +131,7 @@ to read the pepper and again to encrypt the replacement settings.
 Setup requests StrongBox when available and falls back to the default Android
 Keystore if StrongBox is unavailable. The locked screen reports the storage key's
 security level. The first authenticated read migrates existing settings and retires
-the legacy key after writing and verifying the replacement. A cancelled prompt
+the legacy key after writing and verifying the replacement. A canceled prompt
 leaves the existing setup usable. If a lock-screen reset invalidates the key, use
 **Change setup** and enter the original pepper and storage credentials. Android
 can retain this key across biometric enrollment because device credentials are
@@ -205,7 +208,7 @@ python3 test-emulator.py --serial emulator-5556
 Use the serial printed by `adb devices` and a dedicated emulator with no existing
 screen lock. The script sets a temporary test PIN (default `1234`, configurable
 with `--device-pin`) and clears it at the end. It exercises the real system
-credential prompt, cancelled reads and writes, and migration of legacy setup.
+credential prompt, canceled reads and writes, and migration of legacy setup.
 The script starts an isolated Backblaze
 mock and connects through `adb reverse`; it does not depend on emulator host-IP
 routing. It checks native error handling, Keystore/local storage, the Linux debug
