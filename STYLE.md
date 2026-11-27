@@ -72,8 +72,7 @@ Add a term here before introducing it.
 
 ## 4. Commit subjects and decisions
 
-`ci/commit-subjects.md` is the rule and the hooks enforce it. A design
-change begins with a `plan: adr NNNN` commit that adds exactly one file under
-`plans/adr/`; its implementations are `impl: adr NNNN` commits. A patch that
-changes no design is `fix:`, `test:` or `docs:`. Subjects are imperative,
-lower case after the prefix, American spelling, no trailing period, no body.
+Follow `ci/commit-subjects.md`. Publish one numbered plan immediately
+followed by its single implementation. Put tests and supporting documentation
+in the implementation. Write an imperative summary in American English,
+beginning with a lowercase letter or digit. Omit trailing periods and bodies.

@@ -1,51 +1,35 @@
-# Commit history preflight
+# Decision and implementation cadence
 
-Adopted from ket. Two git hooks and one read-only checker keep the history
-uniform: every subject follows one grammar, messages have no body, author
-and committer are Joel's identity, and architecture decisions are numbered.
-The checker inspects `refs/remotes/origin/main..candidate` without changing
-refs or fetching.
+From ADR 0001 onward, publish complete, consecutive pairs on main.
 
-Activate the hooks once per clone:
+    plan: adr 0001 share one cargo workspace
+    impl: adr 0001 build both heads in the workspace
+    plan: adr 0002 share the vault format
+    impl: adr 0002 use the shared format on both heads
 
-    git config core.hooksPath .githooks
+Each plan adds one regular Markdown file under `plans/adr/NNNN_name.md`
+and contains at most 400 lines. The next commit implements that number.
+Include its code, tests and supporting documentation in one reviewed change.
+A documentation or tooling change can have its own pair. Keep unnumbered
+research proposals under `plans/proposals/` until scheduled.
 
-`commit-msg` refuses a bad subject or any body at commit time, before
-signing. `pre-push` runs the full history check on every commit about to be
-pushed. Run either check by hand with:
+Keep work in progress local. Assemble one signed implementation after both
+owners have cleared their changes. To rework your most recent local commit
+in an isolated worktree, `git reset --soft HEAD^` returns its changes to
+the index. Review the staged diff and commit again. Coordinate any rewrite
+of published history with the operator and team and use an explicit lease.
+
+Use Joel Bondurant's configured author and committer identity. Sign both
+commits. Subjects use printable ASCII with a lowercase letter or digit at
+the start of the summary. Omit parentheses, incident labels and message
+bodies. Point Git at the project's trusted signers for SSH verification.
+
+Activate the hooks once per clone with `git config core.hooksPath .githooks`.
+The commit hook checks the next subject. The push hook and `ci/check.sh`
+validate the whole chain beginning at the parent of ADR 0001, including
+when the outgoing history replaces the remote tip. Main must end at a
+completed pair. Merges, gaps, rewrites of decision documents in subsequent
+commits, and standalone housekeeping commits fail the check.
 
     python3 -B ci/commit_subjects.py --repo . --commit HEAD
     python3 -B ci/test_commit_subjects.py
-
-## Subjects
-
-    fix: terse summary
-    test: terse summary
-    docs: terse summary
-    plan: adr NNNN terse summary
-    impl: adr NNNN terse summary
-    docs: adr NNNN terse summary
-
-The summary starts with a lowercase letter or digit and continues in
-printable ASCII. No scopes, no parentheses, no capital first character, no
-delivery or incident labels, no separate evidence subjects. Product nouns and
-acronyms are fine. Messages have no body: no paragraphs, no trailers, no
-attribution lines. The subject carries the whole message; the diff and the
-review documents carry the reasoning.
-
-## Decisions
-
-A numbered decision lives in `plans/adr/NNNN_name.md`. A `plan` commit adds
-or amends exactly that one file and nothing else, takes the next number in
-the directory (0001 in a new directory), and stays under 400 lines. An
-`impl` or numbered `docs` commit needs an earlier `plan` of the same number
-in first-parent ancestry. A decision allows five implementations unless
-`ci/commit-subject-allowlist.json` records a reviewed higher limit; the same
-file can grandfather an unchanged oversized document by exact path and blob.
-Absent policy grants no exceptions; malformed policy makes the check HOLD.
-
-History before the adoption of this preflight is not re-checked: the hooks
-and checker look only at commits not yet on `origin/main`.
-
-The lint cannot tell whether a conforming `fix:` hides a design change.
-Code review enforces that distinction; passing syntax does not replace it.

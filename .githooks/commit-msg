@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Refuse a commit message ci/commit_subjects.py would fail: a bad subject, or any body.
-
-Runs at commit time, before signing. The history rules that need the commit
-itself (ADR numbering, plan before impl, author identity) run in pre-push.
-"""
+"""Check the next local decision or implementation before signing."""
 import pathlib
 import sys
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "ci"))
-from commit_subjects import subject_error  # noqa: E402
+from commit_subjects import HistoryError, expected_subject, resolve, subject_error  # noqa: E402
 
 lines = [line for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
          if not line.startswith("#")]
@@ -22,6 +18,13 @@ else:
     error = subject_error(lines[0])
     if error:
         errors.append(error)
+    else:
+        try:
+            kind, number = expected_subject(".", resolve(".", "HEAD"))
+            if not lines[0].startswith(f"{kind}: adr {number} "):
+                errors.append(f"expected {kind}: adr {number}")
+        except HistoryError as problem:
+            errors.append(str(problem))
     if len(lines) > 1:
         errors.append("commit messages must have no body (no trailers, no attribution lines): "
                       + repr(lines[-1]))

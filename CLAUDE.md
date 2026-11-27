@@ -8,10 +8,9 @@ with the operator. These rules keep that safe.
 - `ci/commit-subjects.md`: the commit grammar and the decision cadence the
   hooks enforce. Activate them once per clone: `git config core.hooksPath
   .githooks`.
-- `plans/adr/`: numbered decisions. A design change starts with a `plan:
-  adr NNNN` commit that adds exactly one file there; implementations follow
-  as `impl: adr NNNN` commits. A patch with no design change is `fix:`,
-  `test:` or `docs:`.
+- `plans/adr/`: publish each numbered decision and its single implementation
+  together. Keep implementation work local until reviewed. The next number
+  follows the completed pair. Unscheduled proposals live in `plans/proposals/`.
 - `doc/security-review-vs-keepassxc-2026-11-26.md`: the threat model and
   what remains open.
 
@@ -26,7 +25,8 @@ with the operator. These rules keep that safe.
   `digisafe`). Announce file ownership before editing shared files. Stage
   only your own paths; never commit another agent's working-tree changes.
 - Commits are signed, one-line, no body, no attribution trailers. Push
-  fast-forwards only; the pre-push hook checks `origin/main..HEAD`.
+  fast-forwards in routine work. The pre-push hook validates every numbered
+  pair from the fixed pre-ADR parent.
 
 ## What must not change
 - Names bound into user data: systemd-creds names `pepper`, `backblaze`,
