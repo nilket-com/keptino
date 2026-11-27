@@ -11,9 +11,7 @@ use iced::{
 	futures::{SinkExt, Stream, StreamExt, stream},
 };
 use std::collections::HashMap;
-use zbus::{
-	Connection, MatchRule, Message as Signal, MessageStream, Variant, message::Type,
-};
+use zbus::{Connection, MatchRule, Message as Signal, MessageStream, Variant, message::Type};
 
 const LOGIND: &str = "org.freedesktop.login1";
 
@@ -27,16 +25,12 @@ fn listen() -> impl Stream<Item = Message> {
 		let system = Connection::system().await.ok();
 		let session = Connection::session().await.ok();
 		let mut signals = Vec::new();
-		for (connection, rules) in [
-			(&system, system_rules()),
-			(&session, session_rules()),
-		] {
+		for (connection, rules) in [(&system, system_rules()), (&session, session_rules())] {
 			let Some(connection) = connection else {
 				continue;
 			};
 			for rule in rules.into_iter().flatten() {
-				if let Ok(messages) = MessageStream::for_match_rule(rule, connection, None).await
-				{
+				if let Ok(messages) = MessageStream::for_match_rule(rule, connection, None).await {
 					signals.push(messages.boxed());
 				}
 			}
@@ -129,25 +123,76 @@ mod tests {
 
 	#[test]
 	fn only_locking_and_sleeping_transitions_lock() {
-		assert!(locks(&signal("org.freedesktop.login1.Manager", "PrepareForSleep", &true)));
-		assert!(!locks(&signal("org.freedesktop.login1.Manager", "PrepareForSleep", &false)));
-		assert!(locks(&signal("org.freedesktop.ScreenSaver", "ActiveChanged", &true)));
-		assert!(locks(&signal("org.gnome.ScreenSaver", "ActiveChanged", &true)));
-		assert!(!locks(&signal("org.gnome.ScreenSaver", "ActiveChanged", &false)));
-		assert!(locks(&signal("org.freedesktop.login1.Session", "Lock", &())));
-		assert!(!locks(&signal("org.freedesktop.login1.Session", "Unlock", &())));
+		assert!(locks(&signal(
+			"org.freedesktop.login1.Manager",
+			"PrepareForSleep",
+			&true
+		)));
+		assert!(!locks(&signal(
+			"org.freedesktop.login1.Manager",
+			"PrepareForSleep",
+			&false
+		)));
+		assert!(locks(&signal(
+			"org.freedesktop.ScreenSaver",
+			"ActiveChanged",
+			&true
+		)));
+		assert!(locks(&signal(
+			"org.gnome.ScreenSaver",
+			"ActiveChanged",
+			&true
+		)));
+		assert!(!locks(&signal(
+			"org.gnome.ScreenSaver",
+			"ActiveChanged",
+			&false
+		)));
+		assert!(locks(&signal(
+			"org.freedesktop.login1.Session",
+			"Lock",
+			&()
+		)));
+		assert!(!locks(&signal(
+			"org.freedesktop.login1.Session",
+			"Unlock",
+			&()
+		)));
 		let locked: (&str, HashMap<&str, Variant>, Vec<&str>) = (
 			"org.freedesktop.login1.Session",
 			HashMap::from([("LockedHint", Variant::Bool(true))]),
 			vec![],
 		);
-		assert!(locks(&signal("org.freedesktop.DBus.Properties", "PropertiesChanged", &locked)));
-		let unlocked: (&str, HashMap<&str, Variant>, Vec<&str>) =
-			(locked.0, HashMap::from([("LockedHint", Variant::Bool(false))]), vec![]);
-		assert!(!locks(&signal("org.freedesktop.DBus.Properties", "PropertiesChanged", &unlocked)));
-		let other: (&str, HashMap<&str, Variant>, Vec<&str>) =
-			("org.freedesktop.login1.Session", HashMap::from([("Active", Variant::Bool(true))]), vec![]);
-		assert!(!locks(&signal("org.freedesktop.DBus.Properties", "PropertiesChanged", &other)));
-		assert!(system_rules().into_iter().chain(session_rules()).all(|rule| rule.is_ok()));
+		assert!(locks(&signal(
+			"org.freedesktop.DBus.Properties",
+			"PropertiesChanged",
+			&locked
+		)));
+		let unlocked: (&str, HashMap<&str, Variant>, Vec<&str>) = (
+			locked.0,
+			HashMap::from([("LockedHint", Variant::Bool(false))]),
+			vec![],
+		);
+		assert!(!locks(&signal(
+			"org.freedesktop.DBus.Properties",
+			"PropertiesChanged",
+			&unlocked
+		)));
+		let other: (&str, HashMap<&str, Variant>, Vec<&str>) = (
+			"org.freedesktop.login1.Session",
+			HashMap::from([("Active", Variant::Bool(true))]),
+			vec![],
+		);
+		assert!(!locks(&signal(
+			"org.freedesktop.DBus.Properties",
+			"PropertiesChanged",
+			&other
+		)));
+		assert!(
+			system_rules()
+				.into_iter()
+				.chain(session_rules())
+				.all(|rule| rule.is_ok())
+		);
 	}
 }

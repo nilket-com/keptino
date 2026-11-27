@@ -1,7 +1,7 @@
 use crate::logger::{critical, info, warn};
 use libc::{
-	getrlimit, mlockall, prctl, rlimit, setrlimit, MCL_CURRENT, MCL_FUTURE, PR_SET_DUMPABLE,
-	RLIMIT_CORE, RLIMIT_MEMLOCK,
+	MCL_CURRENT, MCL_FUTURE, PR_SET_DUMPABLE, RLIMIT_CORE, RLIMIT_MEMLOCK, getrlimit, mlockall,
+	prctl, rlimit, setrlimit,
 };
 use std::{env, fs, process::Command};
 
@@ -110,8 +110,8 @@ fn sniff_luks() {
 /// skipped.
 fn sandbox_filesystem() {
 	use landlock::{
-		ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-		RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+		ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+		RulesetCreatedAttr, RulesetStatus,
 	};
 	let home = env::home_dir().unwrap_or_default();
 	let runtime = env::var("XDG_RUNTIME_DIR")
@@ -140,7 +140,12 @@ fn sandbox_filesystem() {
 		("/dev".into(), device),
 		(runtime, data),
 		(vault_dir.to_string_lossy().into_owned(), data),
-		(home.join(".cache/fontconfig").to_string_lossy().into_owned(), data),
+		(
+			home.join(".cache/fontconfig")
+				.to_string_lossy()
+				.into_owned(),
+			data,
+		),
 	];
 	let ruleset = Ruleset::default()
 		.set_compatibility(CompatLevel::BestEffort)
@@ -172,7 +177,9 @@ fn sandbox_filesystem() {
 			RulesetStatus::PartiallyEnforced => {
 				warn("Filesystem sandbox partially enforced: the kernel is older than this build.")
 			}
-			RulesetStatus::NotEnforced => warn("Filesystem sandbox not enforced: Landlock is unavailable."),
+			RulesetStatus::NotEnforced => {
+				warn("Filesystem sandbox not enforced: Landlock is unavailable.")
+			}
 		},
 		Err(err) => warn(&format!("Filesystem sandbox unavailable: {err}")),
 	}
@@ -204,7 +211,10 @@ mod tests {
 			assert!(fs::read("/etc/hostname").is_ok() || fs::read("/etc/os-release").is_ok());
 			let outside = env::temp_dir().join(format!("keptino-sandbox-{}", std::process::id()));
 			let denied = fs::File::create(&outside);
-			assert!(denied.is_err(), "writing outside the allowed paths must fail");
+			assert!(
+				denied.is_err(),
+				"writing outside the allowed paths must fail"
+			);
 			assert_eq!(
 				denied.err().map(|e| e.kind()),
 				Some(std::io::ErrorKind::PermissionDenied)

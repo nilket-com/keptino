@@ -569,7 +569,13 @@ mod tests {
 			panic!()
 		};
 		assert!(state.confirm_delete);
-		assert!(state.vault.database.get_password_entry_by_name("example").is_some());
+		assert!(
+			state
+				.vault
+				.database
+				.get_password_entry_by_name("example")
+				.is_some()
+		);
 		// Any other action cancels the pending delete.
 		let _ = update(&mut app, Message::QueryInput("example".into()));
 		let _ = update(&mut app, Message::PasswordEntryDelete);
@@ -577,13 +583,25 @@ mod tests {
 			panic!()
 		};
 		assert!(state.confirm_delete);
-		assert!(state.vault.database.get_password_entry_by_name("example").is_some());
+		assert!(
+			state
+				.vault
+				.database
+				.get_password_entry_by_name("example")
+				.is_some()
+		);
 		let _ = update(&mut app, Message::PasswordEntryDelete);
 		let AppState::Unlocked(state) = &app else {
 			panic!()
 		};
 		assert!(!state.confirm_delete);
-		assert!(state.vault.database.get_password_entry_by_name("example").is_none());
+		assert!(
+			state
+				.vault
+				.database
+				.get_password_entry_by_name("example")
+				.is_none()
+		);
 		assert!(state.password_entry.get_name().is_empty());
 		let _ = update(&mut app, Message::GeneratePassword);
 		let AppState::Unlocked(state) = &app else {

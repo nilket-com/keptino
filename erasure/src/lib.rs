@@ -371,7 +371,10 @@ mod tests {
 	fn the_field_is_gf256_with_the_published_polynomial() {
 		assert_eq!(EXP[0], 1);
 		assert_eq!(EXP[1], 2);
-		assert_eq!(EXP[8], 0x1D, "2^8 reduces to the low byte of the polynomial");
+		assert_eq!(
+			EXP[8], 0x1D,
+			"2^8 reduces to the low byte of the polynomial"
+		);
 		assert_eq!(EXP[255], 1);
 		for a in 1..=255u8 {
 			assert_eq!(EXP[LOG[a as usize] as usize], a);
@@ -417,8 +420,7 @@ mod tests {
 			let ours = ReedSolomon::new(data, parity).unwrap();
 			let theirs = reed_solomon_erasure::galois_8::ReedSolomon::new(data, parity).unwrap();
 			for len in [1usize, 2, 63, 64, 1000, 4096] {
-				let mut shards: Vec<Vec<u8>> =
-					(0..data + parity).map(|_| rng.bytes(len)).collect();
+				let mut shards: Vec<Vec<u8>> = (0..data + parity).map(|_| rng.bytes(len)).collect();
 				let mut reference = shards.clone();
 				ours.encode(&mut shards).unwrap();
 				theirs.encode(&mut reference).unwrap();
@@ -453,7 +455,10 @@ mod tests {
 		lost[0] = None;
 		lost[1] = None;
 		lost[2] = None;
-		assert_eq!(rs.reconstruct_data(&mut lost), Err(Error::TooFewShardsPresent));
+		assert_eq!(
+			rs.reconstruct_data(&mut lost),
+			Err(Error::TooFewShardsPresent)
+		);
 		let mut uneven = shards.clone();
 		uneven[3].push(0);
 		assert_eq!(rs.encode(&mut uneven), Err(Error::IncorrectShardSize));
@@ -479,11 +484,27 @@ mod tests {
 	fn every_committed_vault_fixture_has_exactly_our_parity() {
 		let rs = ReedSolomon::new(8, 4).unwrap();
 		for (name, file) in [
-			("linux-debug", &include_bytes!("../../android/droid/tests/fixtures/linux-debug.keptino")[..]),
-			("linux-release", &include_bytes!("../../android/droid/tests/fixtures/linux-release.keptino")[..]),
-			("linux-debug-v2", &include_bytes!("../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..]),
-			("linux-release-v2", &include_bytes!("../../android/droid/tests/fixtures/linux-release-v2.keptino")[..]),
-			("linux-debug-unmarked", &include_bytes!("../../android/droid/tests/fixtures/linux-debug-unmarked.keptino")[..]),
+			(
+				"linux-debug",
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug.keptino")[..],
+			),
+			(
+				"linux-release",
+				&include_bytes!("../../android/droid/tests/fixtures/linux-release.keptino")[..],
+			),
+			(
+				"linux-debug-v2",
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..],
+			),
+			(
+				"linux-release-v2",
+				&include_bytes!("../../android/droid/tests/fixtures/linux-release-v2.keptino")[..],
+			),
+			(
+				"linux-debug-unmarked",
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-unmarked.keptino")
+					[..],
+			),
 		] {
 			let stored = fixture_shards(file);
 			let mut recomputed = stored.clone();
@@ -491,7 +512,10 @@ mod tests {
 				parity.fill(0);
 			}
 			rs.encode(&mut recomputed).unwrap();
-			assert_eq!(recomputed, stored, "{name}: parity written by reed-solomon-erasure");
+			assert_eq!(
+				recomputed, stored,
+				"{name}: parity written by reed-solomon-erasure"
+			);
 			// Repair the worst case the layout allows: four shards gone,
 			// three of them data.
 			let mut damaged: Vec<Option<Vec<u8>>> = stored.iter().cloned().map(Some).collect();
@@ -500,7 +524,11 @@ mod tests {
 			}
 			rs.reconstruct_data(&mut damaged).unwrap();
 			for d in 0..8 {
-				assert_eq!(damaged[d].as_deref(), Some(stored[d].as_slice()), "{name} shard {d}");
+				assert_eq!(
+					damaged[d].as_deref(),
+					Some(stored[d].as_slice()),
+					"{name} shard {d}"
+				);
 			}
 		}
 	}

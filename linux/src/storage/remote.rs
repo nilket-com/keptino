@@ -1,3 +1,4 @@
+use super::secret::SecretMemory;
 use aws_credential_types::Credentials;
 use aws_sigv4::{
 	http_request::{
@@ -11,7 +12,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
-use super::secret::SecretMemory;
 use std::{
 	fs, io,
 	path::Path,

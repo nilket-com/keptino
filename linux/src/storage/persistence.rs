@@ -1,12 +1,12 @@
 use crate::{
 	logger::{error, info, warn},
 	storage::{
+		SYSTEMD_CREDS,
 		atlas::{FieldAtlas, next_tlv},
 		database::{Database, EntryTag, InteriorDatabase},
 		entry::{MetaEntry, MetaField},
 		remote::Remote,
 		secret::SecretMemory,
-		SYSTEMD_CREDS,
 	},
 };
 use std::{
@@ -69,8 +69,7 @@ fn remember_revision(db_name: &str, revision: u64) {
 			&revision_temp_path(db_name),
 			&revision_path(db_name),
 			revision.to_string().as_bytes(),
-		)
-	{
+		) {
 		error(&format!("Cannot record the vault revision: {err}"));
 	}
 }
@@ -79,7 +78,11 @@ fn remember_revision(db_name: &str, revision: u64) {
 /// removed the record to accept it deliberately. A format-1 copy carries no
 /// revision and counts as zero: once a revision has been trusted, a file
 /// from before the format change is a rollback too.
-fn check_revision(opened: Option<u64>, last_seen: Option<u64>, db_name: &str) -> Result<(), String> {
+fn check_revision(
+	opened: Option<u64>,
+	last_seen: Option<u64>,
+	db_name: &str,
+) -> Result<(), String> {
 	match (opened, last_seen) {
 		(opened, Some(seen)) if opened.unwrap_or(0) < seen => Err(format!(
 			"This copy is revision {}, but revision {seen} was already opened here. \
@@ -392,7 +395,6 @@ fn open_candidates(
 	key.zeroize().ok();
 	Err("Cannot decrypt vault. Check the master password and pepper.".into())
 }
-
 
 fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database, String> {
 	let created_ts = SystemTime::now()
@@ -887,20 +889,33 @@ mod tests {
 		fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
 		write_atomic(&tmp, &path, b"vault").unwrap();
 		assert_eq!(fs::read(&path).unwrap(), b"vault");
-		assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+		assert_eq!(
+			fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+			0o600
+		);
 		assert!(!tmp.exists());
 		write_atomic(&tmp, &path, b"second").unwrap();
 		assert_eq!(fs::read(&path).unwrap(), b"second");
-		assert!(!generation_path(&path, 1).exists(), "no generations without keep");
+		assert!(
+			!generation_path(&path, 1).exists(),
+			"no generations without keep"
+		);
 		for content in [&b"third"[..], b"fourth", b"fifth", b"sixth"] {
 			write_atomic_keeping(&tmp, &path, content, 2).unwrap();
 		}
 		assert_eq!(fs::read(&path).unwrap(), b"sixth");
 		assert_eq!(fs::read(generation_path(&path, 1)).unwrap(), b"fifth");
 		assert_eq!(fs::read(generation_path(&path, 2)).unwrap(), b"fourth");
-		assert!(!generation_path(&path, 3).exists(), "older generations are dropped");
+		assert!(
+			!generation_path(&path, 3).exists(),
+			"older generations are dropped"
+		);
 		assert_eq!(
-			fs::metadata(generation_path(&path, 1)).unwrap().permissions().mode() & 0o777,
+			fs::metadata(generation_path(&path, 1))
+				.unwrap()
+				.permissions()
+				.mode()
+				& 0o777,
 			0o600
 		);
 		fs::remove_dir_all(&dir).unwrap();
@@ -922,7 +937,11 @@ mod tests {
 		assert_eq!(envelope.salt, [42; SALT_SIZE]);
 		assert_eq!(envelope.revision, Some(1));
 		assert!(envelope.aad.is_empty());
-		assert!(envelope.unlock(&db.clone_master_key().read().unwrap()).is_some());
+		assert!(
+			envelope
+				.unlock(&db.clone_master_key().read().unwrap())
+				.is_some()
+		);
 		db.set_meta_entry(MetaEntry::new("nonce", "7"));
 		assert_ne!(
 			Envelope::decode(&db_to_vec(&db, false)).unwrap().nonce,
@@ -947,7 +966,10 @@ mod tests {
 	/// A meta record as the TLV layer stores it.
 	fn meta_record(name: &str, value: &str) -> Vec<u8> {
 		let mut fields = Vec::new();
-		for (id, text) in [(MetaField::Name as u8, name), (MetaField::Value as u8, value)] {
+		for (id, text) in [
+			(MetaField::Name as u8, name),
+			(MetaField::Value as u8, value),
+		] {
 			fields.push(id);
 			fields.extend_from_slice(&(text.len() as u32).to_le_bytes());
 			fields.extend_from_slice(text.as_bytes());
@@ -964,7 +986,12 @@ mod tests {
 		let mut nonce = [0u8; NONCE_SIZE];
 		nonce[..16].copy_from_slice(&7u128.to_le_bytes());
 		let compressed = compress(&db.serialize());
-		let encrypted = encrypt(&compressed, &db.clone_master_key().read().unwrap(), nonce, &[]);
+		let encrypted = encrypt(
+			&compressed,
+			&db.clone_master_key().read().unwrap(),
+			nonce,
+			&[],
+		);
 		let envelope = db.meta_only();
 		envelope.set_meta_entry(MetaEntry::new("db", &to_base64(&encrypted)));
 		encode_erasure(&envelope.serialize())
@@ -985,7 +1012,10 @@ mod tests {
 		// Each plaintext field is vouched for by the copy inside the ciphertext.
 		for (from, to) in [
 			(&b"example"[..], &b"exampel"[..]),
-			(b"revision\x02\x01\x00\x00\x001", b"revision\x02\x01\x00\x00\x002"),
+			(
+				b"revision\x02\x01\x00\x00\x001",
+				b"revision\x02\x01\x00\x00\x002",
+			),
 			(b"kdf_t\x02\x01\x00\x00\x001", b"kdf_t\x02\x01\x00\x00\x002"),
 		] {
 			let altered = Envelope::decode(&tamper(&encoded, from, to)).unwrap();
@@ -994,15 +1024,33 @@ mod tests {
 		// A dropped or added plaintext field fails the same way.
 		let mut recovered = decode_erasure(&encoded).unwrap();
 		recovered.extend_from_slice(&meta_record("created_ts", "1"));
-		assert!(Envelope::decode(&encode_erasure(&recovered)).unwrap().unlock(&key.read().unwrap()).is_none());
+		assert!(
+			Envelope::decode(&encode_erasure(&recovered))
+				.unwrap()
+				.unlock(&key.read().unwrap())
+				.is_none()
+		);
 		let mut recovered = decode_erasure(&encoded).unwrap();
 		recovered.extend_from_slice(&meta_record("salt", "AAAA"));
-		assert!(Envelope::decode(&encode_erasure(&recovered)).is_err(), "duplicate names are refused");
+		assert!(
+			Envelope::decode(&encode_erasure(&recovered)).is_err(),
+			"duplicate names are refused"
+		);
 		// Out-of-range or partial costs are not a vault at all.
-		assert!(Envelope::decode(&tamper(&encoded, b"kdf_m\x02\x04\x00\x00\x004096", b"kdf_m\x02\x04\x00\x00\x000001")).is_err());
+		assert!(
+			Envelope::decode(&tamper(
+				&encoded,
+				b"kdf_m\x02\x04\x00\x00\x004096",
+				b"kdf_m\x02\x04\x00\x00\x000001"
+			))
+			.is_err()
+		);
 		assert!(Envelope::decode(&tamper(&encoded, b"kdf_p", b"kdf_q")).is_err());
 		// Saves advance the revision.
-		assert_eq!(Envelope::decode(&db_to_vec(&db, false)).unwrap().revision, Some(2));
+		assert_eq!(
+			Envelope::decode(&db_to_vec(&db, false)).unwrap().revision,
+			Some(2)
+		);
 	}
 
 	#[test]
@@ -1017,7 +1065,10 @@ mod tests {
 		assert!(envelope.unlock(&key.read().unwrap()).is_some());
 		let replayed = Envelope::decode(&tamper(&encoded, b"1700000000", b"1800000000")).unwrap();
 		assert_eq!(replayed.modified, 1800000000);
-		assert!(replayed.unlock(&key.read().unwrap()).is_none(), "a bumped timestamp is caught");
+		assert!(
+			replayed.unlock(&key.read().unwrap()).is_none(),
+			"a bumped timestamp is caught"
+		);
 	}
 
 	#[test]
@@ -1031,7 +1082,10 @@ mod tests {
 		assert!(envelope.unlock(&key.read().unwrap()).is_some());
 		let renamed = Envelope::decode(&tamper(&encoded, b"example", b"exampel")).unwrap();
 		assert!(renamed.unlock(&key.read().unwrap()).is_none());
-		assert!(Envelope::decode(&tamper(&encoded, b"revision", b"revisioN")).is_err(), "a marked file must carry a revision");
+		assert!(
+			Envelope::decode(&tamper(&encoded, b"revision", b"revisioN")).is_err(),
+			"a marked file must carry a revision"
+		);
 		// The next unmarked save drops the marker and keeps counting.
 		let converted = Envelope::decode(&db_to_vec(&db, false)).unwrap();
 		assert_eq!(converted.revision, Some(2));
@@ -1039,8 +1093,17 @@ mod tests {
 		assert!(!converted.mirror.iter().any(|(name, _)| name == "format"));
 		assert!(converted.unlock(&key.read().unwrap()).is_some());
 		// A marker from the future is refused with an explanation, not a guess.
-		let future = tamper(&db_to_vec(&db, true), b"format\x02\x01\x00\x00\x002", b"format\x02\x01\x00\x00\x009");
-		assert!(Envelope::decode(&future).err().unwrap().contains("newer Keptino"));
+		let future = tamper(
+			&db_to_vec(&db, true),
+			b"format\x02\x01\x00\x00\x002",
+			b"format\x02\x01\x00\x00\x009",
+		);
+		assert!(
+			Envelope::decode(&future)
+				.err()
+				.unwrap()
+				.contains("newer Keptino")
+		);
 	}
 
 	#[test]
@@ -1053,14 +1116,22 @@ mod tests {
 		};
 		assert_eq!(KdfParams::from_meta(&meta(&[])), Some(KdfParams::DEFAULT));
 		assert_eq!(
-			KdfParams::from_meta(&meta(&[("kdf_m", "4194304"), ("kdf_t", "3"), ("kdf_p", "2")])),
+			KdfParams::from_meta(&meta(&[
+				("kdf_m", "4194304"),
+				("kdf_t", "3"),
+				("kdf_p", "2")
+			])),
 			Some(KdfParams {
 				m_cost: 1 << 22,
 				t_cost: 3,
 				p_cost: 2
 			})
 		);
-		assert_eq!(KdfParams::from_meta(&meta(&[("kdf_m", "4194304")])), None, "partial");
+		assert_eq!(
+			KdfParams::from_meta(&meta(&[("kdf_m", "4194304")])),
+			None,
+			"partial"
+		);
 		assert_eq!(
 			KdfParams::from_meta(&meta(&[("kdf_m", "1024"), ("kdf_t", "1"), ("kdf_p", "1")])),
 			None,
@@ -1108,19 +1179,34 @@ mod tests {
 		let mut remote = Envelope::decode(&db_to_vec(&fixture_database(), true)).unwrap();
 		local.modified = 10;
 		remote.modified = 20;
-		assert!(!prefer_local(&local, &remote), "later timestamp wins without revisions");
+		assert!(
+			!prefer_local(&local, &remote),
+			"later timestamp wins without revisions"
+		);
 		local.revision = Some(3);
 		remote.revision = Some(2);
 		assert!(prefer_local(&local, &remote), "revision outranks timestamp");
 		remote.revision = Some(3);
-		assert!(!prefer_local(&local, &remote), "equal revisions fall back to timestamp");
+		assert!(
+			!prefer_local(&local, &remote),
+			"equal revisions fall back to timestamp"
+		);
 		local.revision = None;
-		assert!(!prefer_local(&local, &remote), "a legacy copy is compared by timestamp");
-		assert!(check_revision(Some(2), Some(5), "x").unwrap_err().contains("revision 2"));
+		assert!(
+			!prefer_local(&local, &remote),
+			"a legacy copy is compared by timestamp"
+		);
+		assert!(
+			check_revision(Some(2), Some(5), "x")
+				.unwrap_err()
+				.contains("revision 2")
+		);
 		assert!(check_revision(Some(5), Some(5), "x").is_ok());
 		assert!(check_revision(Some(6), Some(5), "x").is_ok());
 		assert!(
-			check_revision(None, Some(5), "x").unwrap_err().contains("revision 0"),
+			check_revision(None, Some(5), "x")
+				.unwrap_err()
+				.contains("revision 0"),
 			"a legacy copy after a trusted revision is a rollback"
 		);
 		assert!(check_revision(Some(1), None, "x").is_ok());
