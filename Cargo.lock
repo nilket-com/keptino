@@ -850,10 +850,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "jni 0.21.1",
- "keptino-core",
- "keptino-fido",
- "keptino-s3",
  "libc",
+ "libkeptino",
  "zeroize",
 ]
 
@@ -2053,63 +2051,15 @@ dependencies = [
  "hex",
  "iced",
  "jiff",
- "keptino-core",
- "keptino-fido",
- "keptino-s3",
  "landlock",
  "libc",
+ "libkeptino",
  "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "sha1",
  "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "keptino-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64ct",
- "blake3",
- "chacha20poly1305",
- "getrandom 0.4.3",
- "hex",
- "keptino-erasure",
- "lz4",
- "sha3",
- "zeroize",
-]
-
-[[package]]
-name = "keptino-erasure"
-version = "0.1.0"
-
-[[package]]
-name = "keptino-fido"
-version = "0.1.0"
-dependencies = [
- "aes",
- "cbc",
- "getrandom 0.4.3",
- "hex",
- "hkdf 0.12.4",
- "hmac 0.12.1",
- "keptino-core",
- "p256",
- "sha2",
- "zeroize",
-]
-
-[[package]]
-name = "keptino-s3"
-version = "0.1.0"
-dependencies = [
- "hex",
- "hmac 0.12.1",
- "sha2",
  "zeroize",
 ]
 
@@ -2150,6 +2100,27 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libkeptino"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "argon2",
+ "base64ct",
+ "blake3",
+ "cbc",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "hex",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "lz4",
+ "p256",
+ "sha2",
+ "sha3",
+ "zeroize",
+]
 
 [[package]]
 name = "libloading"

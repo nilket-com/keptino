@@ -12,11 +12,11 @@ use jni::{
 	objects::{JByteArray, JObject, JString, JValue},
 	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
-use keptino_core::crypto::PEPPER_SIZE;
-use keptino_core::format::KdfParams;
-use keptino_core::generator::{Classes, Kind};
-use keptino_core::health::{Report, WEAK_BITS};
-use keptino_core::vault::KeyStore;
+use libkeptino::crypto::PEPPER_SIZE;
+use libkeptino::format::KdfParams;
+use libkeptino::generator::{Classes, Kind};
+use libkeptino::health::{Report, WEAK_BITS};
+use libkeptino::vault::KeyStore;
 use std::{
 	collections::HashMap,
 	ffi::c_void,
@@ -254,7 +254,7 @@ struct AndroidKey<'a, 'local> {
 
 impl crate::fido::Device for AndroidKey<'_, '_> {
 	fn purpose(&mut self, prompt: &str) -> crate::fido::KeyResult<()> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		let text = self.env.new_string(prompt).map_err(|_| Failure::Canceled)?;
 		let text = self.env.auto_local(text);
 		self.env
@@ -268,7 +268,7 @@ impl crate::fido::Device for AndroidKey<'_, '_> {
 			.map_err(|_| Failure::Canceled)
 	}
 	fn begin(&mut self) -> crate::fido::KeyResult<crate::fido::Link> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		match self
 			.env
 			.call_method(self.io, "begin", "()I", &[])
@@ -281,7 +281,7 @@ impl crate::fido::Device for AndroidKey<'_, '_> {
 	}
 
 	fn write(&mut self, packet: &crate::fido::Packet) -> crate::fido::KeyResult<()> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		// A failed Java callback already carries its device error. Avoid another
 		// JNI call with that exception pending during best-effort HID abort.
 		if self.env.exception_check().unwrap_or(true) {
@@ -299,13 +299,13 @@ impl crate::fido::Device for AndroidKey<'_, '_> {
 	}
 
 	fn read(&mut self) -> crate::fido::KeyResult<crate::fido::Packet> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		let array = self.result_bytes("read", "()[B", &[], 64)?;
 		array.try_into().map_err(|_| Failure::Mismatch)
 	}
 
 	fn apdu(&mut self, request: &[u8]) -> crate::fido::KeyResult<Vec<u8>> {
-		use keptino_fido::{ceremony::Failure, nfc};
+		use libkeptino::fido::{ceremony::Failure, nfc};
 		let input = self
 			.env
 			.byte_array_from_slice(request)
@@ -320,7 +320,7 @@ impl crate::fido::Device for AndroidKey<'_, '_> {
 	}
 
 	fn pin(&mut self) -> crate::fido::KeyResult<Zeroizing<String>> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		let value = self
 			.env
 			.call_method(self.io, "pin", "()[B", &[])
@@ -359,7 +359,7 @@ impl AndroidKey<'_, '_> {
 		args: &[JValue],
 		max: usize,
 	) -> crate::fido::KeyResult<Vec<u8>> {
-		use keptino_fido::ceremony::Failure;
+		use libkeptino::fido::ceremony::Failure;
 		let value = self
 			.env
 			.call_method(self.io, name, sig, args)
@@ -414,7 +414,7 @@ pub extern "system" fn Java_com_keptino_app_Core_openWithKey<'local>(
 			KdfParams::memory_only(mem_kib(mem)?),
 			|candidate| {
 				if io.is_null() {
-					return keptino_core::vault::Derived::Unavailable;
+					return libkeptino::vault::Derived::Unavailable;
 				}
 				crate::fido::resolve(&mut AndroidKey { env, io: &io }, candidate.slots)
 			},
@@ -633,8 +633,8 @@ pub extern "system" fn Java_com_keptino_app_Core_keySlots<'local>(
 			.enumerate()
 			.map(|(index, slot)| {
 				let mode = match slot.uv_mode {
-					keptino_core::roaming::UvMode::TouchOnly => "touch only",
-					keptino_core::roaming::UvMode::Verified => "verified",
+					libkeptino::roaming::UvMode::TouchOnly => "touch only",
+					libkeptino::roaming::UvMode::Verified => "verified",
 				};
 				let id: String = slot
 					.cred_id
@@ -657,7 +657,7 @@ pub extern "system" fn Java_com_keptino_app_Core_fileStamp<'local>(
 ) -> jbyteArray {
 	guard(&mut env, std::ptr::null_mut(), |env| {
 		let file = bytes(env, &file)?;
-		let envelope = keptino_core::format::Envelope::parse(&file, KdfParams::BUILD_DEFAULT)?;
+		let envelope = libkeptino::format::Envelope::parse(&file, KdfParams::BUILD_DEFAULT)?;
 		let mut stamp = envelope.salt.to_vec();
 		stamp.extend_from_slice(&envelope.revision.unwrap_or(0).to_be_bytes());
 		byte_array(env, &stamp)
@@ -682,9 +682,9 @@ pub extern "system" fn Java_com_keptino_app_Core_prepareKeys<'local>(
 		let password = bytes(env, &password)?;
 		let pepper = bytes(env, &pepper)?;
 		let mode = if touch_only != 0 {
-			keptino_core::roaming::UvMode::TouchOnly
+			libkeptino::roaming::UvMode::TouchOnly
 		} else {
-			keptino_core::roaming::UvMode::Verified
+			libkeptino::roaming::UvMode::Verified
 		};
 		let next = context.prepare(
 			&file,
@@ -719,16 +719,16 @@ pub extern "system" fn Java_com_keptino_app_Core_signR2<'local>(
 		if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
 			return Err(Error::Invalid("invalid R2 account ID"));
 		}
-		let endpoint = keptino_s3::validate_endpoint(&format!(
+		let endpoint = libkeptino::s3::validate_endpoint(&format!(
 			"https://{}.r2.cloudflarestorage.com",
 			account.to_ascii_lowercase()
 		))
 		.map_err(|_| Error::Invalid("invalid R2 endpoint"))?;
-		let signed = keptino_s3::sign(
+		let signed = libkeptino::s3::sign(
 			if put != 0 {
-				keptino_s3::Method::Put
+				libkeptino::s3::Method::Put
 			} else {
-				keptino_s3::Method::Get
+				libkeptino::s3::Method::Get
 			},
 			&endpoint,
 			&string(env, &bucket)?,

@@ -1,11 +1,11 @@
 //! Security keys over USB HID on Linux. `/sys/class/hidraw` names the HID
 //! devices; one whose report descriptor declares the FIDO usage page is a
 //! key, and `/dev/hidrawN` carries its 64-byte packets. This module owns the
-//! device and the clock; `keptino-fido` owns the protocol. A ceremony runs
+//! device and the clock; `libkeptino::fido` owns the protocol. A ceremony runs
 //! here on the caller's thread, which is never the GUI thread.
 
-use keptino_fido::ceremony::{Ceremony, Failure, Input, Outcome, Step, Transport};
-use keptino_fido::hid::{self, PACKET_SIZE};
+use libkeptino::fido::ceremony::{Ceremony, Failure, Input, Outcome, Step, Transport};
+use libkeptino::fido::hid::{self, PACKET_SIZE};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -317,7 +317,7 @@ pub fn open_keys() -> Vec<Box<dyn HidIo>> {
 
 /// The result of asking every key present to open one of `slots`.
 pub fn assert_with_any_key(
-	slots: &[keptino_core::roaming::KeySlot],
+	slots: &[libkeptino::roaming::KeySlot],
 	pin: Option<Zeroizing<String>>,
 	cancel: &AtomicBool,
 	mut on_prompt: impl FnMut(Prompt),
@@ -355,12 +355,12 @@ pub fn assert_with_any_key(
 
 /// Enrolls the first key present into a slot wrapping `roaming`.
 pub fn enroll_with_first_key(
-	uv_mode: keptino_core::roaming::UvMode,
+	uv_mode: libkeptino::roaming::UvMode,
 	roaming: &[u8; 32],
 	pin: Option<Zeroizing<String>>,
 	cancel: &AtomicBool,
 	mut on_prompt: impl FnMut(Prompt),
-) -> Result<keptino_core::roaming::KeySlot, Failure> {
+) -> Result<libkeptino::roaming::KeySlot, Failure> {
 	let mut keys = open_keys();
 	let Some(device) = keys.first_mut() else {
 		return Err(Failure::NoCredential);
@@ -384,13 +384,13 @@ pub fn enroll_with_first_key(
 /// Enrolls a key present that owns none of `existing`: the new key when a
 /// backup is added while the daily key is still plugged in.
 pub fn enroll_new_key(
-	existing: &[keptino_core::roaming::KeySlot],
-	uv_mode: keptino_core::roaming::UvMode,
+	existing: &[libkeptino::roaming::KeySlot],
+	uv_mode: libkeptino::roaming::UvMode,
 	roaming: &[u8; 32],
 	pin: Option<Zeroizing<String>>,
 	cancel: &AtomicBool,
 	mut on_prompt: impl FnMut(Prompt),
-) -> Result<keptino_core::roaming::KeySlot, Failure> {
+) -> Result<libkeptino::roaming::KeySlot, Failure> {
 	let keys = open_keys();
 	if keys.is_empty() {
 		return Err(Failure::NoCredential);
@@ -438,12 +438,12 @@ pub fn enroll_new_key(
 /// and enrolls that same key into a new slot wrapping `roaming`: how a rekey
 /// keeps a key enrolled without trusting whichever key happens to be first.
 pub fn reenroll_owner(
-	slot: &keptino_core::roaming::KeySlot,
+	slot: &libkeptino::roaming::KeySlot,
 	roaming: &[u8; 32],
 	pin: Option<Zeroizing<String>>,
 	cancel: &AtomicBool,
 	mut on_prompt: impl FnMut(Prompt),
-) -> Result<keptino_core::roaming::KeySlot, Failure> {
+) -> Result<libkeptino::roaming::KeySlot, Failure> {
 	let keys = open_keys();
 	if keys.is_empty() {
 		return Err(Failure::NoCredential);
@@ -490,7 +490,7 @@ pub fn reenroll_owner(
 #[cfg(test)]
 pub mod test_support {
 	use super::*;
-	use keptino_fido::sim::{Authenticator, HidDevice};
+	use libkeptino::fido::sim::{Authenticator, HidDevice};
 	use std::cell::RefCell;
 
 	/// A simulated key described by what makes it: a seed and a PIN.
@@ -565,8 +565,8 @@ pub mod test_support {
 mod tests {
 	use super::test_support::{SimKey, fake, with_keys};
 	use super::*;
-	use keptino_core::roaming::UvMode;
-	use keptino_fido::sim::Authenticator;
+	use libkeptino::fido::sim::Authenticator;
+	use libkeptino::roaming::UvMode;
 
 	#[test]
 	fn the_descriptor_check_knows_a_security_key_from_a_mouse() {
@@ -829,7 +829,7 @@ mod tests {
 #[cfg(test)]
 mod probe {
 	use super::*;
-	use keptino_core::roaming::UvMode;
+	use libkeptino::roaming::UvMode;
 
 	struct Logging(Box<dyn HidIo>);
 

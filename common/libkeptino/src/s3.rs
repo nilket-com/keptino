@@ -3,8 +3,6 @@
 //! single percent encoding, no path normalization and the payload's SHA-256
 //! as the content hash. No I/O: a head hands the headers to its HTTP client.
 
-#![forbid(unsafe_code)]
-
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;

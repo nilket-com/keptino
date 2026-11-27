@@ -2,10 +2,10 @@
 //! `android/interop/run.sh fixtures`) must open, edit and reopen here.
 
 use droid::{Commit, Error, Source, Vault, field, security};
-use keptino_core::format::KdfParams;
-use keptino_core::roaming::UvMode;
-use keptino_core::vault::KeyStore;
-use keptino_fido::sim::{Device, HidDevice, NfcDevice};
+use libkeptino::fido::sim::{Device, HidDevice, NfcDevice};
+use libkeptino::format::KdfParams;
+use libkeptino::roaming::UvMode;
+use libkeptino::vault::KeyStore;
 
 #[path = "support/fido.rs"]
 mod fixture_key;

@@ -2,13 +2,13 @@
 //! the device and the prompts. Only the native caller receives its outcome.
 
 use crate::error::Error;
-use keptino_core::{
-	roaming::{KeySlot, MAX_SLOTS, UvMode},
-	vault::Derived,
-};
-use keptino_fido::{
+use libkeptino::fido::{
 	ceremony::{Ceremony, Failure, Input, Outcome, Step, Transport},
 	hid, nfc,
+};
+use libkeptino::{
+	roaming::{KeySlot, MAX_SLOTS, UvMode},
+	vault::Derived,
 };
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -211,8 +211,8 @@ fn enroll(
 mod tests {
 	use super::*;
 	use crate::Vault;
-	use keptino_core::format::KdfParams;
-	use keptino_fido::sim::{Authenticator, Device as Sim, HidDevice, NfcDevice};
+	use libkeptino::fido::sim::{Authenticator, Device as Sim, HidDevice, NfcDevice};
+	use libkeptino::format::KdfParams;
 
 	struct Fixture {
 		key: Sim,

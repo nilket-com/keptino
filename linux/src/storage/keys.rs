@@ -1,14 +1,14 @@
 //! Security keys at the vault level: the derive closure that asks a key for
 //! the roaming secret, the ceremonies that enroll and remove keys, and the
 //! rekey marker that lets the device which rekeyed finish its upload. The
-//! transport lives in `crate::fido`; the protocol in `keptino-fido`.
+//! transport lives in `crate::fido`; the protocol in `libkeptino::fido`.
 
 use crate::fido::{self, Prompt};
 use crate::logger::{info, warn};
 use crate::storage::persistence::base_path;
-use keptino_core::crypto::{ROAMING_SIZE, SALT_SIZE};
-use keptino_core::roaming::{KeySlot, MAX_SLOTS, UvMode};
-use keptino_fido::ceremony::{Failure, Outcome};
+use libkeptino::crypto::{ROAMING_SIZE, SALT_SIZE};
+use libkeptino::fido::ceremony::{Failure, Outcome};
+use libkeptino::roaming::{KeySlot, MAX_SLOTS, UvMode};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -67,7 +67,7 @@ pub fn fresh_secret() -> (Zeroizing<[u8; ROAMING_SIZE]>, [u8; SALT_SIZE]) {
 /// The slots a database carries, in order, from its meta entries.
 pub fn slots_of(db: &crate::storage::Database) -> Vec<KeySlot> {
 	let pairs = db.meta_pairs();
-	keptino_core::roaming::slots_from_meta(
+	libkeptino::roaming::slots_from_meta(
 		pairs
 			.iter()
 			.map(|(name, value)| (name.as_str(), value.as_str())),
@@ -81,7 +81,7 @@ pub fn set_slots(db: &crate::storage::Database, slots: &[KeySlot]) {
 		db.remove_meta_entry(&KeySlot::entry_name(index));
 	}
 	for (index, slot) in slots.iter().enumerate() {
-		db.set_meta_entry(keptino_core::vault::MetaEntry::new(
+		db.set_meta_entry(libkeptino::vault::MetaEntry::new(
 			&KeySlot::entry_name(index),
 			&slot.encode(),
 		));
@@ -282,7 +282,7 @@ impl RekeyMarker {
 	/// from the unlock and replaced by the next upload.
 	pub fn covers(
 		&self,
-		local: &keptino_core::format::Envelope,
+		local: &libkeptino::format::Envelope,
 		remote_fingerprint: Option<blake3::Hash>,
 	) -> bool {
 		self.predecessor == remote_fingerprint
@@ -297,7 +297,7 @@ impl RekeyMarker {
 /// the successor the marker names, the marker is dropped with a warning.
 pub fn reconcile_marker(
 	db_name: &str,
-	local: Option<&keptino_core::format::Envelope>,
+	local: Option<&libkeptino::format::Envelope>,
 	remote_fingerprint: Option<blake3::Hash>,
 ) -> Option<RekeyMarker> {
 	let marker = RekeyMarker::read(db_name)?;
@@ -325,7 +325,7 @@ pub fn reconcile_marker(
 mod tests {
 	use super::*;
 	use crate::fido::test_support::{SimKey, with_keys};
-	use keptino_core::vault::KeyStore;
+	use libkeptino::vault::KeyStore;
 
 	/// A test derivation: the key is a hash of salt and roaming secret, so a
 	/// rekey is visible and cheap.
@@ -490,14 +490,11 @@ mod tests {
 		RekeyMarker::remove(&db_name);
 	}
 
-	fn test_envelope(
-		salt: [u8; SALT_SIZE],
-		revision: Option<u64>,
-	) -> keptino_core::format::Envelope {
-		keptino_core::format::Envelope {
+	fn test_envelope(salt: [u8; SALT_SIZE], revision: Option<u64>) -> libkeptino::format::Envelope {
+		libkeptino::format::Envelope {
 			modified: 1,
 			revision,
-			kdf: keptino_core::format::KdfParams::DEBUG,
+			kdf: libkeptino::format::KdfParams::DEBUG,
 			nonce: [0; 24],
 			salt,
 			ciphertext: Vec::new(),

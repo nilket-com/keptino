@@ -37,9 +37,7 @@ blake3 = "1.8.3"
 getrandom = "0.4.1"
 hex = "0.4.3"
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "svg", "tiny-skia", "tokio", "wayland"] }
-keptino-core = { path = "../common/core" }
-keptino-fido = { path = "../common/fido" }
-keptino-s3 = { path = "../common/s3" }
+libkeptino = { path = "../common/libkeptino", features = ["fido", "s3"] }
 jiff = "1.0.1"
 landlock = "0.4"
 libc = "0.2.180"
@@ -52,4 +50,4 @@ zbus = { version = "6", default-features = false, features = ["tokio"] }
 zeroize = "1.8.2"
 
 [dev-dependencies]
-keptino-fido = { path = "../common/fido", features = ["test-support"] }
+libkeptino = { path = "../common/libkeptino", features = ["test-support"] }

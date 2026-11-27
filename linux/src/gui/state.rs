@@ -12,8 +12,8 @@ use iced::{
 	},
 	window,
 };
-use keptino_core::generator::{self, Classes, Kind};
-use keptino_core::health;
+use libkeptino::generator::{self, Classes, Kind};
+use libkeptino::health;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -31,7 +31,7 @@ struct LockedState {
 
 /// The keys screen: the vault's slots and the inputs its ceremonies need.
 pub struct KeysScreen {
-	pub slots: Vec<keptino_core::roaming::KeySlot>,
+	pub slots: Vec<libkeptino::roaming::KeySlot>,
 	/// The master password, needed to derive the new key for a rekey.
 	pub password: Zeroizing<String>,
 	pub pin: Zeroizing<String>,
@@ -1038,7 +1038,7 @@ mod tests {
 	#[test]
 	fn the_keys_screen_applies_a_rekey_and_leaves_the_vault_alone_on_failure() {
 		use crate::storage::keys::{KeysOutcome, slots_of};
-		use keptino_core::roaming::{KeySlot, UvMode};
+		use libkeptino::roaming::{KeySlot, UvMode};
 		let mut app = unlocked();
 		let _ = update(&mut app, Message::ShowKeys);
 		let AppState::Unlocked(state) = &app else {
@@ -1077,7 +1077,7 @@ mod tests {
 		// A rekey outcome is applied: new salt, slots in the meta set.
 		let new_salt = [9u8; 32];
 		let slot = KeySlot::wrap(UvMode::TouchOnly, b"cred", [1; 32], &[2; 32], &[3; 32]).unwrap();
-		use keptino_core::vault::KeyStore;
+		use libkeptino::vault::KeyStore;
 		let key = crate::storage::SecretMemory::from_bytes(&[7; 32]).unwrap();
 		let _ = update(&mut app, Message::ProtectVault);
 		let _ = update(

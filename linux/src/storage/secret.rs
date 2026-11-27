@@ -1,8 +1,8 @@
-use keptino_core::vault::KeyStore;
 use libc::{
 	_SC_PAGESIZE, MAP_FAILED, MAP_SHARED, O_CLOEXEC, PROT_READ, PROT_WRITE, SYS_memfd_secret,
 	ftruncate, mmap, munmap, off_t, syscall, sysconf,
 };
+use libkeptino::vault::KeyStore;
 use std::{
 	io,
 	ops::{Deref, DerefMut},

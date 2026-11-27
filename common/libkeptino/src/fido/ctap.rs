@@ -5,8 +5,8 @@
 //! followed by the CBOR map; a response is one status byte followed by the
 //! CBOR map when the status is success.
 
-use crate::cbor::{self, Value};
-use crate::pin::{Point, Protocol};
+use crate::fido::cbor::{self, Value};
+use crate::fido::pin::{Point, Protocol};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 

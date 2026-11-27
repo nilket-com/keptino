@@ -2,16 +2,16 @@
 //! vault whose roaming secret is wrapped for two simulated security keys, a
 //! daily key with a PIN holding the verified slot and a backup key without
 //! one holding the touch slot. Both heads' harnesses open it the same way.
-//! `KEPTINO_WRITE_FIXTURES=1 cargo test -p keptino-fido
+//! `KEPTINO_WRITE_FIXTURES=1 cargo test -p libkeptino --features test-support
 //! write_the_two_slot_fixture -- --ignored` rewrites the file; the committed
 //! bytes are what every test reads.
 
-use crate::ceremony::{Ceremony, Failure, Outcome, Step};
-use crate::sim::{Authenticator, Device, HidDevice, NfcDevice};
-use keptino_core::crypto::{self, KEY_SIZE};
-use keptino_core::format::{Envelope, KdfParams};
-use keptino_core::roaming::{KeySlot, UvMode};
-use keptino_core::vault::{
+use crate::crypto::{self, KEY_SIZE};
+use crate::fido::ceremony::{Ceremony, Failure, Outcome, Step};
+use crate::fido::sim::{Authenticator, Device, HidDevice, NfcDevice};
+use crate::format::{Envelope, KdfParams};
+use crate::roaming::{KeySlot, UvMode};
+use crate::vault::{
 	Candidate, Caution, Database, Derived, KeyStore, MetaEntry, OpenError, PasswordEntry, Source,
 	UnlockError, unlock,
 };
@@ -19,9 +19,9 @@ use std::convert::Infallible;
 use std::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const FIXTURE_PATH: &str = "../../android/droid/tests/fixtures/linux-debug-fido.keptino";
+pub const FIXTURE_PATH: &str = "../../../android/droid/tests/fixtures/linux-debug-fido.keptino";
 pub const FIXTURE: &[u8] =
-	include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
+	include_bytes!("../../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
 /// The daily key: has a PIN, holds slot 1 in verified mode.
 pub const KEY_SEED: [u8; 32] = *b"keptino-fixture-security-key-001";
 pub const KEY_PIN: &str = "1234";

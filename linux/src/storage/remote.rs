@@ -1,6 +1,6 @@
 use super::secret::SecretMemory;
 use base64ct::{Base64, Encoding};
-use keptino_s3 as s3;
+use libkeptino::s3;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
@@ -83,7 +83,7 @@ impl Provider {
 		precondition: Precondition<'_>,
 	) -> Result<Response> {
 		// Plaintext is refused, except that a debug build may talk to a store
-		// on the loopback address, as `keptino_s3::validate_endpoint` allows
+		// on the loopback address, as `libkeptino::s3::validate_endpoint` allows
 		// for the RustFS check; a release build never does.
 		let loopback_http = cfg!(debug_assertions)
 			&& self == Self::S3

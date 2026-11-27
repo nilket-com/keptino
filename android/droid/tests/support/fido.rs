@@ -1,8 +1,8 @@
-use keptino_core::{roaming::KeySlot, vault::Derived};
-use keptino_fido::{
+use libkeptino::fido::{
 	ceremony::{Ceremony, Failure, Outcome, Step},
 	sim::{Authenticator, Device},
 };
+use libkeptino::{roaming::KeySlot, vault::Derived};
 use zeroize::Zeroizing;
 
 pub const FILE: &[u8] = include_bytes!("../fixtures/linux-debug-fido.keptino");

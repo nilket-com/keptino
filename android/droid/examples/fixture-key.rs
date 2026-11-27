@@ -1,6 +1,6 @@
 //! Loopback peer for the Android instrumentation tests. All keys are public
 //! fixtures. The simulator is a dev dependency and is absent from the APK.
-use keptino_fido::sim::{Authenticator, Device, HidDevice, NfcDevice};
+use libkeptino::fido::sim::{Authenticator, Device, HidDevice, NfcDevice};
 use std::{
 	error::Error,
 	io::{BufRead, BufReader, Read, Write},

@@ -1,7 +1,7 @@
 //! Interoperability check with a physical key and the public Android fixture.
 //! This uses no settings, production credentials, or network provider.
 use keptino::storage::{Database, SecretMemory, keys};
-use keptino_core::{
+use libkeptino::{
 	crypto::derive_master_key,
 	format::{Envelope, KdfParams},
 	vault::KeyStore,

@@ -2,14 +2,14 @@
 //! `~/.config/keptino`, the TPM-sealed pepper through systemd-creds, the
 //! storage provider, and the choice between the local and remote copies.
 //! The file format, the cryptography, the database model and the selection
-//! rules are `keptino_core`'s; this module supplies the I/O around them.
+//! rules are `libkeptino`'s; this module supplies the I/O around them.
 
 use crate::storage::keys::{self, RekeyMarker};
 use crate::{
 	logger::{error, info, warn},
 	storage::{Database, MetaEntry, SYSTEMD_CREDS, SecretMemory, remote::Remote},
 };
-use keptino_core::{
+use libkeptino::{
 	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
 	format::{Envelope, KdfParams, MAX_FILE_BYTES},
 	policy,
@@ -324,7 +324,7 @@ async fn open(db_name: &str, input: UnlockInput, adopt: bool) -> Result<OpenedVa
 		} else {
 			match keys::roaming_from_keys(candidate.slots, pin.clone(), &cancel) {
 				Ok(roaming) => Some(roaming),
-				Err(keptino_fido::ceremony::Failure::Canceled) => return Derived::Canceled,
+				Err(libkeptino::fido::ceremony::Failure::Canceled) => return Derived::Canceled,
 				Err(failure) => {
 					warn(&format!("Security key: {failure}"));
 					return Derived::Unavailable;
@@ -596,9 +596,9 @@ mod tests {
 	/// the Argon2 arena.
 	#[test]
 	fn the_two_slot_fixture_opens_through_unlock_with_a_simulated_key() {
-		use keptino_core::vault::{Candidate, Derived, unlock};
-		use keptino_fido::ceremony::{Ceremony, Failure, Outcome, Step};
-		use keptino_fido::sim::{Authenticator, Device, HidDevice};
+		use libkeptino::fido::ceremony::{Ceremony, Failure, Outcome, Step};
+		use libkeptino::fido::sim::{Authenticator, Device, HidDevice};
+		use libkeptino::vault::{Candidate, Derived, unlock};
 		const FIXTURE: &[u8] =
 			include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
 		const SEED: [u8; 32] = *b"keptino-fixture-security-key-001";

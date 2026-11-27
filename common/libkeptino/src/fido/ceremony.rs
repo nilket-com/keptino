@@ -5,10 +5,10 @@
 //! next, or to ask the user for the PIN, and it feeds back what it got. The
 //! head can abort at any step. Nothing here holds a lock or waits.
 
-use crate::ctap::{self, Assertion, AuthData, HmacSecretRequest, Info};
-use crate::pin::{self, KeyAgreement, Point, Protocol, SharedSecret};
-use crate::{hid, nfc};
-use keptino_core::roaming::{KeySlot, MalformedSlot, SLOT_SALT_SIZE, UvMode};
+use crate::fido::ctap::{self, Assertion, AuthData, HmacSecretRequest, Info};
+use crate::fido::pin::{self, KeyAgreement, Point, Protocol, SharedSecret};
+use crate::fido::{hid, nfc};
+use crate::roaming::{KeySlot, MalformedSlot, SLOT_SALT_SIZE, UvMode};
 use zeroize::Zeroizing;
 
 /// Which transport the head is using; the ceremony frames for it.
@@ -445,7 +445,7 @@ impl Ceremony {
 		self.fail(err.into())
 	}
 
-	fn after_info(&mut self, body: crate::cbor::Value) -> Step {
+	fn after_info(&mut self, body: crate::fido::cbor::Value) -> Step {
 		let info = match Info::parse(&body) {
 			Ok(info) => info,
 			Err(err) => return self.fail(err.into()),
@@ -484,7 +484,7 @@ impl Ceremony {
 		self.send(ctap::get_key_agreement(protocol))
 	}
 
-	fn after_key_agreement(&mut self, body: crate::cbor::Value) -> Step {
+	fn after_key_agreement(&mut self, body: crate::fido::cbor::Value) -> Step {
 		let (Some(agreement), Some(protocol)) = (self.agreement.take(), self.protocol) else {
 			return self.fail(Failure::Ctap(ctap::Error::Shape(
 				"a key agreement in flight",
@@ -547,7 +547,7 @@ impl Ceremony {
 		self.send(message)
 	}
 
-	fn after_pin_token(&mut self, body: crate::cbor::Value) -> Step {
+	fn after_pin_token(&mut self, body: crate::fido::cbor::Value) -> Step {
 		let Some(shared) = &self.shared else {
 			return self.fail(Failure::Ctap(ctap::Error::Shape("a key agreement")));
 		};
@@ -598,7 +598,7 @@ impl Ceremony {
 
 	fn after_make_credential(
 		&mut self,
-		body: crate::cbor::Value,
+		body: crate::fido::cbor::Value,
 		_client_data_hash: &[u8; 32],
 	) -> Step {
 		let auth_data = match ctap::make_credential_from(&body) {
@@ -691,7 +691,7 @@ impl Ceremony {
 
 	fn after_assertion(
 		&mut self,
-		body: crate::cbor::Value,
+		body: crate::fido::cbor::Value,
 		slot: usize,
 		_client_data_hash: &[u8; 32],
 		salt: &[u8; SLOT_SALT_SIZE],
@@ -766,7 +766,7 @@ fn random_iv() -> [u8; 16] {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::sim::{Authenticator, Device, HidDevice, NfcDevice};
+	use crate::fido::sim::{Authenticator, Device, HidDevice, NfcDevice};
 
 	const SEED: [u8; 32] = [0x42; 32];
 	const ROAMING: [u8; 32] = [0x33; 32];
@@ -969,14 +969,14 @@ mod tests {
 	fn a_key_without_hmac_secret_or_fido2_is_refused_early() {
 		// A simulator always has them; a hand-built info answer does not.
 		let (mut ceremony, _) = Ceremony::assert(Transport::Nfc, vec![]);
-		let info = crate::cbor::Value::map(vec![(
-			crate::cbor::Value::from(1u64),
-			crate::cbor::Value::Array(vec![crate::cbor::Value::from("U2F_V2")]),
+		let info = crate::fido::cbor::Value::map(vec![(
+			crate::fido::cbor::Value::from(1u64),
+			crate::fido::cbor::Value::Array(vec![crate::fido::cbor::Value::from("U2F_V2")]),
 		)])
 		.unwrap();
 		let response = [
 			vec![ctap::STATUS_OK],
-			crate::cbor::encode(&info),
+			crate::fido::cbor::encode(&info),
 			vec![0x90, 0x00],
 		]
 		.concat();

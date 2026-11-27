@@ -3,7 +3,7 @@
 //! seed: same input, same derivation, same output framing, but with the
 //! seed and the arena in locked, non-dumpable memory and wiped afterwards.
 
-use keptino_core::crypto::{self, PEPPER_SIZE};
+use libkeptino::crypto::{self, PEPPER_SIZE};
 use std::io::{self, Read, Write};
 use zeroize::Zeroizing;
 

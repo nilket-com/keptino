@@ -10,15 +10,15 @@
 //! and the derivation arena is excluded from dumps.
 
 use crate::error::{Error, Result};
-use keptino_core::vault::KeyStore;
-use keptino_core::{
-	crypto::{self, Block, PEPPER_SIZE, SALT_SIZE},
-	format::KdfParams,
-};
 use libc::{
 	_SC_PAGESIZE, MADV_DONTDUMP, MADV_DONTFORK, MADV_WIPEONFORK, MAP_ANONYMOUS, MAP_FAILED,
 	MAP_PRIVATE, PR_SET_DUMPABLE, PROT_READ, PROT_WRITE, RLIMIT_CORE, RLIMIT_MEMLOCK, c_void,
 	getrlimit, madvise, mlock, mmap, munlock, munmap, prctl, rlimit, setrlimit, sysconf,
+};
+use libkeptino::vault::KeyStore;
+use libkeptino::{
+	crypto::{self, Block, PEPPER_SIZE, SALT_SIZE},
+	format::KdfParams,
 };
 use std::sync::Mutex;
 use std::{

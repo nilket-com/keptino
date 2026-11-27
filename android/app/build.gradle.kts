@@ -63,14 +63,8 @@ val buildNative = tasks.register<Exec>("buildNative") {
         rootProject.file("droid/build.sh"),
         rootProject.file("../Cargo.toml"),
         rootProject.file("../Cargo.lock"),
-        fileTree(rootProject.file("../common/erasure/src")),
-        rootProject.file("../common/erasure/Cargo.toml"),
-        fileTree(rootProject.file("../common/core/src")),
-        rootProject.file("../common/core/Cargo.toml"),
-        fileTree(rootProject.file("../common/s3/src")),
-        rootProject.file("../common/s3/Cargo.toml"),
-        fileTree(rootProject.file("../common/fido/src")),
-        rootProject.file("../common/fido/Cargo.toml"),
+        fileTree(rootProject.file("../common/libkeptino/src")),
+        rootProject.file("../common/libkeptino/Cargo.toml"),
     )
     outputs.dir(file("src/main/jniLibs"))
 }

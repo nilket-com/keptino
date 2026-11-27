@@ -11,8 +11,8 @@
 //! data instead; they still open and are converted on their next save.
 
 use crate::crypto::{NONCE_SIZE, SALT_SIZE};
+use crate::erasure::ReedSolomon;
 use base64ct::{Base64, Encoding};
-use keptino_erasure::ReedSolomon;
 use std::{collections::BTreeMap, collections::HashMap, fmt};
 use zeroize::Zeroizing;
 
@@ -955,7 +955,7 @@ mod tests {
 		}
 	}
 
-	/// Needs 4 GiB of memory per fixture: `cargo test -p keptino-core --release -- --ignored`.
+	/// Needs 4 GiB of memory per fixture: `cargo test -p libkeptino --release -- --ignored`.
 	#[test]
 	#[ignore]
 	fn release_fixtures_decrypt_with_the_fixture_pepper() {

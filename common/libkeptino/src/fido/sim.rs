@@ -6,11 +6,11 @@
 //! earlier lives made, as a hardware key's wrapped handles do. The two
 //! `hmac-secret` secrets per credential differ, as CTAP 2.1 requires.
 
-use crate::cbor::{self, Value};
-use crate::ceremony::{Ceremony, Input, Step};
-use crate::ctap::{self, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV, HMAC_SECRET};
-use crate::pin::{self, Point, Protocol, SharedSecret};
-use crate::{hid, nfc};
+use crate::fido::cbor::{self, Value};
+use crate::fido::ceremony::{Ceremony, Input, Step};
+use crate::fido::ctap::{self, FLAG_AT, FLAG_ED, FLAG_UP, FLAG_UV, HMAC_SECRET};
+use crate::fido::pin::{self, Point, Protocol, SharedSecret};
+use crate::fido::{hid, nfc};
 use hmac::{Hmac, Mac};
 use p256::{PublicKey, Sec1Point, SecretKey, elliptic_curve::sec1::ToSec1Point};
 use sha2::{Digest, Sha256};
@@ -661,10 +661,10 @@ impl Device {
 		}
 	}
 
-	pub fn transport(&self) -> crate::ceremony::Transport {
+	pub fn transport(&self) -> crate::fido::ceremony::Transport {
 		match self {
-			Self::Hid(d) => crate::ceremony::Transport::Hid { cid: d.cid() },
-			Self::Nfc(_) => crate::ceremony::Transport::Nfc,
+			Self::Hid(d) => crate::fido::ceremony::Transport::Hid { cid: d.cid() },
+			Self::Nfc(_) => crate::fido::ceremony::Transport::Nfc,
 		}
 	}
 
@@ -675,7 +675,7 @@ impl Device {
 			step = match step {
 				Step::Write(packets) => {
 					let Self::Hid(device) = self else {
-						return Step::Failed(crate::ceremony::Failure::Mismatch);
+						return Step::Failed(crate::fido::ceremony::Failure::Mismatch);
 					};
 					for packet in &packets {
 						device.write(packet);
@@ -684,16 +684,18 @@ impl Device {
 				}
 				Step::Read => {
 					let Self::Hid(device) = self else {
-						return Step::Failed(crate::ceremony::Failure::Mismatch);
+						return Step::Failed(crate::fido::ceremony::Failure::Mismatch);
 					};
 					let Some(packet) = device.read() else {
-						return Step::Failed(crate::ceremony::Failure::Hid(hid::Error::BadLength));
+						return Step::Failed(crate::fido::ceremony::Failure::Hid(
+							hid::Error::BadLength,
+						));
 					};
 					ceremony.feed(Input::Packet(packet))
 				}
 				Step::Transceive(apdu) => {
 					let Self::Nfc(device) = self else {
-						return Step::Failed(crate::ceremony::Failure::Mismatch);
+						return Step::Failed(crate::fido::ceremony::Failure::Mismatch);
 					};
 					// A head selects the applet once before any ceremony.
 					if !device.selected {
@@ -713,6 +715,6 @@ impl Device {
 				done @ (Step::Done(_) | Step::Failed(_)) => return done,
 			};
 		}
-		Step::Failed(crate::ceremony::Failure::Mismatch)
+		Step::Failed(crate::fido::ceremony::Failure::Mismatch)
 	}
 }

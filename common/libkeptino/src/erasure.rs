@@ -7,8 +7,6 @@
 //! so the parity bytes here are identical to those in existing files. No
 //! dependencies, no unsafe code, no SIMD: a vault is kilobytes.
 
-#![forbid(unsafe_code)]
-
 use std::fmt;
 
 /// x^8 + x^4 + x^3 + x^2 + 1, the reducing polynomial of the field.

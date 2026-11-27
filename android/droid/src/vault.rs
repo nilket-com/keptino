@@ -5,9 +5,9 @@ use crate::{
 	error::{Error, Result},
 	security::{LockedKey, derive_master_key},
 };
-use keptino_core::roaming::{self, KeySlot, MAX_SLOTS, UvMode};
-use keptino_core::vault::{KeyStore, MetaEntry};
-use keptino_core::{
+use libkeptino::roaming::{self, KeySlot, MAX_SLOTS, UvMode};
+use libkeptino::vault::{KeyStore, MetaEntry};
+use libkeptino::{
 	crypto::PEPPER_SIZE,
 	format::{Envelope, KdfParams, field},
 	generator::{self, Kind},
@@ -387,8 +387,8 @@ mod fixture_key;
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use keptino_core::format::{FormatError, decode_shards, encode_shards};
-	use keptino_core::vault::Store;
+	use libkeptino::format::{FormatError, decode_shards, encode_shards};
+	use libkeptino::vault::Store;
 	const DEBUG_MEM_KIB: u32 = KdfParams::DEBUG.m_cost;
 
 	const PEPPER: [u8; PEPPER_SIZE] = [9; PEPPER_SIZE];
@@ -425,8 +425,8 @@ mod tests {
 	fn security_key_fixture_rejects_unavailable_slots_before_the_android_arena() {
 		use super::fixture_key::{FILE, PIN, assert_slots, backup_key, daily_key};
 		use crate::security::ARENA_ENTRIES;
-		use keptino_core::roaming::{KeySlot, UvMode};
-		use keptino_fido::sim::{Authenticator, Device, HidDevice};
+		use libkeptino::fido::sim::{Authenticator, Device, HidDevice};
+		use libkeptino::roaming::{KeySlot, UvMode};
 
 		let run = |file: &[u8], key, pin, expected_slot, remote: Option<&[u8]>| {
 			let mut device = Device::Hid(HidDevice::new(key));
@@ -617,7 +617,7 @@ mod tests {
 		assert!(vault.query("first"));
 		assert_eq!(vault.generate_password(Kind::DEFAULT).unwrap(), 152);
 		let generated = vault.get_field(field::PASSWORD).unwrap();
-		assert_eq!(generated.len(), keptino_core::generator::LENGTH);
+		assert_eq!(generated.len(), libkeptino::generator::LENGTH);
 		assert!(vault.query("one"));
 		assert_eq!(
 			vault.get_field(field::PASSWORD).unwrap().as_slice(),

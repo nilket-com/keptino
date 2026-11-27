@@ -10,7 +10,7 @@ pub enum Error {
 	/// None of the candidate's security-key slots could be opened.
 	SecurityKeyUnavailable,
 	DifferentVault,
-	SecurityKey(keptino_fido::ceremony::Failure),
+	SecurityKey(libkeptino::fido::ceremony::Failure),
 	/// A caller-supplied argument is unusable.
 	Invalid(&'static str),
 	/// Key derivation could not run, typically for lack of memory.
@@ -45,9 +45,9 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl From<keptino_core::format::FormatError> for Error {
-	fn from(error: keptino_core::format::FormatError) -> Self {
-		use keptino_core::format::FormatError;
+impl From<libkeptino::format::FormatError> for Error {
+	fn from(error: libkeptino::format::FormatError) -> Self {
+		use libkeptino::format::FormatError;
 		match error {
 			FormatError::Damaged => Error::Corrupt("damaged vault"),
 			FormatError::TooLarge => Error::Invalid("vault exceeds the size budget"),
@@ -58,17 +58,17 @@ impl From<keptino_core::format::FormatError> for Error {
 	}
 }
 
-impl From<keptino_core::crypto::KdfError> for Error {
-	fn from(error: keptino_core::crypto::KdfError) -> Self {
+impl From<libkeptino::crypto::KdfError> for Error {
+	fn from(error: libkeptino::crypto::KdfError) -> Self {
 		match error {
-			keptino_core::crypto::KdfError::EmptySeed => Error::Invalid("empty pepper seed"),
+			libkeptino::crypto::KdfError::EmptySeed => Error::Invalid("empty pepper seed"),
 			other => Error::Kdf(other.to_string()),
 		}
 	}
 }
 
-impl From<keptino_fido::ceremony::Failure> for Error {
-	fn from(failure: keptino_fido::ceremony::Failure) -> Self {
+impl From<libkeptino::fido::ceremony::Failure> for Error {
+	fn from(failure: libkeptino::fido::ceremony::Failure) -> Self {
 		Self::SecurityKey(failure)
 	}
 }

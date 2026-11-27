@@ -13,8 +13,8 @@ use iced::{
 		scrollable, space, svg, text, text_editor, text_input, tooltip,
 	},
 };
-use keptino_core::roaming::UvMode;
-use keptino_core::{generator, health};
+use libkeptino::roaming::UvMode;
+use libkeptino::{generator, health};
 use zeroize::Zeroizing;
 
 const DEFAULT_BUTTON_SIZE: (u32, u32) = (120, 40);

@@ -8,5 +8,5 @@ pub mod security;
 pub mod vault;
 
 pub use error::{Error, Result};
-pub use keptino_core::format::field;
+pub use libkeptino::format::field;
 pub use vault::{Commit, Source, Vault};
