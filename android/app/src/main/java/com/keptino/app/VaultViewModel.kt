@@ -147,7 +147,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             val cloudSession = withContext(Dispatchers.IO + NonCancellable) {
                 val local = storage.read(name)
                 val remote = if (offline) null else sync?.fetch(name)?.bytes
-                require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable vault sync." }
+                require(local != null || remote != null) { "No database found. Check the name and sync settings, import a vault, or choose Create vault." }
                 val markers = storage.markers(name)
                 val marker = if (local == null || markers.isEmpty()) null else {
                     val stamp = runCatching { Core.fileStamp(local) }.getOrNull()
@@ -192,6 +192,54 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         } finally {
             if (pendingHandle != 0L) Core.close(pendingHandle)
             bytes.fill(0); settings?.pepper?.fill(0)
+            activeKey = null
+            withContext(Dispatchers.IO + NonCancellable) { key.close() }
+        }
+    }
+    internal fun create(name: String, password: String, confirmation: String, offline: Boolean,
+                        authenticate: suspend (Cipher) -> Cipher, key: AndroidSecurityKey) = task { started ->
+        check(configured && !unlocked)
+        require(validVaultName(name)) { "Enter a vault name without a slash or NUL." }
+        require(password.isNotEmpty() && password == confirmation) { "Enter the same master password twice." }
+        activeKey = key
+        val secret = password.toByteArray()
+        var settings: Settings? = null
+        var pending: CreatedVault? = null
+        try {
+            val authorized = withContext(Dispatchers.IO) { storage.settings { cipher ->
+                key.awaitingDeviceCredential = true
+                try { authenticate(cipher) } finally { key.awaitingDeviceCredential = false }
+            } }
+            settings = authorized
+            val remote = authorized.remote()
+            check(remote == null || !offline) { "Go online to check the bucket before creating a vault." }
+            check(remote == null || remote is R2) { "Backblaze cannot safely reserve a new vault name. Use R2 or local-only settings." }
+            withContext(Dispatchers.IO + NonCancellable) {
+                val active = { check(started == generation) { "Creation canceled." } }
+                active()
+                pending = createVault(storage, name, secret, authorized.pepper, remote, PRODUCTION_MEMORY_KIB,
+                    key, active)
+            }
+            if (started != generation) return@task
+            val result = checkNotNull(pending)
+            dbName = name
+            adoptName = null
+            heldRevision = Core.revision(result.handle).toULong()
+            heldFile = result.file
+            sessionSync = remote?.let { CloudSession(it, name, result.file, false, false) }
+            handle = result.handle
+            pending = null
+            unlocked = true
+            refresh()
+            status = when {
+                Core.source(handle) == 2 -> "Another device created this vault. Opened the R2 copy."
+                remote != null -> "Vault created locally and in Cloudflare R2."
+                else -> "Vault created locally."
+            }
+        } finally {
+            pending?.let { Core.close(it.handle) }
+            secret.fill(0)
+            settings?.pepper?.fill(0)
             activeKey = null
             withContext(Dispatchers.IO + NonCancellable) { key.close() }
         }
@@ -366,8 +414,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         check(!unlocked) { "Lock before importing" }
         require(bytes.size <= MAX_VAULT_BYTES) { "Vault is too large" }
         val name = dbName
-        require(storage.read(name) == null) { "A local vault with this name already exists. Choose a different name to import safely." }
-        withContext(Dispatchers.IO) { storage.write(name, bytes) }
+        withContext(Dispatchers.IO) { storage.importNew(name, bytes) }
         if (started == generation) status = "Imported encrypted vault"
     }
     fun report(message: String) { status = message }

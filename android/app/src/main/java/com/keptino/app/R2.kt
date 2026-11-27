@@ -1,6 +1,9 @@
 package com.keptino.app
 
 import android.util.Base64
+import android.util.Xml
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -18,7 +21,7 @@ internal class R2(private val settings: Settings,
     override val label = "Cloudflare R2"
 
     private fun request(name: String, body: ByteArray? = null): HttpURLConnection {
-        require(name.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}"))) { "Invalid vault name" }
+        require(validVaultName(name)) { "Invalid vault name" }
         val (url, date, hash, authorization) = Core.signR2(body != null, settings.account, settings.bucket, name,
             settings.keyId, settings.appKey, body ?: byteArrayOf(), System.currentTimeMillis() / 1000)
         return connect(URL(url)).apply {
@@ -34,14 +37,29 @@ internal class R2(private val settings: Settings,
         }
     }
 
+    private fun missingKey(body: ByteArray): Boolean {
+        val parser = Xml.newPullParser()
+        return try {
+            parser.setInput(body.inputStream(), "UTF-8")
+            if (parser.nextTag() != XmlPullParser.START_TAG || parser.name != "Error") return false
+            var code: String? = null
+            while (parser.next() != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.START_TAG && parser.depth == 2 && parser.name == "Code") {
+                    if (code != null) return false
+                    code = parser.nextText().trim()
+                }
+            }
+            code == "NoSuchKey"
+        } catch (_: XmlPullParserException) { false }
+    }
+
     override fun fetch(name: String): RemoteObject {
         val conn = request(name)
         try {
             val code = conn.responseCode
             if (code == 404) {
                 val missing = conn.errorStream?.use { it.readBounded(MAX_METADATA_BYTES, "R2 error") }
-                if (missing != null &&
-                    String(missing, Charsets.UTF_8).contains("<Code>NoSuchKey</Code>")) return RemoteObject(null)
+                if (missing != null && missingKey(missing)) return RemoteObject(null)
             }
             check(code == 200) { "R2 download failed (HTTP $code)." }
             check(conn.contentLengthLong <= MAX_VAULT_BODY_BYTES) { "R2 vault is too large" }

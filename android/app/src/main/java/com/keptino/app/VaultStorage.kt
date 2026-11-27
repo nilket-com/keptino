@@ -73,10 +73,11 @@ data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: S
     val sync: Boolean get() = keyId.isNotBlank() && appKey.isNotBlank()
 }
 
+internal fun validVaultName(name: String) = name.isNotEmpty() && '/' !in name && '\u0000' !in name
+
 class VaultStorage(private val context: Context) {
     private companion object {
         val settingsLock = Mutex()
-        val namePattern = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
         val migrationLock = Any()
         val revisionLock = Any()
     }
@@ -94,7 +95,7 @@ class VaultStorage(private val context: Context) {
         for (entry in context.filesDir.list().orEmpty()) {
             val base = entry.removeSuffix(".bak")
             val name = base.removeSuffix(".digisafe")
-            if (base != name && name.matches(namePattern)) {
+            if (base != name && validVaultName(name)) {
                 // Retry on access so a failed move of one vault cannot block other vaults.
                 try { file(name) } catch (_: IOException) {}
             }
@@ -219,7 +220,7 @@ class VaultStorage(private val context: Context) {
         }
     }
     fun file(name: String): File {
-        require(name.matches(namePattern)) { "Use a database name containing letters, digits, dots, underscores or hyphens" }
+        require(validVaultName(name)) { "Enter a vault name without a slash or NUL." }
         val current = File(context.filesDir, "$name.keptino")
         synchronized(migrationLock) {
             val old = AtomicFile(File(context.filesDir, "$name.digisafe"))
@@ -233,7 +234,7 @@ class VaultStorage(private val context: Context) {
     // A separate keystore alias per vault also distinguishes first use from a missing record.
     // The encrypted counter is independent of pepper rotation and does not require another prompt.
     fun acceptRevision(name: String, revision: ULong, previous: ULong = revision, persist: () -> Unit = {}) = synchronized(revisionLock) {
-        require(name.matches(namePattern))
+        require(validVaultName(name))
         val record = AtomicFile(File(context.filesDir, "$name.revision"))
         val alias = "keptino-revision-$name"
         val ks = store
@@ -275,6 +276,30 @@ class VaultStorage(private val context: Context) {
             check(record.readFully().contentEquals(bytes)) { "Could not verify the vault revision record" }
         }
     }
+    internal fun requireUnusedName(name: String) = synchronized(revisionLock) {
+        require(validVaultName(name)) { "Enter a vault name without a slash or NUL." }
+        val endings = listOf(".keptino", ".digisafe", ".revision", ".keptino.rekey", ".keptino.1")
+        // Leave room for AtomicFile's suffix on every file this head writes.
+        require((name + ".keptino.rekey.new").toByteArray().size <= 255) { "Vault name is too long." }
+        val occupied = endings.any { ending ->
+            val target = File(context.filesDir, name + ending)
+            AtomicFile(target).present() || File(target.path + ".new").exists()
+        }
+        check(!occupied && !store.containsAlias("keptino-revision-$name")) {
+            "This name already has a local vault or recovery data. Use Unlock or choose another name."
+        }
+    }
+
+    internal fun acceptNewName(name: String, revision: ULong, persist: () -> Unit = {}) = synchronized(revisionLock) {
+        requireUnusedName(name)
+        acceptRevision(name, revision, 0uL, persist)
+    }
+
+    internal fun importNew(name: String, bytes: ByteArray) = synchronized(revisionLock) {
+        check(read(name) == null) { "A local vault with this name already exists. Choose a different name to import safely." }
+        write(name, bytes)
+    }
+
     fun read(name: String): ByteArray? {
         val file = AtomicFile(file(name))
         if (!file.present()) return null

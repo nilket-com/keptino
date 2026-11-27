@@ -91,6 +91,20 @@ key ID and secret access key, along with the original pepper. R2 uses the
 same default-jurisdiction endpoint, `auto` region and base64 object as Linux.
 A changed object stops the conditional upload and preserves the local save.
 
+## Create a vault on Android
+
+After setup, choose **Create vault**, enter a new vault name, and enter the
+master password twice. Keptino uses the pepper in the phone's protected
+settings. Use the same pepper on Linux to open this vault there.
+
+Local-only settings create the file on the phone. With R2 configured,
+leave **Open local copy only** unchecked. Keptino reserves the name in R2
+before saving the local copy. If another device wins the race, Keptino
+tries to unlock that device's copy. If the connection drops during creation,
+use **Unlock** to check whether R2 received it. The Backblaze native upload
+API cannot reserve a name, so Android offers creation with local-only or R2
+settings.
+
 ## Open an existing Linux vault
 
 1. Configure a device PIN, pattern or password. In Keptino setup, enter the **original pepper seed** used by Linux, or its original

@@ -47,6 +47,7 @@ internal class AndroidSecurityKey(private val activity: ComponentActivity) : Sec
         job.ensureActive()
         committing = true
     }
+    @Synchronized fun endCommit() { committing = false }
     @Synchronized fun cancelPending(): Boolean {
         if (committing) return false
         cancel()

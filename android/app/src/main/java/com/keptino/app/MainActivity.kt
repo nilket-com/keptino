@@ -233,6 +233,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     var r2 by remember { mutableStateOf(false) }
     var account by remember { mutableStateOf("") }
     var bucket by remember { mutableStateOf("") }
+    var creating by remember { mutableStateOf(false) }
     var confirmUsb by remember { mutableStateOf(false) }
     LaunchedEffect(requestR2, vm.unlocked, vm.busy) {
         if (requestR2 && !vm.unlocked && !vm.busy) { confirmUsb = true; handledR2() }
@@ -248,7 +249,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) { password = ""; seed = ""; pepper = ""; appKey = "" }
+            if (event == Lifecycle.Event.ON_STOP) { creating = false; password = ""; seed = ""; pepper = ""; appKey = "" }
         }
         owner.lifecycle.addObserver(observer)
         onDispose { owner.lifecycle.removeObserver(observer) }
@@ -322,9 +323,9 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                     dismissButton = { TextButton(onClick = { confirmUsb = false }) { Text("Cancel") } })
             }
             if (!vm.configured) {
-                Text("Connect to your Linux vault", style = MaterialTheme.typography.titleLarge)
-                Text("Use the original pepper seed, or import its 64-character hexadecimal value. Seed derivation requires 4 GiB of available memory. Setup is encrypted with Android Keystore.")
-                Input("Original pepper seed", seed, { seed = it }, secret = true, enabled = !vm.busy)
+                Text("Set up Keptino", style = MaterialTheme.typography.titleLarge)
+                Text("For your first vault, choose a pepper seed and keep it for setup on other devices. For an existing vault, use its original seed or 64-character hexadecimal pepper. Seed derivation requires 4 GiB of available memory.")
+                Input("Pepper seed", seed, { seed = it }, secret = true, enabled = !vm.busy)
                 Input("Or original pepper (hex)", pepper, { pepper = it }, secret = true, enabled = !vm.busy)
                 Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Checkbox(r2, { r2 = it; keyId = ""; appKey = "" }, enabled = !vm.busy)
@@ -343,6 +344,11 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 Input("Master password", password, { password = it }, secret = true, enabled = !vm.busy)
                 Row { Checkbox(offline, { offline = it }, enabled = !vm.busy); Text("Open local copy only", Modifier.padding(top = 12.dp)) }
                 Button(enabled = !vm.busy, onClick = { vm.unlock(password, offline, authenticate, securityKey()); password = "" }) { Text("Unlock") }
+                OutlinedButton(enabled = !vm.busy, onClick = { password = ""; creating = true }) { Text("Create vault") }
+                if (creating) CreateVaultDialog(onDismiss = { creating = false }) { name, master, confirmation ->
+                    creating = false
+                    vm.create(name, master, confirmation, offline, authenticate, securityKey())
+                }
                 if (vm.adoptName == vm.dbName && !offline) {
                     var confirm by remember(vm.dbName) { mutableStateOf(false) }
                     OutlinedButton(enabled = !vm.busy, onClick = { confirm = true }) { Text("Adopt bucket copy") }
@@ -442,6 +448,28 @@ private fun PasswordActions(vm: VaultViewModel, copy: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+internal fun CreateVaultDialog(onDismiss: () -> Unit, onCreate: (String, String, String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var master by remember { mutableStateOf("") }
+    var confirmation by remember { mutableStateOf("") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Create a vault") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Input("New vault name", name, { name = it })
+                Input("New master password", master, { master = it }, secret = true)
+                Input("Confirm master password", confirmation, { confirmation = it }, secret = true)
+                if (confirmation.isNotEmpty() && master != confirmation) Text("The passwords do not match.")
+                Text("If you lose the master password, you cannot recover this vault.")
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = validVaultName(name) && master.isNotEmpty() && master == confirmation,
+                onClick = { onCreate(name, master, confirmation) }) { Text("Create") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @Composable
