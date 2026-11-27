@@ -65,8 +65,9 @@ it. Up to four keys can be enrolled; keep a backup key enrolled, because a
 vault whose every key is lost while locked cannot be opened. Removing a key
 rekeys again and asks for a touch of each remaining key. Keys speak CTAPHID
 over USB through `/dev/hidrawN`; systemd's udev rules grant the logged-in
-user access, and setup warns when they are missing. Android support for
-protected vaults arrives with ADR 0013.
+user access, and setup warns when they are missing. On Android, open Keys to manage the same enrolled keys.
+Use USB-C on a phone with USB host support. Android NFC has been tested with
+the fixture authenticator only.
 
 Package installation grants `/usr/bin/keptino` the `CAP_IPC_LOCK` capability
 so it can lock its memory, including the 4 GiB password derivation, without

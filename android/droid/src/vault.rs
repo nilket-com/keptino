@@ -5,6 +5,8 @@ use crate::{
 	error::{Error, Result},
 	security::{LockedKey, derive_master_key},
 };
+use keptino_core::roaming::{self, KeySlot, MAX_SLOTS, UvMode};
+use keptino_core::vault::{KeyStore, MetaEntry};
 use keptino_core::{
 	crypto::PEPPER_SIZE,
 	format::{Envelope, KdfParams, field},
@@ -12,6 +14,7 @@ use keptino_core::{
 	health,
 	vault::{self, Candidate, Database, Derived, OpenError, PasswordEntry, UnlockError, unlock},
 };
+use std::sync::Arc;
 use zeroize::Zeroizing;
 /// Where an opened database came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +35,7 @@ pub enum Commit {
 }
 
 pub struct Vault {
+	roaming: Option<Arc<LockedKey>>,
 	database: Database<LockedKey>,
 	working: PasswordEntry<LockedKey>,
 	source: Source,
@@ -106,6 +110,7 @@ impl Vault {
 			(Some(Err(err)), _) | (_, Some(Err(err))) => return Err(err),
 			(local, remote) => (local.map(Result::unwrap), remote.map(Result::unwrap)),
 		};
+		let mut opened_roaming = None;
 		let derive = |candidate: &Candidate<'_>| {
 			let roaming = if candidate.slots.is_empty() {
 				None
@@ -124,15 +129,20 @@ impl Vault {
 				roaming.as_deref(),
 				candidate.cost,
 			) {
-				Ok(key) => Derived::Key(key),
+				Ok(key) => {
+					opened_roaming = match roaming.as_deref().map(LockedKey::from_bytes).transpose()
+					{
+						Ok(secret) => secret.map(Arc::new),
+						Err(error) => return Derived::Failed(error),
+					};
+					Derived::Key(key)
+				}
 				Err(err) => Derived::Failed(err),
 			}
 		};
 		let unlocked =
 			unlock(db_name, local, remote, default_cost, derive).map_err(|err| match err {
-				UnlockError::DifferentVault => {
-					Error::Invalid("a different vault uses this name in the bucket")
-				}
+				UnlockError::DifferentVault => Error::DifferentVault,
 				UnlockError::Derive(err) => err,
 				UnlockError::Open(OpenError::Decryption) => Error::Decryption,
 				UnlockError::Open(OpenError::Format(err)) => err.into(),
@@ -149,10 +159,29 @@ impl Vault {
 		};
 		Ok(Self {
 			database: unlocked.database,
+			roaming: opened_roaming,
 			working: PasswordEntry::try_new()?,
 			source,
 			uploads_paused: uploads_paused || unlocked.caution.is_some(),
 			cost: unlocked.cost,
+		})
+	}
+
+	pub(crate) fn slots(&self) -> Result<Vec<KeySlot>> {
+		let pairs = self.database.meta_pairs();
+		roaming::slots_from_meta(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+			.map_err(|_| Error::Corrupt("invalid security key slots"))
+	}
+
+	pub(crate) fn key_context(&self) -> Result<KeyContext> {
+		Ok(KeyContext {
+			name: self
+				.meta("db_name")
+				.ok_or(Error::Corrupt("missing vault name"))?,
+			salt: self.database.salt().ok_or(Error::Corrupt("missing salt"))?,
+			revision: self.revision(),
+			roaming: self.roaming.clone(),
+			cost: self.cost,
 		})
 	}
 
@@ -291,6 +320,66 @@ impl Vault {
 	}
 }
 
+/// Reopen the last authenticated bytes into a private successor. This proves
+/// the master password against the old file even when removing a lost last
+/// key. The live database and its bookkeeping stay intact on any failure.
+pub(crate) struct KeyContext {
+	name: String,
+	salt: [u8; 32],
+	revision: u64,
+	roaming: Option<Arc<LockedKey>>,
+	cost: KdfParams,
+}
+
+impl KeyContext {
+	pub(crate) fn prepare(
+		&self,
+		file: &[u8],
+		password: &[u8],
+		pepper: &[u8; 32],
+		remove: u32,
+		mode: UvMode,
+		device: &mut impl crate::fido::Device,
+	) -> Result<Vault> {
+		let mut next = Vault::open_with_security_key(
+			&self.name,
+			password,
+			pepper,
+			Some(file),
+			None,
+			self.cost,
+			|_| match self.roaming.as_ref() {
+				Some(key) => Derived::Key(key.with_key(|r| Zeroizing::new(*r))),
+				None => Derived::Unavailable,
+			},
+		)?;
+		if next.database.salt() != Some(self.salt) || next.revision() != self.revision {
+			return Err(Error::Invalid("vault changed before enrollment"));
+		}
+		let original = next.slots()?;
+		let (slots, secret) = crate::fido::change_slots(device, &original, remove, mode)?;
+		if original.is_empty() || remove != 0 {
+			let mut salt = [0; 32];
+			getrandom::fill(&mut salt).map_err(|_| Error::Memory("no system randomness"))?;
+			let key = derive_master_key(password, pepper, &salt, secret.as_deref(), self.cost)?;
+			next.database.rekey(key, &salt);
+			next.roaming = secret
+				.as_deref()
+				.map(LockedKey::from_bytes)
+				.transpose()?
+				.map(Arc::new);
+		}
+		for index in 0..MAX_SLOTS {
+			next.database.remove_meta_entry(&KeySlot::entry_name(index));
+		}
+		for (index, slot) in slots.iter().enumerate() {
+			next.database
+				.set_meta_entry(MetaEntry::new(&KeySlot::entry_name(index), &slot.encode()));
+		}
+		Ok(next)
+	}
+}
+
 #[cfg(test)]
 #[path = "../tests/support/fido.rs"]
 mod fixture_key;
@@ -299,7 +388,7 @@ mod fixture_key;
 mod tests {
 	use super::*;
 	use keptino_core::format::{FormatError, decode_shards, encode_shards};
-	use keptino_core::vault::{MetaEntry, Store};
+	use keptino_core::vault::Store;
 	const DEBUG_MEM_KIB: u32 = KdfParams::DEBUG.m_cost;
 
 	const PEPPER: [u8; PEPPER_SIZE] = [9; PEPPER_SIZE];

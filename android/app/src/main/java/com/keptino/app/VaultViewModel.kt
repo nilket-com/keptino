@@ -37,13 +37,17 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     internal var generator by mutableStateOf(GeneratorOptions())
     var keyProtection by mutableStateOf<String?>(null); private set
     private var sessionSync: BackblazeSession? = null
+    private var heldFile: ByteArray? = null
+    var slots by mutableStateOf<Array<String>?>(null); private set
+    var adoptName by mutableStateOf<String?>(null); private set
+    var confirmEmptyBucket by mutableStateOf(false); private set
     private var heldRevision = 0uL
     private var handle = 0L
     var editing by mutableStateOf(false); private set
     private var committedDirty = false
     private var currentEntryName by mutableStateOf("")
     val deletableName: String? get() = currentEntryName.takeIf { unlocked && !busy && !editing && it.isNotEmpty() }
-    private var generation = 0L
+    @Volatile private var generation = 0L
     // A save owns this handle until the local atomic write returns, even if the UI locks.
     private var savingHandle = 0L
     private fun task(block: suspend (Long) -> Unit) {
@@ -90,34 +94,84 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             pepper.fill(0)
         }
     }
-    fun unlock(password: String, offline: Boolean, authenticate: suspend (Cipher) -> Cipher) = task { started ->
+    private var activeKey by mutableStateOf<AndroidSecurityKey?>(null)
+    val keyInstruction get() = activeKey?.instruction.orEmpty()
+    val opening get() = activeKey != null
+    internal fun cancelKeyOperation(background: Boolean = false) {
+        val key = activeKey ?: return
+        if (background && (key.awaitingDeviceCredential || key.awaitingPermission)) return
+        if (!key.cancelPending()) return
+        generation++
+        status = if (unlocked) "Key change canceled" else "Unlock canceled"
+    }
+    internal fun unlock(password: String, offline: Boolean, authenticate: suspend (Cipher) -> Cipher, key: AndroidSecurityKey, adopt: Boolean = false) = task { started ->
         val name = dbName
-        val settings = withContext(Dispatchers.IO) { storage.settings(authenticate) }
+        var selected: ByteArray? = null
+        var emptyBucket = false
+        if (adopt) check(adoptName == name && !offline) { "Reopen both copies before adopting." }
+        activeKey = key
         val bytes = password.toByteArray()
+        var settings: Settings? = null
         var pendingHandle = 0L
         try {
+            val openedSettings = withContext(Dispatchers.IO) { storage.settings { cipher ->
+                key.awaitingDeviceCredential = true
+                try { authenticate(cipher) } finally { key.awaitingDeviceCredential = false }
+            } }
+            settings = openedSettings
+            if (started != generation) return@task
             refreshKeyProtection()
-            val sync = if (settings.sync) Backblaze(settings.copy(pepper = ByteArray(0))) else null
+            val sync = if (openedSettings.sync) Backblaze(openedSettings.copy(pepper = ByteArray(0))) else null
             val cloudSession = withContext(Dispatchers.IO + NonCancellable) {
                 val local = storage.read(name)
                 val remote = if (offline) null else sync?.download(name)
                 require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable Backblaze sync." }
-                pendingHandle = Core.open(name, bytes, settings.pepper, local, remote, PRODUCTION_MEMORY_KIB)
-                storage.acceptRevision(name, Core.revision(pendingHandle).toULong())
+                val markers = storage.markers(name)
+                val marker = if (local == null || markers.isEmpty()) null else {
+                    val stamp = runCatching { Core.fileStamp(local) }.getOrNull()
+                    markers.lastOrNull { stamp != null && it.covers(stamp) }
+                }
+                val matches = marker != null && !offline && marker.predecessor == fingerprint(remote)
+                val identical = !offline && remote != null && remote.contentEquals(local)
+                val unknown = marker?.predecessor == "?" && !identical
+                if (adopt) require(local != null && remote != null) { "Adoption needs a local and a bucket copy." }
+                pendingHandle = Core.open(name, bytes, openedSettings.pepper,
+                    if (adopt) null else local, if (matches && !adopt) null else remote, PRODUCTION_MEMORY_KIB, key)
+                selected = if (Core.source(pendingHandle) == 2) remote else local
+                check(started == generation) { "Unlock canceled" }
+                storage.acceptRevision(name, Core.revision(pendingHandle).toULong()) {
+                    check(started == generation) { "Unlock canceled" }
+                    if (adopt) {
+                        key.beginCommit()
+                        storage.adopt(name, checkNotNull(local), checkNotNull(remote))
+                    }
+                }
+                if (identical && marker != null) storage.clearMarker(name, remote)
+                emptyBucket = !adopt && unknown && !offline && remote == null && !Core.uploadsPaused(pendingHandle)
                 sync?.let {
-                    BackblazeSession(it, name, if (offline) local else remote, offline, Core.uploadsPaused(pendingHandle))
+                    val pending = if (!adopt && !identical && (offline || matches || unknown)) marker?.predecessor else null
+                    BackblazeSession(it, name, if (offline) local else remote, offline,
+                        Core.uploadsPaused(pendingHandle) || (!adopt && unknown), pending)
                 }
             }
             if (started != generation) return@task
+            heldFile = selected
+            confirmEmptyBucket = emptyBucket
+            adoptName = null
             heldRevision = Core.revision(pendingHandle).toULong()
             sessionSync = cloudSession
             handle = pendingHandle; pendingHandle = 0L; unlocked = true; dirty = false; editing = false; committedDirty = false
             status = if (Core.source(handle) == 2) "Opened remote database" else "Opened local database"
             if (sessionSync?.paused == true) status += ". The local and remote copies need reconciliation. Uploads paused."
             Core.clear(handle); refresh()
+        } catch (error: DifferentVault) {
+            if (started == generation) adoptName = name
+            throw error
         } finally {
             if (pendingHandle != 0L) Core.close(pendingHandle)
-            bytes.fill(0); settings.pepper.fill(0)
+            bytes.fill(0); settings?.pepper?.fill(0)
+            activeKey = null
+            withContext(Dispatchers.IO + NonCancellable) { key.close() }
         }
     }
     private fun refresh() {
@@ -177,6 +231,72 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun commit() = action {
         when (Core.commit(handle)) { 0 -> status = "Enter an entry name"; else -> { dirty = true; committedDirty = true; editing = false; status = "Entry set. Save to persist changes."; refresh() } }
     }
+    fun showKeys() = action {
+        check(!dirty && !editing) { "Save or discard entry changes before managing keys." }
+        slots = Core.keySlots(handle)
+    }
+
+    fun closeKeys() { if (!busy) slots = null }
+
+    internal fun changeKeys(password: String, remove: Int, touchOnly: Boolean, authenticate: suspend (Cipher) -> Cipher,
+                            key: AndroidSecurityKey) = task { started ->
+        val rows = checkNotNull(slots)
+        check(!dirty && !editing && (remove != 0 || rows.size < 4))
+        val original = checkNotNull(heldFile)
+        val name = dbName
+        val old = handle
+        val previous = heldRevision
+        val sync = sessionSync
+        val rekey = rows.isEmpty() || remove != 0
+        activeKey = key
+        val secret = password.toByteArray()
+        var prepared = 0L
+        var settings: Settings? = null
+        try {
+            val authorized = withContext(Dispatchers.IO) { storage.settings { cipher ->
+                key.awaitingDeviceCredential = true
+                try { authenticate(cipher) } finally { key.awaitingDeviceCredential = false }
+            } }
+            settings = authorized
+            check(started == generation) { "Key change canceled" }
+            val encoded = withContext(Dispatchers.IO + NonCancellable) {
+                prepared = Core.prepareKeys(old, original, secret, authorized.pepper, remove, touchOnly, key)
+                val bytes = Core.save(prepared)
+                storage.acceptRevision(name, Core.revision(prepared).toULong(), previous) {
+                    check(started == generation) { "Key change canceled" }
+                    key.beginCommit()
+                    if (rekey && sync != null) storage.writeRekey(name, storage.read(name), bytes,
+                        if (sync.paused) "?" else sync.predecessor)
+                    else storage.write(name, bytes)
+                }
+                bytes
+            }
+            if (started != generation) return@task
+            handle = prepared
+            prepared = 0
+            Core.close(old)
+            heldRevision = Core.revision(handle).toULong()
+            heldFile = encoded
+            slots = Core.keySlots(handle)
+            refresh()
+            if (rekey) sync?.rekeyCommitted()
+            uploadSaved(name, encoded, started)
+        } finally {
+            if (prepared != 0L) Core.close(prepared)
+            secret.fill(0)
+            settings?.pepper?.fill(0)
+            activeKey = null
+            withContext(Dispatchers.IO + NonCancellable) { key.close() }
+        }
+    }
+
+    fun publishToEmptyBucket() = task { started ->
+        check(confirmEmptyBucket && unlocked && !dirty)
+        sessionSync?.allowEmpty()
+        confirmEmptyBucket = false
+        uploadSaved(dbName, checkNotNull(heldFile), started)
+    }
+
     fun save() = task { started ->
         check(unlocked) { "Unlock first" }
         check(!editing) { "Set the current entry before saving" }
@@ -196,15 +316,23 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (started != generation) return@task
         heldRevision = Core.revision(handle).toULong()
+        heldFile = encoded
         dirty = false; committedDirty = false
+        uploadSaved(name, encoded, started)
+    }
+
+    private suspend fun uploadSaved(name: String, encoded: ByteArray, started: Long) {
         status = "Saved locally"
         if (sessionSync?.paused == true) {
             status = "Saved locally. Uploads paused until the copies are reconciled and reopened."
-            return@task
+            return
         }
         sessionSync?.let { sync ->
             val result = try {
-                if (sync.upload(encoded) { started == generation }) "Saved locally and to Backblaze"
+                if (sync.upload(encoded) { started == generation }) {
+                    withContext(Dispatchers.IO) { storage.clearMarker(name, encoded) }
+                    "Saved locally and to Backblaze"
+                }
                 else "Saved locally. The remote copy changed. Uploads paused. Reopen to reconcile."
             } catch (e: Exception) {
                 "Saved locally; remote upload failed. Retry Save when connected."
@@ -222,11 +350,13 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun report(message: String) { status = message }
     fun lock() {
+        activeKey?.cancel()
         generation++
         closeHealth()
         generator = GeneratorOptions()
         if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null
+        heldFile = null; slots = null; confirmEmptyBucket = false; adoptName = null
         handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; committedDirty = false; currentEntryName = ""
         status = "Locked"
     }

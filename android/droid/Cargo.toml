@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 getrandom = "0.4.1"
 jni = { version = "0.21.1", default-features = false }
 keptino-core = { path = "../../common/core" }
+keptino-fido = { path = "../../common/fido" }
 libc = "0.2.191"
 zeroize = "1.8.2"
 

@@ -1,10 +1,29 @@
 package com.keptino.app
 
+/** A foreground operation on one security key. Native code calls these on its I/O worker. */
+interface SecurityKeyIo {
+    /** Returns 1 for a USB connection, 2 for NFC, or 0 if canceled. */
+    fun purpose(message: String) {}
+    fun begin(): Int
+    fun write(packet: ByteArray)
+    fun read(): ByteArray?
+    fun apdu(request: ByteArray): ByteArray
+    /** Native code wipes the returned byte array after copying the PIN. */
+    fun pin(): ByteArray?
+}
+
+class DifferentVault(message: String) : RuntimeException(message)
+
 object Core {
     init { System.loadLibrary("droid") }
     @JvmStatic external fun preflight(): Array<String>
     @JvmStatic external fun derivePepper(seed: ByteArray, memKib: Int): ByteArray
-    @JvmStatic external fun open(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int): Long
+    fun open(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo? = null): Long =
+        openWithKey(dbName, password, pepper, local, remote, kdfMemKib, io)
+    @JvmStatic private external fun openWithKey(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo?): Long
+    @JvmStatic external fun keySlots(h: Long): Array<String>
+    @JvmStatic external fun fileStamp(file: ByteArray): ByteArray
+    @JvmStatic external fun prepareKeys(h: Long, file: ByteArray, password: ByteArray, pepper: ByteArray, remove: Int, touchOnly: Boolean, io: SecurityKeyIo): Long
     @JvmStatic external fun modifiedTs(h: Long): Long
     @JvmStatic external fun revision(h: Long): Long
     @JvmStatic external fun uploadsPaused(h: Long): Boolean

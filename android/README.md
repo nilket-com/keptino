@@ -98,6 +98,19 @@ them against the authenticated inner copy before opening the vault.
 7. Choose **Health** to see which entries have reused, potentially weak, stale,
    or empty passwords. The report runs offline and includes edits made with
    **Set entry**. **Back to editor** returns to your working entry.
+8. Open **Keys** to protect the vault or add a spare. Choose the attached USB
+   key and follow the touch or PIN prompts. Each of the four slots can unlock
+   the vault independently. NFC is experimental and has been tested with
+   the fixture authenticator only. Android key management passed the emulator
+   checks. The Samsung recognized the USB-C YubiKey, but physical enrollment
+   stopped at touch confirmation. Physical unlock and revocation are unverified.
+   Removing slots requires the master password and each key you keep. Losing
+   every enrolled key while locked prevents recovery with the password alone.
+
+A rekey changes the vault salt. On another device, **Adopt bucket copy**
+checks the downloaded vault and preserves the previous local bytes as
+`<name>.keptino.1`. After an offline rekey, uploads stay paused until the
+bucket copy is reconciled.
 
 The default production vault requires **4 GiB of available memory** for password
 derivation. Deriving the pepper from its seed also needs 4 GiB. Importing the
@@ -186,6 +199,17 @@ are under `app/src/androidTest/`. Run:
 cargo test --manifest-path droid/Cargo.toml
 ./gradlew connectedDebugAndroidTest
 ```
+
+To exercise USB and NFC framing through JNI using the public fixture keys,
+build the debug and test APKs, set `ANDROID_SERIAL` to a running emulator, and
+run `python3 interop/check-keys.py`. The authenticator runs on host loopback.
+For physical checks, the opt-in `PhysicalSecurityKeyTest` requires a separate
+debug application ID ending in `.keycheck`. It uses the public debug fixture
+and a file called `hardware.keptino` in that installation. The Linux companion
+`cargo run -p keptino --example phone-key-check -- enroll NEW_FILE` writes a
+protected fixture. Use `unlock PHONE_FILE` to verify the reverse direction.
+For PIN-configured keys, pipe a local hidden-input password prompt into
+the example with `--pin-stdin`.
 
 Do not treat an APK build as proof of compatibility. The end-to-end check must
 open a fixture emitted by Linux, edit and save it through the Android native

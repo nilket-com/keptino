@@ -369,11 +369,9 @@ pub fn keys_screen<'a>(keys: &'a KeysScreen, status: &'a str) -> Element<'a, Mes
 		);
 	} else {
 		body = body.push(
-			text(
-				"Security keys enrolled for this vault. Android opens a protected vault only after ADR 0013.",
-			)
-			.size(14)
-			.color(colors::TEXT_STATUS),
+			text("Use any enrolled key to unlock this vault on Linux or Android.")
+				.size(14)
+				.color(colors::TEXT_STATUS),
 		);
 	}
 	for (index, slot) in keys.slots.iter().enumerate() {

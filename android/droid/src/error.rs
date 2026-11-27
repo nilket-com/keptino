@@ -9,6 +9,8 @@ pub enum Error {
 	Decryption,
 	/// None of the candidate's security-key slots could be opened.
 	SecurityKeyUnavailable,
+	DifferentVault,
+	SecurityKey(keptino_fido::ceremony::Failure),
 	/// A caller-supplied argument is unusable.
 	Invalid(&'static str),
 	/// Key derivation could not run, typically for lack of memory.
@@ -26,6 +28,11 @@ impl fmt::Display for Error {
 			Error::Corrupt(what) => write!(f, "Corrupt vault: {what}."),
 			Error::Decryption => write!(f, "Decryption failure."),
 			Error::SecurityKeyUnavailable => write!(f, "Security key unavailable."),
+			Error::DifferentVault => write!(
+				f,
+				"The local and bucket copies have different salts. To keep the local copy as a generation and open the bucket copy, choose Adopt bucket copy."
+			),
+			Error::SecurityKey(failure) => write!(f, "{failure}"),
 			Error::Invalid(what) => write!(f, "Invalid argument: {what}."),
 			Error::Kdf(what) => write!(f, "Key derivation failure: {what}."),
 			Error::Memory(what) => write!(f, "Memory failure: {what}."),
@@ -57,5 +64,11 @@ impl From<keptino_core::crypto::KdfError> for Error {
 			keptino_core::crypto::KdfError::EmptySeed => Error::Invalid("empty pepper seed"),
 			other => Error::Kdf(other.to_string()),
 		}
+	}
+}
+
+impl From<keptino_fido::ceremony::Failure> for Error {
+	fn from(failure: keptino_fido::ceremony::Failure) -> Self {
+		Self::SecurityKey(failure)
 	}
 }

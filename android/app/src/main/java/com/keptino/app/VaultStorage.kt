@@ -265,6 +265,10 @@ class VaultStorage(private val context: Context) {
         require(bytes.size <= MAX_VAULT_BYTES) { "Vault is too large to save" }
         val target = AtomicFile(file(name))
         writeAtomic(target, bytes)
+        verify(target, bytes)
+    }
+
+    private fun verify(target: AtomicFile, bytes: ByteArray) {
         // AtomicFile can log a failed rename without throwing. Verify the committed
         // bytes before the caller marks the vault clean or starts a remote upload.
         target.openRead().use { input ->
@@ -280,6 +284,46 @@ class VaultStorage(private val context: Context) {
             if (input.read() != -1) throw IOException("Could not verify the saved vault")
         }
     }
+    private fun marker(name: String) = AtomicFile(File(file(name).path + ".rekey"))
+
+    internal fun markers(name: String): List<RekeyMarker> = synchronized(revisionLock) {
+        val file = marker(name)
+        if (!file.present()) return@synchronized emptyList()
+        val bytes = file.openRead().use {
+            check(it.channel.size() in 1..512) { "Invalid rekey marker" }
+            it.readBytes()
+        }
+        bytes.toString(Charsets.US_ASCII).lines().map(RekeyMarker::parse).also { require(it.size in 1..2) }
+    }
+
+    // Keep the previous marker until the successor file has committed. After
+    // a crash either file can still identify its own predecessor.
+    internal fun writeRekey(name: String, before: ByteArray?, successor: ByteArray, predecessor: String) {
+        val stamp = Core.fileStamp(successor)
+        val previous = before?.let { Core.fileStamp(it) }?.let { stamp -> markers(name).lastOrNull { it.covers(stamp) } }
+        val rows = listOfNotNull(previous, RekeyMarker.from(stamp, predecessor))
+        val data = rows.joinToString("\n") { it.encode() }.toByteArray(Charsets.US_ASCII)
+        val target = marker(name)
+        writeAtomic(target, data)
+        verify(target, data)
+        write(name, successor)
+    }
+
+    internal fun clearMarker(name: String, committed: ByteArray) = synchronized(revisionLock) {
+        if (marker(name).present() && read(name).contentEquals(committed)) marker(name).delete()
+    }
+
+    internal fun adopt(name: String, expected: ByteArray, downloaded: ByteArray) {
+        val current = read(name)
+        if (current.contentEquals(downloaded)) { clearMarker(name, downloaded); return }
+        check(current.contentEquals(expected)) { "Local vault changed. Reopen before adopting." }
+        val generation = AtomicFile(File(file(name).path + ".1"))
+        writeAtomic(generation, expected)
+        verify(generation, expected)
+        write(name, downloaded)
+        marker(name).delete()
+    }
+
     private fun writeAtomic(file: AtomicFile, bytes: ByteArray) {
         val stream = file.startWrite()
         try { stream.write(bytes); file.finishWrite(stream) }
@@ -356,29 +400,59 @@ class Backblaze(private val settings: Settings) {
 }
 
 /** Compare against the encrypted object observed at unlock or the last successful upload. */
+// "-" identifies an observed missing object. "?" records an offline rekey.
+internal fun fingerprint(bytes: ByteArray?): String = bytes?.let {
+    android.util.Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(it), android.util.Base64.NO_WRAP)
+} ?: "-"
+
+internal data class RekeyMarker(val salt: String, val revision: ULong, val predecessor: String) {
+    fun covers(stamp: ByteArray): Boolean {
+        val local = from(stamp, predecessor)
+        return salt == local.salt && local.revision >= revision
+    }
+    fun encode() = "$salt $revision $predecessor"
+    companion object {
+        fun from(stamp: ByteArray, predecessor: String): RekeyMarker {
+            require(stamp.size == 40)
+            val salt = android.util.Base64.encodeToString(stamp, 0, 32, android.util.Base64.NO_WRAP)
+            return RekeyMarker(salt, ByteBuffer.wrap(stamp, 32, 8).long.toULong(), predecessor)
+        }
+        fun parse(line: String): RekeyMarker {
+            val fields = line.split(' ')
+            require(fields.size == 3 && fields[0].length == 44 &&
+                (fields[2].length == 44 || fields[2] == "-" || fields[2] == "?")) { "Invalid rekey marker" }
+            return RekeyMarker(fields[0], fields[1].toULong(), fields[2])
+        }
+    }
+}
+
 internal class BackblazeSession(
     private val client: Backblaze,
     private val name: String,
     original: ByteArray?,
     private var offline: Boolean,
     initiallyPaused: Boolean,
+    pendingPredecessor: String? = null,
 ) {
-    private fun digest(bytes: ByteArray?) = bytes?.let { MessageDigest.getInstance("SHA-256").digest(it) }
-    private var expected = digest(original)
+    private var expected = pendingPredecessor ?: fingerprint(original)
+    val predecessor get() = if (offline && pendingPredecessorAtOpen == null) "?" else expected
+    private val pendingPredecessorAtOpen = pendingPredecessor
+    fun allowEmpty() { expected = "-"; offline = false; paused = false }
+    fun rekeyCommitted() { if (predecessor == "?") paused = true }
     var paused = initiallyPaused
         private set
 
     suspend fun upload(bytes: ByteArray, active: () -> Boolean): Boolean {
         if (paused) return false
-        val observed = withContext(Dispatchers.IO) { digest(client.download(name)) }
+        val observed = withContext(Dispatchers.IO) { fingerprint(client.download(name)) }
         if (!active()) return false
-        if (!observed.contentEquals(expected) && !(offline && observed == null)) {
+        if (observed != expected && !(offline && pendingPredecessorAtOpen == null && observed == "-")) {
             paused = true
             return false
         }
         expected = withContext(Dispatchers.IO) {
             client.upload(name, bytes)
-            digest(bytes)
+            fingerprint(bytes)
         }
         offline = false
         return true

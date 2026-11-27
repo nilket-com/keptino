@@ -9,10 +9,11 @@ use crate::{
 };
 use jni::{
 	JNIEnv,
-	objects::{JByteArray, JObject, JString},
+	objects::{JByteArray, JObject, JString, JValue},
 	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
 use keptino_core::crypto::PEPPER_SIZE;
+use keptino_core::format::KdfParams;
 use keptino_core::generator::{Classes, Kind};
 use keptino_core::health::{Report, WEAK_BITS};
 use keptino_core::vault::KeyStore;
@@ -131,13 +132,17 @@ fn guard<'local, T>(
 	fallback: T,
 	body: impl FnOnce(&mut JNIEnv<'local>) -> Result<T>,
 ) -> T {
-	let message = match catch_unwind(AssertUnwindSafe(|| body(env))) {
+	let (class, message) = match catch_unwind(AssertUnwindSafe(|| body(env))) {
 		Ok(Ok(value)) => return value,
-		Ok(Err(error)) => error.to_string(),
-		Err(_) => "Internal error.".to_owned(),
+		Ok(Err(Error::DifferentVault)) => (
+			"com/keptino/app/DifferentVault",
+			Error::DifferentVault.to_string(),
+		),
+		Ok(Err(error)) => ("java/lang/RuntimeException", error.to_string()),
+		Err(_) => ("java/lang/RuntimeException", "Internal error.".to_owned()),
 	};
 	if !env.exception_check().unwrap_or(true) {
-		let _ = env.throw_new("java/lang/RuntimeException", message);
+		let _ = env.throw_new(class, message);
 	}
 	fallback
 }
@@ -242,8 +247,144 @@ pub extern "system" fn Java_com_keptino_app_Core_derivePepper<'local>(
 	})
 }
 
+struct AndroidKey<'a, 'local> {
+	env: &'a mut JNIEnv<'local>,
+	io: &'a JObject<'local>,
+}
+
+impl crate::fido::Device for AndroidKey<'_, '_> {
+	fn purpose(&mut self, prompt: &str) -> crate::fido::KeyResult<()> {
+		use keptino_fido::ceremony::Failure;
+		let text = self.env.new_string(prompt).map_err(|_| Failure::Canceled)?;
+		let text = self.env.auto_local(text);
+		self.env
+			.call_method(
+				self.io,
+				"purpose",
+				"(Ljava/lang/String;)V",
+				&[JValue::Object(&text)],
+			)
+			.map(|_| ())
+			.map_err(|_| Failure::Canceled)
+	}
+	fn begin(&mut self) -> crate::fido::KeyResult<crate::fido::Link> {
+		use keptino_fido::ceremony::Failure;
+		match self
+			.env
+			.call_method(self.io, "begin", "()I", &[])
+			.and_then(|v| v.i())
+		{
+			Ok(1) => Ok(crate::fido::Link::Usb),
+			Ok(2) => Ok(crate::fido::Link::Nfc),
+			Ok(_) | Err(_) => Err(Failure::Canceled),
+		}
+	}
+
+	fn write(&mut self, packet: &crate::fido::Packet) -> crate::fido::KeyResult<()> {
+		use keptino_fido::ceremony::Failure;
+		// A failed Java callback already carries its device error. Avoid another
+		// JNI call with that exception pending during best-effort HID abort.
+		if self.env.exception_check().unwrap_or(true) {
+			return Err(Failure::Canceled);
+		}
+		let array = self
+			.env
+			.byte_array_from_slice(packet)
+			.map_err(|_| Failure::Canceled)?;
+		let array = self.env.auto_local(array);
+		self.env
+			.call_method(self.io, "write", "([B)V", &[JValue::Object(&array)])
+			.map(|_| ())
+			.map_err(|_| Failure::Canceled)
+	}
+
+	fn read(&mut self) -> crate::fido::KeyResult<crate::fido::Packet> {
+		use keptino_fido::ceremony::Failure;
+		let array = self.result_bytes("read", "()[B", &[], 64)?;
+		array.try_into().map_err(|_| Failure::Mismatch)
+	}
+
+	fn apdu(&mut self, request: &[u8]) -> crate::fido::KeyResult<Vec<u8>> {
+		use keptino_fido::{ceremony::Failure, nfc};
+		let input = self
+			.env
+			.byte_array_from_slice(request)
+			.map_err(|_| Failure::Canceled)?;
+		let input = self.env.auto_local(input);
+		self.result_bytes(
+			"apdu",
+			"([B)[B",
+			&[JValue::Object(&input)],
+			nfc::MAX_RESPONSE_BYTES + 2,
+		)
+	}
+
+	fn pin(&mut self) -> crate::fido::KeyResult<Zeroizing<String>> {
+		use keptino_fido::ceremony::Failure;
+		let value = self
+			.env
+			.call_method(self.io, "pin", "()[B", &[])
+			.and_then(|v| v.l())
+			.map_err(|_| Failure::Canceled)?;
+		if value.is_null() {
+			return Err(Failure::Canceled);
+		}
+		let array = self.env.auto_local(JByteArray::from(value));
+		let length = self
+			.env
+			.get_array_length(&*array)
+			.map_err(|_| Failure::Canceled)?;
+		let copied = if (1..=63).contains(&length) {
+			bytes(self.env, &array).ok()
+		} else {
+			None
+		};
+		for start in (0..length).step_by(64) {
+			let count = (length - start).min(64) as usize;
+			self.env
+				.set_byte_array_region(&array, start, &[0; 64][..count])
+				.map_err(|_| Failure::Canceled)?;
+		}
+		let copied = copied.ok_or(Failure::WrongPin)?;
+		let text = std::str::from_utf8(&copied).map_err(|_| Failure::WrongPin)?;
+		Ok(Zeroizing::new(text.to_owned()))
+	}
+}
+
+impl AndroidKey<'_, '_> {
+	fn result_bytes(
+		&mut self,
+		name: &str,
+		sig: &str,
+		args: &[JValue],
+		max: usize,
+	) -> crate::fido::KeyResult<Vec<u8>> {
+		use keptino_fido::ceremony::Failure;
+		let value = self
+			.env
+			.call_method(self.io, name, sig, args)
+			.and_then(|v| v.l())
+			.map_err(|_| Failure::Canceled)?;
+		if value.is_null() {
+			return Err(Failure::Canceled);
+		}
+		let array = self.env.auto_local(JByteArray::from(value));
+		if self
+			.env
+			.get_array_length(&*array)
+			.map_err(|_| Failure::Canceled)? as usize
+			> max
+		{
+			return Err(Failure::Mismatch);
+		}
+		self.env
+			.convert_byte_array(&array)
+			.map_err(|_| Failure::Canceled)
+	}
+}
+
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_keptino_app_Core_open<'local>(
+pub extern "system" fn Java_com_keptino_app_Core_openWithKey<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
 	db_name: JString<'local>,
@@ -252,6 +393,7 @@ pub extern "system" fn Java_com_keptino_app_Core_open<'local>(
 	local: JByteArray<'local>,
 	remote: JByteArray<'local>,
 	mem: jint,
+	io: JObject<'local>,
 ) -> jlong {
 	guard(&mut env, 0, |env| {
 		let db_name = string(env, &db_name)?;
@@ -263,13 +405,19 @@ pub extern "system" fn Java_com_keptino_app_Core_open<'local>(
 			.map_err(|_| Error::Invalid("pepper must be 32 bytes"))?;
 		let local = optional_bytes(env, &local)?;
 		let remote = optional_bytes(env, &remote)?;
-		let vault = Vault::open(
+		let vault = Vault::open_with_security_key(
 			&db_name,
 			&password,
 			pepper,
 			local.as_ref().map(|bytes| bytes.as_slice()),
 			remote.as_ref().map(|bytes| bytes.as_slice()),
-			mem_kib(mem)?,
+			KdfParams::memory_only(mem_kib(mem)?),
+			|candidate| {
+				if io.is_null() {
+					return keptino_core::vault::Derived::Unavailable;
+				}
+				crate::fido::resolve(&mut AndroidKey { env, io: &io }, candidate.slots)
+			},
 		)?;
 		Ok(register(vault))
 	})
@@ -469,5 +617,86 @@ pub extern "system" fn Java_com_keptino_app_Core_close<'local>(
 	guard(&mut env, (), |_| {
 		unregister(handle);
 		Ok(())
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_keySlots<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let slots = with(handle, |vault| vault.slots())?;
+		let rows = slots
+			.iter()
+			.enumerate()
+			.map(|(index, slot)| {
+				let mode = match slot.uv_mode {
+					keptino_core::roaming::UvMode::TouchOnly => "touch only",
+					keptino_core::roaming::UvMode::Verified => "verified",
+				};
+				let id: String = slot
+					.cred_id
+					.iter()
+					.take(4)
+					.map(|byte| format!("{byte:02x}"))
+					.collect();
+				format!("Slot {} · {mode} · {id}", index + 1)
+			})
+			.collect();
+		string_array(env, rows)
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_fileStamp<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	file: JByteArray<'local>,
+) -> jbyteArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let file = bytes(env, &file)?;
+		let envelope = keptino_core::format::Envelope::parse(&file, KdfParams::BUILD_DEFAULT)?;
+		let mut stamp = envelope.salt.to_vec();
+		stamp.extend_from_slice(&envelope.revision.unwrap_or(0).to_be_bytes());
+		byte_array(env, &stamp)
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_prepareKeys<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+	file: JByteArray<'local>,
+	password: JByteArray<'local>,
+	pepper: JByteArray<'local>,
+	remove: jint,
+	touch_only: jboolean,
+	io: JObject<'local>,
+) -> jlong {
+	guard(&mut env, 0, |env| {
+		let context = with(handle, |vault| vault.key_context())?;
+		let file = bytes(env, &file)?;
+		let password = bytes(env, &password)?;
+		let pepper = bytes(env, &pepper)?;
+		let mode = if touch_only != 0 {
+			keptino_core::roaming::UvMode::TouchOnly
+		} else {
+			keptino_core::roaming::UvMode::Verified
+		};
+		let next = context.prepare(
+			&file,
+			&password,
+			pepper
+				.as_slice()
+				.try_into()
+				.map_err(|_| Error::Invalid("pepper must be 32 bytes"))?,
+			u32::try_from(remove).map_err(|_| Error::Invalid("invalid key selection"))?,
+			mode,
+			&mut AndroidKey { env, io: &io },
+		)?;
+		Ok(register(next))
 	})
 }

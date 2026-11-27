@@ -3,6 +3,7 @@
 
 mod bridge;
 pub mod error;
+mod fido;
 pub mod security;
 pub mod vault;
 
