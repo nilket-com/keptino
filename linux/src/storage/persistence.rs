@@ -1,16 +1,25 @@
+//! Where the Linux head keeps a vault and how it opens one: files under
+//! `~/.config/keptino`, the TPM-sealed pepper through systemd-creds, the
+//! storage provider, and the choice between the local and remote copies.
+//! The file format, the cryptography and the selection rules themselves are
+//! `keptino_core`'s; this module supplies the I/O around them.
+
 use crate::{
 	logger::{error, info, warn},
 	storage::{
 		SYSTEMD_CREDS,
-		atlas::{FieldAtlas, next_tlv},
-		database::{Database, EntryTag, InteriorDatabase},
-		entry::{MetaEntry, MetaField},
+		database::{Database, InteriorDatabase},
+		entry::MetaEntry,
 		remote::Remote,
 		secret::SecretMemory,
 	},
 };
+use keptino_core::{
+	crypto::{self, KEY_SIZE, NONCE_SIZE, PEPPER_SIZE, SALT_SIZE},
+	format::{AAD_FORMAT, Envelope, KdfParams, encode_envelope, envelope_aad},
+	policy,
+};
 use std::{
-	collections::HashMap,
 	env, fs,
 	io::Write,
 	mem,
@@ -20,30 +29,12 @@ use std::{
 	sync::{Arc, Mutex},
 	time::SystemTime,
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
-const KEY_SIZE: usize = 32;
-const SALT_SIZE: usize = 32;
-const PEPPER_SIZE: usize = 32;
-const NONCE_SIZE: usize = 24;
-
-/// Every vault file mirrors its metadata: the plaintext envelope copies the
-/// meta entries that the encrypted database also carries. After decryption
-/// the two copies must match exactly, so a plaintext field that was changed,
-/// added or dropped is caught by the authenticated inner copy. That check
-/// needs no marker and works on every vault ever written, and the TLV
-/// records let `revision` and the `kdf_*` costs ride along unnoticed by
-/// older readers.
-///
-/// Files marked `format` 2 were written, for a few hours, with the same
-/// metadata bound as associated data instead. They still open and are
-/// converted back to unmarked files on save. Nothing newer exists.
-const AAD_FORMAT: u32 = 2;
 /// Writes the marked AAD form instead of the unmarked mirrored form. Off:
 /// both platforms read unmarked vaults with a revision. The interop harness
 /// turns it on only to regenerate the marked fixtures.
 const WRITE_AAD_FORMAT: bool = cfg!(feature = "write-format-2");
-const AAD_PREFIX: &[u8] = b"keptino-envelope-v2";
 
 fn revision_path(db_name: &str) -> PathBuf {
 	base_path().join(format!("{db_name}.revision"))
@@ -74,97 +65,30 @@ fn remember_revision(db_name: &str, revision: u64) {
 	}
 }
 
-/// Refuses a copy older than one already opened here, unless the user has
-/// removed the record to accept it deliberately. A format-1 copy carries no
-/// revision and counts as zero: once a revision has been trusted, a file
-/// from before the format change is a rollback too.
+/// The core's rollback rule, with the way out named for this machine.
 fn check_revision(
 	opened: Option<u64>,
 	last_seen: Option<u64>,
 	db_name: &str,
 ) -> Result<(), String> {
-	match (opened, last_seen) {
-		(opened, Some(seen)) if opened.unwrap_or(0) < seen => Err(format!(
-			"This copy is revision {}, but revision {seen} was already opened here. \
-			 To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again.",
-			opened.unwrap_or(0)
-		)),
-		_ => Ok(()),
-	}
-}
-
-/// Associated data of a format-2 envelope: every plaintext meta entry except
-/// the ciphertext itself, length-prefixed and sorted by name. A reader needs
-/// no field list, and a changed, added or dropped field fails authentication.
-fn envelope_aad(meta: &[(String, String)]) -> Vec<u8> {
-	let mut pairs: Vec<&(String, String)> = meta.iter().filter(|(name, _)| name != "db").collect();
-	pairs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-	let mut aad = AAD_PREFIX.to_vec();
-	for (name, value) in pairs {
-		for part in [name, value] {
-			aad.extend_from_slice(&(part.len() as u32).to_le_bytes());
-			aad.extend_from_slice(part.as_bytes());
-		}
-	}
-	aad
+	policy::check_revision(opened, last_seen).map_err(|rollback| {
+		format!(
+			"{rollback} To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again."
+		)
+	})
 }
 
 fn current_revision(db: &Database) -> Option<u64> {
 	db.get_meta_entry("revision")?.get_value().parse().ok()
 }
 
-/// Argon2id cost parameters. Format 1 files carry none and use the build's
-/// constants; format 2 files record theirs as authenticated meta entries, so
-/// a vault written with one cost opens on a build with another and the cost
-/// can be raised later by a deliberate rekey.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct KdfParams {
-	m_cost: u32,
-	t_cost: u32,
-	p_cost: u32,
-}
-
-impl KdfParams {
-	const DEFAULT: Self = Self {
-		m_cost: if cfg!(debug_assertions) {
-			1 << 12
-		} else {
-			1 << 22
-		},
-		t_cost: 1,
-		p_cost: 1,
-	};
-	/// 4 MiB (the debug build's cost) to 16 GiB; outside this the file is
-	/// not one Keptino wrote.
-	const M_COST: std::ops::RangeInclusive<u32> = (1 << 12)..=(1 << 24);
-	const T_COST: std::ops::RangeInclusive<u32> = 1..=64;
-	const P_COST: std::ops::RangeInclusive<u32> = 1..=16;
-
-	/// The parameters named by `kdf_m`, `kdf_t` and `kdf_p` (KiB, passes,
-	/// lanes), the defaults when all three are absent, `None` when they are
-	/// partial or out of range.
-	fn from_meta(metadata: &HashMap<String, String>) -> Option<Self> {
-		let fields = ["kdf_m", "kdf_t", "kdf_p"].map(|name| metadata.get(name));
-		if fields.iter().all(Option::is_none) {
-			return Some(Self::DEFAULT);
-		}
-		let [m_cost, t_cost, p_cost] = fields.map(|field| field?.parse::<u32>().ok());
-		let params = Self {
-			m_cost: m_cost?,
-			t_cost: t_cost?,
-			p_cost: p_cost?,
-		};
-		(Self::M_COST.contains(&params.m_cost)
-			&& Self::T_COST.contains(&params.t_cost)
-			&& Self::P_COST.contains(&params.p_cost))
-		.then_some(params)
-	}
-
-	fn record(self, db: &Database) {
-		db.set_meta_entry(MetaEntry::new("kdf_m", &self.m_cost.to_string()));
-		db.set_meta_entry(MetaEntry::new("kdf_t", &self.t_cost.to_string()));
-		db.set_meta_entry(MetaEntry::new("kdf_p", &self.p_cost.to_string()));
-	}
+/// The master key's bytes, copied briefly out of secret memory for a cipher
+/// operation and wiped after.
+fn key_bytes(key: &SecretMemory) -> Zeroizing<[u8; KEY_SIZE]> {
+	let mapped = key.read().expect("Master key mapping failed");
+	let mut bytes = Zeroizing::new([0u8; KEY_SIZE]);
+	bytes.copy_from_slice(&mapped[..KEY_SIZE]);
+	bytes
 }
 
 pub(crate) fn base_path() -> PathBuf {
@@ -274,6 +198,10 @@ impl OpenedVault {
 	}
 }
 
+fn parse_envelope(bytes: &[u8], what: &str) -> Result<Envelope, String> {
+	Envelope::parse(bytes, KdfParams::BUILD_DEFAULT).map_err(|err| format!("{what} vault: {err}"))
+}
+
 pub async fn load(
 	db_name: &str,
 	master_password: Zeroizing<String>,
@@ -283,7 +211,7 @@ pub async fn load(
 	}
 	let dir = base_path();
 	let local = match fs::read(db_path(db_name)) {
-		Ok(bytes) => Some(Envelope::decode(&bytes).map_err(|err| format!("Local vault: {err}"))?),
+		Ok(bytes) => Some(parse_envelope(&bytes, "Local")?),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 		Err(_) => return Err("Cannot read local vault.".into()),
 	};
@@ -292,7 +220,7 @@ pub async fn load(
 		let fingerprint = bytes.as_deref().map(blake3::hash);
 		let envelope = bytes
 			.as_deref()
-			.map(|b| Envelope::decode(b).map_err(|err| format!("Remote vault: {err}")))
+			.map(|b| parse_envelope(b, "Remote"))
 			.transpose()?;
 		Ok::<_, String>((remote, envelope, fingerprint))
 	}
@@ -319,7 +247,7 @@ pub async fn load(
 					"A different vault already uses this name in the selected bucket.".into(),
 				);
 			}
-			let (first, second) = if prefer_local(&local.envelope, &remote.envelope) {
+			let (first, second) = if policy::prefer_local(&local.envelope, &remote.envelope) {
 				(local, remote)
 			} else {
 				(remote, local)
@@ -354,16 +282,6 @@ struct Candidate {
 	source: &'static str,
 }
 
-/// Which of two copies to try first: the higher revision when both carry
-/// one, else the later modification time, local winning a tie. Both fields
-/// are plaintext, so the loser is tried when the winner fails to open.
-fn prefer_local(local: &Envelope, remote: &Envelope) -> bool {
-	match (local.revision, remote.revision) {
-		(Some(ours), Some(theirs)) if ours != theirs => ours > theirs,
-		_ => local.modified >= remote.modified,
-	}
-}
-
 /// Derives the key once (both candidates share a salt) and opens the first
 /// copy that authenticates. A copy that fails while the other opens is
 /// reported, and the caller pauses uploads so it is not overwritten blindly.
@@ -377,20 +295,27 @@ fn open_candidates(
 	// serves it. A different cost on the second copy is reported as a
 	// failure to open it, which is also what a forged cost would produce.
 	let key = master_key_derivation(password, first.envelope.salt, first.envelope.kdf)?;
-	if let Some(idb) = first.envelope.unlock(&key) {
+	let bytes = key_bytes(&key);
+	if let Some(database) = first.envelope.open(&bytes) {
 		info(&format!("{} database loaded.", first.source));
-		return Ok((Database::old(key, idb), None));
+		return Ok((
+			Database::old(key, InteriorDatabase::deserialize(&database)),
+			None,
+		));
 	}
 	if let Some(second) = second
 		&& second.envelope.kdf == first.envelope.kdf
-		&& let Some(idb) = second.envelope.unlock(&key)
+		&& let Some(database) = second.envelope.open(&bytes)
 	{
 		let rejected = format!(
 			"The {} copy failed authentication and may be corrupt or tampered with; opened the {} copy.",
 			first.source, second.source
 		);
 		warn(&rejected);
-		return Ok((Database::old(key, idb), Some(rejected)));
+		return Ok((
+			Database::old(key, InteriorDatabase::deserialize(&database)),
+			Some(rejected),
+		));
 	}
 	key.zeroize().ok();
 	Err("Cannot decrypt vault. Check the master password and pepper.".into())
@@ -404,7 +329,7 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database,
 		.to_string();
 	let mut salt = [0u8; SALT_SIZE];
 	getrandom::fill(&mut salt).unwrap();
-	let master_key = master_key_derivation(master_password, salt, KdfParams::DEFAULT)?;
+	let master_key = master_key_derivation(master_password, salt, KdfParams::BUILD_DEFAULT)?;
 	let db = Database::new(master_key);
 	db.set_meta_entry(MetaEntry::new("db_name", db_name));
 	db.set_meta_entry(MetaEntry::new("nonce", "0"));
@@ -412,119 +337,6 @@ fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database,
 	db.set_meta_entry(MetaEntry::new("created_ts", &created_ts));
 	db.set_meta_entry(MetaEntry::new("modified_ts", &created_ts));
 	Ok(db)
-}
-
-/// The plaintext layer of a vault file. Every field here is unverified until
-/// `unlock` has compared the whole plaintext meta set against the copy inside
-/// the ciphertext; `aad` is empty except for the marked AAD form.
-struct Envelope {
-	modified: u64,
-	revision: Option<u64>,
-	kdf: KdfParams,
-	nonce: [u8; NONCE_SIZE],
-	salt: [u8; SALT_SIZE],
-	ciphertext: Vec<u8>,
-	/// Every plaintext meta entry except the ciphertext itself, as stored.
-	mirror: Vec<(String, String)>,
-	aad: Vec<u8>,
-}
-
-impl Envelope {
-	fn decode(bytes: &[u8]) -> Result<Self, String> {
-		Self::parse(bytes).ok_or_else(|| "the file is damaged beyond repair.".to_string())?
-	}
-
-	/// `None` for a file that cannot be read at all, including one that names
-	/// a meta entry twice; `Some(Err)` for one that is intact but from a
-	/// newer Keptino.
-	fn parse(bytes: &[u8]) -> Option<Result<Self, String>> {
-		use base64ct::{Base64, Encoding};
-		let recovered = decode_erasure(bytes)?;
-		let mut entries = recovered.as_slice();
-		let mut pairs = Vec::new();
-		let mut metadata = HashMap::new();
-		while !entries.is_empty() {
-			let (tag, fields) = next_tlv(&mut entries)?;
-			if tag != EntryTag::Meta as u8 {
-				return None;
-			}
-			let record = FieldAtlas::try_deserialize(fields)?;
-			let name = record.get_str(MetaField::Name as u8)?.to_owned();
-			let value = record.get_str(MetaField::Value as u8)?.to_owned();
-			pairs.push((name.clone(), value.clone()));
-			if metadata.insert(name, value).is_some() {
-				// A duplicate name could let one copy pass the mirror check
-				// while a reader honours the other.
-				return None;
-			}
-		}
-		let format: u32 = match metadata.get("format") {
-			Some(format) => format.parse().ok()?,
-			None => 1,
-		};
-		if format > AAD_FORMAT {
-			return Some(Err(format!(
-				"the file was written by a newer Keptino (format {format}). Update Keptino to open it."
-			)));
-		}
-		// The revision and costs are read from the plaintext and vouched for
-		// afterwards: a forged cost derives a key that opens nothing, and a
-		// forged revision fails the mirror check.
-		let revision = match metadata.get("revision") {
-			Some(revision) => Some(revision.parse().ok()?),
-			None if format >= AAD_FORMAT => return None,
-			None => None,
-		};
-		let kdf = KdfParams::from_meta(&metadata)?;
-		let aad = if format >= AAD_FORMAT {
-			envelope_aad(&pairs)
-		} else {
-			Vec::new()
-		};
-		let mirror = pairs
-			.iter()
-			.filter(|(name, _)| name != "db")
-			.cloned()
-			.collect();
-		let mut nonce = [0; NONCE_SIZE];
-		nonce[..16].copy_from_slice(&metadata.get("nonce")?.parse::<u128>().ok()?.to_le_bytes());
-		Some(Ok(Self {
-			modified: metadata.get("modified_ts")?.parse().ok()?,
-			revision,
-			kdf,
-			salt: Base64::decode_vec(metadata.get("salt")?)
-				.ok()?
-				.try_into()
-				.ok()?,
-			nonce,
-			ciphertext: Base64::decode_vec(metadata.get("db")?).ok()?,
-			mirror,
-			aad,
-		}))
-	}
-
-	/// Decrypts and then insists that the plaintext metadata is exactly the
-	/// authenticated copy inside, so a tampered envelope fails like a wrong
-	/// key. The comparison happens before the caller renames an imported
-	/// vault.
-	fn unlock(&self, key: &SecretMemory) -> Option<InteriorDatabase> {
-		let compressed = decrypt(self.ciphertext.clone(), key, self.nonce, &self.aad)?;
-		let idb = InteriorDatabase::deserialize(&decompress(compressed));
-		if !mirrors(&self.mirror, &idb.meta_pairs()) {
-			warn("Vault metadata does not match its authenticated copy.");
-			return None;
-		}
-		Some(idb)
-	}
-}
-
-/// Whether two meta sets hold the same names with the same values.
-fn mirrors(outer: &[(String, String)], inner: &[(String, String)]) -> bool {
-	let mut outer: Vec<&(String, String)> = outer.iter().collect();
-	let mut inner: Vec<&(String, String)> = inner.iter().collect();
-	outer.sort();
-	inner.sort();
-	outer == inner
 }
 
 /// Encrypts the database into the bytes of a vault file: unmarked and
@@ -548,37 +360,32 @@ fn db_to_vec(db: &Database, aad_form: bool) -> Vec<u8> {
 	// A vault that never recorded its cost was opened with the build's
 	// constants; record them so every build reads it back the same way.
 	if db.get_meta_entry("kdf_m").is_none() {
-		KdfParams::DEFAULT.record(db);
+		for (name, value) in KdfParams::BUILD_DEFAULT.meta_pairs() {
+			db.set_meta_entry(MetaEntry::new(&name, &value));
+		}
 	}
 	if aad_form {
 		db.set_meta_entry(MetaEntry::new("format", &AAD_FORMAT.to_string()));
 	} else {
 		db.remove_meta_entry("format");
 	}
-	let db_core = db.serialize();
-	let db_core_compressed = compress(&db_core);
+	let compressed = crypto::compress(&db.serialize());
 	// The envelope mirrors every meta entry; the inner copy is what a reader
 	// compares it against after decryption.
-	let db_envelope = db.meta_only();
+	let meta = db.meta_pairs();
 	let aad = if aad_form {
-		envelope_aad(&db_envelope.meta_pairs())
+		envelope_aad(&meta)
 	} else {
 		Vec::new()
 	};
-	let db_core_encrypted = encrypt(
-		&db_core_compressed,
-		&db.clone_master_key().read().unwrap(),
-		nonce,
-		&aad,
-	);
-	db_envelope.set_meta_entry(MetaEntry::new("db", &to_base64(&db_core_encrypted)));
-	let db_bin = db_envelope.serialize();
-	encode_erasure(&db_bin)
+	let key = db.clone_master_key();
+	let ciphertext = crypto::encrypt(&compressed, &key_bytes(&key.read().unwrap()), &nonce, &aad);
+	encode_envelope(&meta, &ciphertext)
 }
 
 /// The TPM-sealed pepper, released by systemd-creds for this user. A missing
 /// or refused credential is an unlock error the user can act on, not a crash.
-fn load_pepper() -> Result<[u8; PEPPER_SIZE], String> {
+fn load_pepper() -> Result<Zeroizing<[u8; PEPPER_SIZE]>, String> {
 	let pepper_output = Command::new(SYSTEMD_CREDS)
 		.args(["decrypt", "--user", "--name=pepper", &pepper_path()])
 		.output()
@@ -590,216 +397,32 @@ fn load_pepper() -> Result<[u8; PEPPER_SIZE], String> {
 				.into(),
 		);
 	}
-	let mut pepper = [0u8; PEPPER_SIZE];
+	let mut pepper = Zeroizing::new([0u8; PEPPER_SIZE]);
 	let text = std::str::from_utf8(&pepper_hex).map_err(|_| "Invalid pepper credential.")?;
-	hex::decode_to_slice(text.trim(), &mut pepper).map_err(|_| "Invalid pepper credential.")?;
+	hex::decode_to_slice(text.trim(), &mut *pepper).map_err(|_| "Invalid pepper credential.")?;
 	Ok(pepper)
 }
 
+/// Derives the master key straight into secret memory.
 fn master_key_derivation(
 	password: Zeroizing<String>,
 	salt: [u8; SALT_SIZE],
 	kdf: KdfParams,
 ) -> Result<SecretMemory, String> {
-	use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
-	use sha3::{Digest, Sha3_256};
 	let pepper = load_pepper()?;
-	let mut pre_hasher = Sha3_256::new();
-	pre_hasher.update(salt);
-	pre_hasher.update(pepper);
-	pre_hasher.update(password.as_bytes());
-	let mut pre_hash = pre_hasher.finalize();
-	let main_params = ParamsBuilder::new()
-		.m_cost(kdf.m_cost)
-		.t_cost(kdf.t_cost)
-		.p_cost(kdf.p_cost)
-		.output_len(KEY_SIZE)
-		.build()
-		.map_err(|_| "Unsupported key derivation parameters.")?;
-	let main_hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, main_params);
-	let mut main_hash = [0u8; KEY_SIZE];
-	let mut derivation_salt = Zeroizing::new([0u8; SALT_SIZE + PEPPER_SIZE]);
-	derivation_salt[..SALT_SIZE].copy_from_slice(&salt);
-	derivation_salt[SALT_SIZE..].copy_from_slice(&pepper);
-	main_hasher
-		.hash_password_into(&pre_hash, &*derivation_salt, &mut main_hash)
-		.unwrap();
-	let mut post_hasher = Sha3_256::new();
-	post_hasher.update(main_hash);
-	post_hasher.update(pepper);
-	post_hasher.update(salt);
-	let mut post_hash: [u8; KEY_SIZE] = post_hasher.finalize().into();
-	let mut pepper = pepper;
-	pepper.zeroize();
-	pre_hash.zeroize();
-	main_hash.zeroize();
-	let master_key = SecretMemory::new_pages(1).unwrap();
-	master_key.write(0, &post_hash).unwrap();
-	post_hash.zeroize();
+	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
+	crypto::derive_master_key(password.as_bytes(), &pepper, &salt, kdf, &mut key)
+		.map_err(|err| err.to_string())?;
+	let master_key = SecretMemory::new_pages(1).map_err(|_| "Secret memory unavailable.")?;
+	master_key
+		.write(0, &*key)
+		.map_err(|_| "Secret memory unavailable.")?;
 	Ok(master_key)
 }
 
 fn to_base64(msg: &[u8]) -> String {
 	use base64ct::{Base64, Encoding};
 	Base64::encode_string(msg)
-}
-
-// Grow by copying into a new wiping allocation, so a realloc never abandons
-// plaintext in the allocator's old buffer.
-#[derive(Default)]
-struct WipingWriter(Zeroizing<Vec<u8>>);
-impl Write for WipingWriter {
-	fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-		let required = self
-			.0
-			.len()
-			.checked_add(bytes.len())
-			.ok_or_else(|| std::io::Error::other("Plaintext size overflow"))?;
-		if required > self.0.capacity() {
-			let capacity = required.max(self.0.capacity().saturating_mul(2));
-			let mut next = Zeroizing::new(Vec::with_capacity(capacity));
-			next.extend_from_slice(&self.0);
-			self.0 = next;
-		}
-		self.0.extend_from_slice(bytes);
-		Ok(bytes.len())
-	}
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
-	}
-}
-
-fn compress(msg: &[u8]) -> Zeroizing<Vec<u8>> {
-	let mut encoder = lz4::EncoderBuilder::new()
-		.level(9)
-		.build(WipingWriter::default())
-		.unwrap();
-	encoder.write_all(msg).unwrap();
-	let (writer, result) = encoder.finish();
-	result.unwrap();
-	writer.0
-}
-
-fn decompress(msg_enc: Zeroizing<Vec<u8>>) -> Zeroizing<Vec<u8>> {
-	let mut writer = WipingWriter::default();
-	let mut decoder = lz4::Decoder::new(&msg_enc[..]).unwrap();
-	// std::io::copy's ordinary scratch buffer would retain plaintext.
-	let mut scratch = Zeroizing::new([0u8; 8192]);
-	loop {
-		let size = std::io::Read::read(&mut decoder, &mut *scratch).unwrap();
-		if size == 0 {
-			break;
-		}
-		writer.write_all(&scratch[..size]).unwrap();
-	}
-	writer.0
-}
-
-fn encrypt(msg: &[u8], key: &SecretMemory, nonce: [u8; NONCE_SIZE], aad: &[u8]) -> Vec<u8> {
-	use chacha20poly1305::{
-		XChaCha20Poly1305,
-		aead::{AeadInPlace, KeyInit},
-	};
-	let mapped = key.read().unwrap();
-	let cipher = XChaCha20Poly1305::new_from_slice(&mapped).unwrap();
-	drop(mapped);
-	let mut buffer = Zeroizing::new(Vec::with_capacity(msg.len() + 16));
-	buffer.extend_from_slice(msg);
-	cipher
-		.encrypt_in_place((&nonce).into(), aad, &mut *buffer)
-		.unwrap();
-	mem::take(&mut *buffer)
-}
-
-fn decrypt(
-	msg_enc: Vec<u8>,
-	key: &SecretMemory,
-	nonce: [u8; NONCE_SIZE],
-	aad: &[u8],
-) -> Option<Zeroizing<Vec<u8>>> {
-	use chacha20poly1305::{
-		XChaCha20Poly1305,
-		aead::{AeadInPlace, KeyInit},
-	};
-	let mapped = key.read().unwrap();
-	let cipher = XChaCha20Poly1305::new_from_slice(&mapped).unwrap();
-	drop(mapped);
-	let mut buffer = Zeroizing::new(msg_enc);
-	cipher
-		.decrypt_in_place((&nonce).into(), aad, &mut *buffer)
-		.ok()?;
-	Some(buffer)
-}
-
-const ERASURE_DATA_SHARDS: usize = 8;
-const ERASURE_PARITY_SHARDS: usize = 4;
-const ERASURE_TOTAL_SHARDS: usize = ERASURE_DATA_SHARDS + ERASURE_PARITY_SHARDS;
-const ERASURE_MIN_SHARD_SIZE: usize = 4096;
-
-fn encode_erasure(data: &[u8]) -> Vec<u8> {
-	use keptino_erasure::ReedSolomon;
-	let original_len = data.len() as u64;
-	let shard_size = std::cmp::max(
-		data.len().div_ceil(ERASURE_DATA_SHARDS),
-		ERASURE_MIN_SHARD_SIZE,
-	);
-	let mut padded = data.to_vec();
-	padded.resize(shard_size * ERASURE_DATA_SHARDS, 0);
-	let mut shards: Vec<Vec<u8>> = padded
-		.chunks_exact(shard_size)
-		.map(|chunk| chunk.to_vec())
-		.collect();
-	for _ in 0..ERASURE_PARITY_SHARDS {
-		shards.push(vec![0; shard_size]);
-	}
-	let rs = ReedSolomon::new(ERASURE_DATA_SHARDS, ERASURE_PARITY_SHARDS).unwrap();
-	rs.encode(&mut shards).unwrap();
-	let mut output = Vec::new();
-	for shard in shards {
-		let hash = blake3::hash(&shard);
-		output.extend_from_slice(&original_len.to_le_bytes());
-		output.extend_from_slice(hash.as_bytes());
-		output.extend_from_slice(&shard);
-	}
-	output
-}
-
-fn decode_erasure(encoded: &[u8]) -> Option<Vec<u8>> {
-	use keptino_erasure::ReedSolomon;
-	let chunk_size = encoded.len() / ERASURE_TOTAL_SHARDS;
-	if chunk_size < 40 + ERASURE_MIN_SHARD_SIZE
-		|| !encoded.len().is_multiple_of(ERASURE_TOTAL_SHARDS)
-	{
-		return None;
-	}
-	let mut original_len = None;
-	let mut shards: Vec<Option<Vec<u8>>> = Vec::new();
-	for chunk in encoded.chunks_exact(chunk_size) {
-		let len = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-		let hash = &chunk[8..40];
-		let data = &chunk[40..];
-		if blake3::hash(data).as_bytes() == hash {
-			original_len.get_or_insert(len);
-			shards.push(Some(data.to_vec()));
-		} else {
-			shards.push(None);
-		}
-	}
-	let rs = ReedSolomon::new(ERASURE_DATA_SHARDS, ERASURE_PARITY_SHARDS).unwrap();
-	rs.reconstruct_data(&mut shards).ok()?;
-	let mut recovered: Vec<u8> = shards
-		.iter()
-		.take(ERASURE_DATA_SHARDS)
-		.filter_map(|shard| shard.as_ref())
-		.flatten()
-		.copied()
-		.collect();
-	let length = usize::try_from(original_len?).ok()?;
-	if length > recovered.len() {
-		return None;
-	}
-	recovered.truncate(length);
-	Some(recovered)
 }
 
 /// Previous saves kept beside the vault as `<db>.keptino.1` (the newest)
@@ -929,316 +552,60 @@ mod tests {
 		db
 	}
 
+	fn parse(bytes: &[u8]) -> Envelope {
+		Envelope::parse(bytes, KdfParams::BUILD_DEFAULT).unwrap()
+	}
+
 	#[test]
-	fn cloud_envelopes_roundtrip_and_reject_damaged_input() {
+	fn saves_are_unmarked_mirrored_files_that_reopen_and_advance_the_revision() {
 		let db = fixture_database();
+		let key = db.clone_master_key();
 		let encoded = db_to_vec(&db, false);
-		let envelope = Envelope::decode(&encoded).unwrap();
+		let envelope = parse(&encoded);
 		assert_eq!(envelope.salt, [42; SALT_SIZE]);
 		assert_eq!(envelope.revision, Some(1));
-		assert!(envelope.aad.is_empty());
-		assert!(
-			envelope
-				.unlock(&db.clone_master_key().read().unwrap())
-				.is_some()
-		);
-		db.set_meta_entry(MetaEntry::new("nonce", "7"));
-		assert_ne!(
-			Envelope::decode(&db_to_vec(&db, false)).unwrap().nonce,
-			envelope.nonce
-		);
-		assert!(Envelope::decode(&encoded[1..]).is_err());
-		assert!(Envelope::decode(&[]).is_err());
-		assert!(Envelope::decode(&encode_erasure(&[0, 100, 0, 0, 0])).is_err());
-	}
-
-	/// Re-encodes a vault file with one plaintext meta value altered.
-	fn tamper(encoded: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
-		let mut recovered = decode_erasure(encoded).unwrap();
-		let at = recovered
-			.windows(from.len())
-			.position(|window| window == from)
-			.expect("plaintext field present");
-		recovered[at..at + from.len()].copy_from_slice(to);
-		encode_erasure(&recovered)
-	}
-
-	/// A meta record as the TLV layer stores it.
-	fn meta_record(name: &str, value: &str) -> Vec<u8> {
-		let mut fields = Vec::new();
-		for (id, text) in [
-			(MetaField::Name as u8, name),
-			(MetaField::Value as u8, value),
-		] {
-			fields.push(id);
-			fields.extend_from_slice(&(text.len() as u32).to_le_bytes());
-			fields.extend_from_slice(text.as_bytes());
-		}
-		let mut record = vec![EntryTag::Meta as u8];
-		record.extend_from_slice(&(fields.len() as u32).to_le_bytes());
-		record.extend_from_slice(&fields);
-		record
-	}
-
-	/// What every Keptino before today wrote: mirrored metadata, no
-	/// revision, no cost, no marker.
-	fn legacy_encode(db: &Database) -> Vec<u8> {
-		let mut nonce = [0u8; NONCE_SIZE];
-		nonce[..16].copy_from_slice(&7u128.to_le_bytes());
-		let compressed = compress(&db.serialize());
-		let encrypted = encrypt(
-			&compressed,
-			&db.clone_master_key().read().unwrap(),
-			nonce,
-			&[],
-		);
-		let envelope = db.meta_only();
-		envelope.set_meta_entry(MetaEntry::new("db", &to_base64(&encrypted)));
-		encode_erasure(&envelope.serialize())
-	}
-
-	#[test]
-	fn unmarked_vaults_mirror_their_metadata_and_reject_a_changed_copy() {
-		let db = fixture_database();
-		db.set_meta_entry(MetaEntry::new("modified_ts", "1700000000"));
-		let key = db.clone_master_key();
-		let encoded = db_to_vec(&db, false);
-		let envelope = Envelope::decode(&encoded).unwrap();
-		assert_eq!(envelope.revision, Some(1));
-		assert_eq!(envelope.kdf, KdfParams::DEFAULT);
+		assert_eq!(envelope.kdf, KdfParams::BUILD_DEFAULT);
 		assert!(envelope.aad.is_empty());
 		assert!(!envelope.mirror.iter().any(|(name, _)| name == "format"));
-		assert!(envelope.unlock(&key.read().unwrap()).is_some());
-		// Each plaintext field is vouched for by the copy inside the ciphertext.
-		for (from, to) in [
-			(&b"example"[..], &b"exampel"[..]),
-			(
-				b"revision\x02\x01\x00\x00\x001",
-				b"revision\x02\x01\x00\x00\x002",
-			),
-			(b"kdf_t\x02\x01\x00\x00\x001", b"kdf_t\x02\x01\x00\x00\x002"),
-		] {
-			let altered = Envelope::decode(&tamper(&encoded, from, to)).unwrap();
-			assert!(altered.unlock(&key.read().unwrap()).is_none(), "{from:?}");
-		}
-		// A dropped or added plaintext field fails the same way.
-		let mut recovered = decode_erasure(&encoded).unwrap();
-		recovered.extend_from_slice(&meta_record("created_ts", "1"));
-		assert!(
-			Envelope::decode(&encode_erasure(&recovered))
-				.unwrap()
-				.unlock(&key.read().unwrap())
-				.is_none()
-		);
-		let mut recovered = decode_erasure(&encoded).unwrap();
-		recovered.extend_from_slice(&meta_record("salt", "AAAA"));
-		assert!(
-			Envelope::decode(&encode_erasure(&recovered)).is_err(),
-			"duplicate names are refused"
-		);
-		// Out-of-range or partial costs are not a vault at all.
-		assert!(
-			Envelope::decode(&tamper(
-				&encoded,
-				b"kdf_m\x02\x04\x00\x00\x004096",
-				b"kdf_m\x02\x04\x00\x00\x000001"
-			))
-			.is_err()
-		);
-		assert!(Envelope::decode(&tamper(&encoded, b"kdf_p", b"kdf_q")).is_err());
-		// Saves advance the revision.
+		let inner = envelope.open(&key_bytes(&key.read().unwrap())).unwrap();
+		let reopened = InteriorDatabase::deserialize(&inner);
 		assert_eq!(
-			Envelope::decode(&db_to_vec(&db, false)).unwrap().revision,
-			Some(2)
+			reopened.get_meta_entry("db_name").unwrap().get_value(),
+			"example"
 		);
+		assert_eq!(
+			reopened.get_meta_entry("revision").unwrap().get_value(),
+			"1"
+		);
+		// Each save takes a fresh nonce and the next revision.
+		let next = parse(&db_to_vec(&db, false));
+		assert_ne!(next.nonce, envelope.nonce);
+		assert_eq!(next.revision, Some(2));
+		assert!(Envelope::parse(&encoded[1..], KdfParams::DEBUG).is_err());
 	}
 
 	#[test]
-	fn legacy_vaults_open_through_the_mirror_check_without_a_resave() {
-		let db = fixture_database();
-		db.set_meta_entry(MetaEntry::new("modified_ts", "1700000000"));
-		let key = db.clone_master_key();
-		let encoded = legacy_encode(&db);
-		let envelope = Envelope::decode(&encoded).unwrap();
-		assert_eq!(envelope.revision, None);
-		assert_eq!(envelope.kdf, KdfParams::DEFAULT);
-		assert!(envelope.unlock(&key.read().unwrap()).is_some());
-		let replayed = Envelope::decode(&tamper(&encoded, b"1700000000", b"1800000000")).unwrap();
-		assert_eq!(replayed.modified, 1800000000);
-		assert!(
-			replayed.unlock(&key.read().unwrap()).is_none(),
-			"a bumped timestamp is caught"
-		);
-	}
-
-	#[test]
-	fn marked_aad_vaults_still_open_and_convert_on_save() {
+	fn the_marked_form_is_written_on_request_and_converted_back() {
 		let db = fixture_database();
 		let key = db.clone_master_key();
-		let encoded = db_to_vec(&db, true);
-		let envelope = Envelope::decode(&encoded).unwrap();
-		assert_eq!(envelope.revision, Some(1));
-		assert!(envelope.aad.starts_with(AAD_PREFIX));
-		assert!(envelope.unlock(&key.read().unwrap()).is_some());
-		let renamed = Envelope::decode(&tamper(&encoded, b"example", b"exampel")).unwrap();
-		assert!(renamed.unlock(&key.read().unwrap()).is_none());
-		assert!(
-			Envelope::decode(&tamper(&encoded, b"revision", b"revisioN")).is_err(),
-			"a marked file must carry a revision"
-		);
-		// The next unmarked save drops the marker and keeps counting.
-		let converted = Envelope::decode(&db_to_vec(&db, false)).unwrap();
-		assert_eq!(converted.revision, Some(2));
+		let marked = parse(&db_to_vec(&db, true));
+		assert!(!marked.aad.is_empty());
+		assert_eq!(marked.revision, Some(1));
+		assert!(marked.open(&key_bytes(&key.read().unwrap())).is_some());
+		let converted = parse(&db_to_vec(&db, false));
 		assert!(converted.aad.is_empty());
 		assert!(!converted.mirror.iter().any(|(name, _)| name == "format"));
-		assert!(converted.unlock(&key.read().unwrap()).is_some());
-		// A marker from the future is refused with an explanation, not a guess.
-		let future = tamper(
-			&db_to_vec(&db, true),
-			b"format\x02\x01\x00\x00\x002",
-			b"format\x02\x01\x00\x00\x009",
-		);
-		assert!(
-			Envelope::decode(&future)
-				.err()
-				.unwrap()
-				.contains("newer Keptino")
-		);
+		assert_eq!(converted.revision, Some(2));
+		assert!(converted.open(&key_bytes(&key.read().unwrap())).is_some());
 	}
 
 	#[test]
-	fn kdf_parameters_default_when_absent_and_are_bounded() {
-		let meta = |fields: &[(&str, &str)]| {
-			fields
-				.iter()
-				.map(|(k, v)| (k.to_string(), v.to_string()))
-				.collect::<HashMap<_, _>>()
-		};
-		assert_eq!(KdfParams::from_meta(&meta(&[])), Some(KdfParams::DEFAULT));
-		assert_eq!(
-			KdfParams::from_meta(&meta(&[
-				("kdf_m", "4194304"),
-				("kdf_t", "3"),
-				("kdf_p", "2")
-			])),
-			Some(KdfParams {
-				m_cost: 1 << 22,
-				t_cost: 3,
-				p_cost: 2
-			})
-		);
-		assert_eq!(
-			KdfParams::from_meta(&meta(&[("kdf_m", "4194304")])),
-			None,
-			"partial"
-		);
-		assert_eq!(
-			KdfParams::from_meta(&meta(&[("kdf_m", "1024"), ("kdf_t", "1"), ("kdf_p", "1")])),
-			None,
-			"below the floor"
-		);
-		assert_eq!(
-			KdfParams::from_meta(&meta(&[("kdf_m", "4096"), ("kdf_t", "0"), ("kdf_p", "1")])),
-			None,
-			"zero passes"
-		);
-		assert_eq!(
-			KdfParams::from_meta(&meta(&[("kdf_m", "4096"), ("kdf_t", "1"), ("kdf_p", "x")])),
-			None,
-			"not a number"
-		);
-	}
-
-	#[test]
-	fn associated_data_is_canonical_and_excludes_the_ciphertext() {
-		let a = vec![
-			("salt".to_string(), "s".to_string()),
-			("db".to_string(), "ciphertext".to_string()),
-			("format".to_string(), "2".to_string()),
-		];
-		let b = vec![
-			("format".to_string(), "2".to_string()),
-			("salt".to_string(), "s".to_string()),
-		];
-		assert_eq!(envelope_aad(&a), envelope_aad(&b));
-		let mut expected = AAD_PREFIX.to_vec();
-		for part in ["format", "2", "salt", "s"] {
-			expected.extend_from_slice(&(part.len() as u32).to_le_bytes());
-			expected.extend_from_slice(part.as_bytes());
-		}
-		assert_eq!(envelope_aad(&a), expected);
-		assert_ne!(
-			envelope_aad(&[("salt".to_string(), "t".to_string())]),
-			envelope_aad(&[("salt".to_string(), "s".to_string())])
-		);
-	}
-
-	#[test]
-	fn the_newer_revision_is_tried_first_and_older_copies_are_refused() {
-		let mut local = Envelope::decode(&db_to_vec(&fixture_database(), true)).unwrap();
-		let mut remote = Envelope::decode(&db_to_vec(&fixture_database(), true)).unwrap();
-		local.modified = 10;
-		remote.modified = 20;
+	fn the_rollback_message_names_the_way_out() {
+		let err = check_revision(Some(2), Some(5), "main").unwrap_err();
 		assert!(
-			!prefer_local(&local, &remote),
-			"later timestamp wins without revisions"
+			err.starts_with("This copy is revision 2, but revision 5 was already opened here.")
 		);
-		local.revision = Some(3);
-		remote.revision = Some(2);
-		assert!(prefer_local(&local, &remote), "revision outranks timestamp");
-		remote.revision = Some(3);
-		assert!(
-			!prefer_local(&local, &remote),
-			"equal revisions fall back to timestamp"
-		);
-		local.revision = None;
-		assert!(
-			!prefer_local(&local, &remote),
-			"a legacy copy is compared by timestamp"
-		);
-		assert!(
-			check_revision(Some(2), Some(5), "x")
-				.unwrap_err()
-				.contains("revision 2")
-		);
-		assert!(check_revision(Some(5), Some(5), "x").is_ok());
-		assert!(check_revision(Some(6), Some(5), "x").is_ok());
-		assert!(
-			check_revision(None, Some(5), "x")
-				.unwrap_err()
-				.contains("revision 0"),
-			"a legacy copy after a trusted revision is a rollback"
-		);
-		assert!(check_revision(Some(1), None, "x").is_ok());
-		assert!(check_revision(None, None, "x").is_ok());
-	}
-	#[test]
-	fn existing_compression_and_cipher_format_are_preserved() {
-		use chacha20poly1305::{
-			XChaCha20Poly1305,
-			aead::{Aead, KeyInit},
-		};
-		let plaintext = b"synthetic vault record\n".repeat(10000);
-		let mut old_encoder = lz4::EncoderBuilder::new()
-			.level(9)
-			.build(Vec::new())
-			.unwrap();
-		old_encoder.write_all(&plaintext).unwrap();
-		let original_compressed = old_encoder.finish().0;
-		let compressed = compress(&plaintext);
-		assert_eq!(&*compressed, &original_compressed);
-		let key = SecretMemory::new_pages(1).unwrap();
-		key.write(0, &[42; 32]).unwrap();
-		let nonce = [7; NONCE_SIZE];
-		let cipher = XChaCha20Poly1305::new_from_slice(&[42; 32]).unwrap();
-		let original_encrypted = cipher
-			.encrypt((&nonce).into(), &original_compressed[..])
-			.unwrap();
-		assert_eq!(encrypt(&compressed, &key, nonce, &[]), original_encrypted);
-		let decoded = decompress(decrypt(original_encrypted.clone(), &key, nonce, &[]).unwrap());
-		assert_eq!(&*decoded, &plaintext);
-		let mut damaged = original_encrypted;
-		damaged[0] ^= 1;
-		assert!(decrypt(damaged, &key, nonce, &[]).is_none());
+		assert!(err.contains("~/.config/keptino/main.revision"));
+		assert!(check_revision(Some(5), Some(5), "main").is_ok());
 	}
 }

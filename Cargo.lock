@@ -103,6 +103,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -914,17 +915,12 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 name = "droid"
 version = "0.2.0"
 dependencies = [
- "argon2",
  "base64ct",
- "blake3",
- "chacha20poly1305",
  "getrandom 0.4.3",
  "hex",
  "jni 0.21.1",
- "keptino-erasure",
+ "keptino-core",
  "libc",
- "lz4",
- "sha3",
  "zeroize",
 ]
 
@@ -2053,7 +2049,6 @@ name = "keptino"
 version = "0.2.1"
 dependencies = [
  "arboard",
- "argon2",
  "aws-credential-types",
  "aws-sigv4",
  "base64ct",
@@ -2063,18 +2058,31 @@ dependencies = [
  "hex",
  "iced",
  "jiff",
- "keptino-erasure",
+ "keptino-core",
  "landlock",
  "libc",
- "lz4",
  "percent-encoding",
  "quick-xml",
  "reqwest",
  "serde",
  "serde_json",
  "sha1",
- "sha3",
  "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "keptino-core"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64ct",
+ "blake3",
+ "chacha20poly1305",
+ "hex",
+ "keptino-erasure",
+ "lz4",
+ "sha3",
  "zeroize",
 ]
 

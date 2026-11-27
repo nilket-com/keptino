@@ -65,6 +65,8 @@ val buildNative = tasks.register<Exec>("buildNative") {
         rootProject.file("../Cargo.lock"),
         fileTree(rootProject.file("../common/erasure/src")),
         rootProject.file("../common/erasure/Cargo.toml"),
+        fileTree(rootProject.file("../common/core/src")),
+        rootProject.file("../common/core/Cargo.toml"),
     )
     outputs.dir(file("src/main/jniLibs"))
 }

@@ -3,7 +3,6 @@
 //! through a handle, so a stale one is an error and not a dangling pointer.
 
 use crate::{
-	crypto::{self, PEPPER_SIZE},
 	error::{Error, Result},
 	security,
 	vault::Vault,
@@ -13,6 +12,7 @@ use jni::{
 	objects::{JByteArray, JObject, JString},
 	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
+use keptino_core::crypto::PEPPER_SIZE;
 use std::{
 	collections::HashMap,
 	ffi::c_void,
@@ -166,7 +166,7 @@ pub extern "system" fn Java_com_keptino_app_Core_derivePepper<'local>(
 ) -> jbyteArray {
 	guard(&mut env, std::ptr::null_mut(), |env| {
 		let seed = bytes(env, &seed)?;
-		let pepper = crypto::derive_pepper(&seed, mem_kib(mem)?)?;
+		let pepper = security::derive_pepper(&seed, mem_kib(mem)?)?;
 		byte_array(env, &*pepper)
 	})
 }

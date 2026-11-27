@@ -10,6 +10,10 @@
 //! and the derivation arena is excluded from dumps.
 
 use crate::error::{Error, Result};
+use keptino_core::{
+	crypto::{self, Block, PEPPER_SIZE, SALT_SIZE},
+	format::KdfParams,
+};
 use libc::{
 	_SC_PAGESIZE, MADV_DONTDUMP, MADV_DONTFORK, MADV_WIPEONFORK, MAP_ANONYMOUS, MAP_FAILED,
 	MAP_PRIVATE, PR_SET_DUMPABLE, PROT_READ, PROT_WRITE, RLIMIT_CORE, RLIMIT_MEMLOCK, c_void,
@@ -279,9 +283,70 @@ impl DerefMut for LockedKey {
 	}
 }
 
+/// Allocate the core's Argon2 arena and exclude its pages from process dumps.
+fn derivation_arena(mem_kib: u32) -> Result<Vec<Block>> {
+	#[cfg(target_os = "android")]
+	if let Ok(info) = std::fs::read_to_string("/proc/meminfo")
+		&& let Some(available) = info.lines().find_map(|line| {
+			line.strip_prefix("MemAvailable:")?
+				.split_whitespace()
+				.next()?
+				.parse::<u64>()
+				.ok()
+		})
+		&& u64::from(mem_kib) > available
+	{
+		return Err(Error::Kdf(format!(
+			"requires {} MiB of available memory",
+			mem_kib / 1024
+		)));
+	}
+	let blocks = crypto::arena(KdfParams::memory_only(mem_kib))?;
+	exclude_from_dumps(
+		blocks.as_ptr().cast(),
+		std::mem::size_of_val(blocks.as_slice()),
+	);
+	Ok(blocks)
+}
+
+pub fn derive_pepper(seed: &[u8], mem_kib: u32) -> Result<LockedKey> {
+	if seed.is_empty() {
+		return Err(Error::Invalid("empty pepper seed"));
+	}
+	let mut key = LockedKey::new()?;
+	let mut blocks = derivation_arena(mem_kib)?;
+	crypto::derive_pepper_in(seed, mem_kib, &mut blocks, &mut key)?;
+	Ok(key)
+}
+
+pub(crate) fn derive_master_key(
+	password: &[u8],
+	pepper: &[u8; PEPPER_SIZE],
+	salt: &[u8; SALT_SIZE],
+	cost: KdfParams,
+) -> Result<LockedKey> {
+	let mut key = LockedKey::new()?;
+	let mut blocks = derivation_arena(cost.m_cost)?;
+	crypto::derive_master_key_in(password, pepper, salt, cost, &mut blocks, &mut key)?;
+	Ok(key)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn derives_the_fixture_pepper_in_a_key_page() {
+		let pepper = derive_pepper(b"correct horse", KdfParams::DEBUG.m_cost).unwrap();
+		assert_eq!(
+			hex::encode(pepper.as_slice()),
+			include_str!("../tests/fixtures/pepper_m12.hex").trim()
+		);
+		assert!(matches!(
+			derive_pepper(b"", KdfParams::RELEASE.m_cost),
+			Err(Error::Invalid("empty pepper seed"))
+		));
+	}
 
 	#[test]
 	fn preflight_passes_on_an_untraced_host_and_then_maps_stay_readable() {

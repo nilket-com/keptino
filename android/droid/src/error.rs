@@ -34,3 +34,24 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<keptino_core::format::FormatError> for Error {
+	fn from(error: keptino_core::format::FormatError) -> Self {
+		use keptino_core::format::FormatError;
+		match error {
+			FormatError::Damaged => Error::Corrupt("damaged vault"),
+			FormatError::NewerFormat(_) => {
+				Error::Invalid("unsupported vault format; update Keptino")
+			}
+		}
+	}
+}
+
+impl From<keptino_core::crypto::KdfError> for Error {
+	fn from(error: keptino_core::crypto::KdfError) -> Self {
+		match error {
+			keptino_core::crypto::KdfError::EmptySeed => Error::Invalid("empty pepper seed"),
+			other => Error::Kdf(other.to_string()),
+		}
+	}
+}

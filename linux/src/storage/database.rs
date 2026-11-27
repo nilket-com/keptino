@@ -1,8 +1,9 @@
 use crate::storage::{
-	atlas::{EntryAtlas, FieldAtlas},
+	atlas::EntryAtlas,
 	entry::{MetaEntry, PasswordEntry},
 	secret::SecretMemory,
 };
+use keptino_core::format::FieldAtlas;
 use std::{
 	collections::BTreeMap,
 	mem,
@@ -86,24 +87,6 @@ impl Database {
 	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
 		self.idb.read().unwrap().serialize()
 	}
-	pub fn meta_only(&self) -> Self {
-		let mut meta = EntryAtlas::default();
-		let mut idx = 1u32;
-		let idb = self.idb.read().unwrap();
-		for id in idb.entries.entries.keys() {
-			let (entry_tag, entry_data) = idb.entries.get(*id).unwrap();
-			let entry_tag = unsafe { mem::transmute::<u8, EntryTag>(entry_tag) };
-			if let EntryTag::Meta = entry_tag {
-				meta.set(idx, entry_tag as u8, &entry_data);
-				idx += 1;
-			}
-		}
-		Self {
-			idb: Arc::new(RwLock::new(InteriorDatabase::from_entry_atlas(meta))),
-			master_key: Arc::clone(&self.master_key),
-		}
-	}
-	/// Every meta entry as (name, value), in storage order.
 	pub fn meta_pairs(&self) -> Vec<(String, String)> {
 		self.idb.read().unwrap().meta_pairs()
 	}
@@ -158,7 +141,9 @@ impl InteriorDatabase {
 		if let Some(id) = self.index_by_name.get(&index_by_name_key)
 			&& let Some(entry) = self.entries.get(*id)
 		{
-			return Some(PasswordEntry::from(FieldAtlas::deserialize(&entry.1)));
+			return Some(PasswordEntry::from(
+				FieldAtlas::deserialize(&entry.1).expect("Invalid field record"),
+			));
 		}
 		None
 	}
@@ -182,7 +167,9 @@ impl InteriorDatabase {
 			let mut entries = vec![];
 			for id in ids {
 				let entry = self.entries.get(*id).unwrap();
-				entries.push(PasswordEntry::from(FieldAtlas::deserialize(&entry.1)));
+				entries.push(PasswordEntry::from(
+					FieldAtlas::deserialize(&entry.1).expect("Invalid field record"),
+				));
 			}
 			return Some(entries);
 		}
@@ -199,7 +186,9 @@ impl InteriorDatabase {
 		let (entry_tag, entry_data) = self.entries.get(*previous_id)?;
 		let entry_tag = unsafe { mem::transmute::<u8, EntryTag>(entry_tag) };
 		match entry_tag {
-			EntryTag::Password => Some(PasswordEntry::from(FieldAtlas::deserialize(&entry_data))),
+			EntryTag::Password => Some(PasswordEntry::from(
+				FieldAtlas::deserialize(&entry_data).expect("Invalid field record"),
+			)),
 			_ => None,
 		}
 	}
@@ -220,7 +209,9 @@ impl InteriorDatabase {
 		let (entry_tag, entry_data) = self.entries.get(*next_id)?;
 		let entry_tag = unsafe { mem::transmute::<u8, EntryTag>(entry_tag) };
 		match entry_tag {
-			EntryTag::Password => Some(PasswordEntry::from(FieldAtlas::deserialize(&entry_data))),
+			EntryTag::Password => Some(PasswordEntry::from(
+				FieldAtlas::deserialize(&entry_data).expect("Invalid field record"),
+			)),
 			_ => None,
 		}
 	}
@@ -244,7 +235,9 @@ impl InteriorDatabase {
 		if let Some(id) = self.index_by_name.get(&index_by_name_key)
 			&& let Some(entry) = self.entries.get(*id)
 		{
-			return Some(MetaEntry::from(FieldAtlas::deserialize(&entry.1)));
+			return Some(MetaEntry::from(
+				FieldAtlas::deserialize(&entry.1).expect("Invalid field record"),
+			));
 		}
 		None
 	}
@@ -264,7 +257,8 @@ impl InteriorDatabase {
 				if tag != EntryTag::Meta as u8 {
 					return None;
 				}
-				let meta = MetaEntry::from(FieldAtlas::deserialize(&data));
+				let meta =
+					MetaEntry::from(FieldAtlas::deserialize(&data).expect("Invalid field record"));
 				Some((meta.get_name().to_owned(), meta.get_value().to_owned()))
 			})
 			.collect()
@@ -280,7 +274,7 @@ impl InteriorDatabase {
 		let mut db = InteriorDatabase::default();
 		for id in entry_atlas.entries.keys() {
 			let (entry_tag, entry_data) = entry_atlas.get(*id).unwrap();
-			let entry = FieldAtlas::deserialize(&entry_data);
+			let entry = FieldAtlas::deserialize(&entry_data).expect("Invalid field record");
 			let entry_tag = unsafe { mem::transmute::<u8, EntryTag>(entry_tag) };
 			match entry_tag {
 				EntryTag::Meta => {

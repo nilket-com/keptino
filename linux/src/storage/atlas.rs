@@ -1,61 +1,16 @@
+//! Entry records sealed in memory. Each record is encrypted under a key that
+//! lives in secret memory, with its id and tag as authenticated context, so
+//! an idle vault holds no entry plaintext at all. The TLV field layer comes
+//! from `keptino_core::format`.
+
 use super::{
 	protected::{ProtectedBytes, fresh_key},
 	secret::SecretMemory,
 };
+use keptino_core::format::deserialize_records;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
-
-pub(super) fn next_tlv<'a>(bytes: &mut &'a [u8]) -> Option<(u8, &'a [u8])> {
-	let (header, rest) = bytes.split_at_checked(5)?;
-	let length = u32::from_le_bytes(header[1..].try_into().ok()?) as usize;
-	let (value, remaining) = rest.split_at_checked(length)?;
-	*bytes = remaining;
-	Some((header[0], value))
-}
-
-#[derive(Clone, Default)]
-pub struct FieldAtlas {
-	fields: BTreeMap<u8, Zeroizing<Vec<u8>>>,
-}
-
-impl FieldAtlas {
-	pub fn deserialize(data: &[u8]) -> Self {
-		Self::try_deserialize(data).expect("Invalid field record")
-	}
-	pub(super) fn try_deserialize(mut data: &[u8]) -> Option<Self> {
-		let mut fields = BTreeMap::new();
-		while !data.is_empty() {
-			let (tag, value) = next_tlv(&mut data)?;
-			fields.insert(tag, value.to_vec().into());
-		}
-		Some(Self { fields })
-	}
-	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
-		let mut buffer = Vec::with_capacity(self.fields.values().map(|v| 5 + v.len()).sum());
-		for (&field_type, value) in &self.fields {
-			buffer.push(field_type);
-			let len = value.len() as u32;
-			buffer.extend_from_slice(&len.to_le_bytes());
-			buffer.extend_from_slice(value.as_ref());
-		}
-		Zeroizing::new(buffer)
-	}
-	pub fn get(&self, field_type: u8) -> Option<&[u8]> {
-		self.fields.get(&field_type).map(|v| v.as_ref())
-	}
-	pub fn get_str(&self, field_type: u8) -> Option<&str> {
-		self.get(field_type)
-			.and_then(|bytes| std::str::from_utf8(bytes).ok())
-	}
-	pub fn take(&mut self, field_type: u8) -> Option<Zeroizing<Vec<u8>>> {
-		self.fields.remove(&field_type)
-	}
-
-	pub fn set(&mut self, field_type: u8, value: Vec<u8>) {
-		self.fields.insert(field_type, value.into());
-	}
-}
 
 pub struct EntryAtlas {
 	pub entries: BTreeMap<u32, (u8, ProtectedBytes)>,
@@ -79,18 +34,12 @@ impl EntryAtlas {
 		context
 	}
 
+	/// Seals every record of an authenticated database; ids are positions.
 	pub fn deserialize(data: &[u8]) -> Self {
 		let mut atlas = Self::default();
-		let mut cursor = 0;
-		let mut id = 0;
-		while cursor < data.len() {
-			let tag = data[cursor];
-			cursor += 1;
-			let len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
-			cursor += 4;
-			atlas.set(id, tag, &data[cursor..cursor + len]);
-			cursor += len;
-			id += 1;
+		let records = deserialize_records(data).expect("Invalid entry record");
+		for (id, (tag, value)) in records.into_iter().enumerate() {
+			atlas.set(id as u32, tag, value);
 		}
 		atlas
 	}

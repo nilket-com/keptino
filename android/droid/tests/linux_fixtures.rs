@@ -1,7 +1,8 @@
 //! Vaults written by the Linux application's own code (regenerate with
 //! `android/interop/run.sh fixtures`) must open, edit and reopen here.
 
-use droid::{Commit, Error, Source, Vault, crypto, field};
+use droid::{Commit, Error, Source, Vault, field, security};
+use keptino_core::format::KdfParams;
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 const PEPPER_SEED: &[u8] = b"digisafe test pepper seed";
@@ -71,19 +72,19 @@ fn opens_and_edits_a_linux_debug_vault() {
 	check(
 		include_bytes!("fixtures/linux-debug.keptino"),
 		"vaultdebug",
-		crypto::DEBUG_MEM_KIB,
+		KdfParams::DEBUG.m_cost,
 		0,
 	);
 	check(
 		include_bytes!("fixtures/linux-debug-v2.keptino"),
 		"vaultdebug-v2",
-		crypto::RELEASE_MEM_KIB,
+		KdfParams::RELEASE.m_cost,
 		1,
 	);
 	check(
 		include_bytes!("fixtures/linux-debug-unmarked.keptino"),
 		"vaultdebug-unmarked",
-		crypto::RELEASE_MEM_KIB,
+		KdfParams::RELEASE.m_cost,
 		1,
 	);
 }
@@ -95,19 +96,19 @@ fn opens_and_edits_a_linux_release_vault() {
 	check(
 		include_bytes!("fixtures/linux-release.keptino"),
 		"vaultrelease",
-		crypto::RELEASE_MEM_KIB,
+		KdfParams::RELEASE.m_cost,
 		0,
 	);
 	check(
 		include_bytes!("fixtures/linux-release-v2.keptino"),
 		"vaultrelease-v2",
-		crypto::DEBUG_MEM_KIB,
+		KdfParams::DEBUG.m_cost,
 		1,
 	);
 	check(
 		include_bytes!("fixtures/linux-release-unmarked.keptino"),
 		"vaultrelease-unmarked",
-		crypto::DEBUG_MEM_KIB,
+		KdfParams::DEBUG.m_cost,
 		1,
 	);
 }
@@ -115,6 +116,6 @@ fn opens_and_edits_a_linux_release_vault() {
 #[test]
 #[ignore]
 fn derives_the_pepper_of_linux_setup() {
-	let derived = crypto::derive_pepper(PEPPER_SEED, crypto::RELEASE_MEM_KIB).unwrap();
+	let derived = security::derive_pepper(PEPPER_SEED, KdfParams::RELEASE.m_cost).unwrap();
 	assert_eq!(*derived, pepper());
 }

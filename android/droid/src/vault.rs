@@ -2,36 +2,20 @@
 //! semantics of the Linux application's password screen.
 
 use crate::{
-	atlas::{FieldAtlas, deserialize_entries, serialize_entries},
-	crypto::{self, KdfCost, Key, NONCE_SIZE, PEPPER_SIZE, SALT_SIZE},
-	erasure,
 	error::{Error, Result},
+	security::{LockedKey, derive_master_key},
 };
 use base64ct::{Base64, Encoding};
+use keptino_core::{
+	crypto::{self, NONCE_SIZE, PEPPER_SIZE, SALT_SIZE},
+	format::{
+		self, Envelope, FieldAtlas, KdfParams, TAG_META, TAG_PASSWORD, deserialize_entries, field,
+		meta_field, serialize_entries,
+	},
+	policy,
+};
 use std::{collections::BTreeMap, ops::Bound, time::SystemTime};
 use zeroize::{Zeroize, Zeroizing};
-
-/// Selects the marked AAD writer; off since both platforms read the unmarked
-/// mirrored form. Both writers advance the revision and mirror every
-/// metadata entry.
-const WRITE_FORMAT_2: bool = false;
-const TAG_META: u8 = 0;
-const TAG_PASSWORD: u8 = 1;
-const META_NAME: u8 = 1;
-const META_VALUE: u8 = 2;
-
-/// Field ids of a password entry, as stored on disk.
-pub mod field {
-	pub const NAME: u8 = 1;
-	pub const USERNAME: u8 = 2;
-	pub const PASSWORD: u8 = 3;
-	pub const PIN: u8 = 4;
-	pub const NOTE: u8 = 5;
-	pub const URL: u8 = 6;
-	pub const TAGS: u8 = 7;
-	pub const CREATED_TS: u8 = 8;
-	pub const MODIFIED_TS: u8 = 9;
-}
 
 /// Where an opened database came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,10 +72,11 @@ impl Store {
 			match tag {
 				TAG_META => {
 					let name = entry
-						.get_str(META_NAME)
+						.get_str(meta_field::NAME)
 						.ok_or(Error::Corrupt("unnamed meta entry"))?
 						.to_owned();
-					if store.metas.contains_key(&name) || entry.get_str(META_VALUE).is_none() {
+					if store.metas.contains_key(&name) || entry.get_str(meta_field::VALUE).is_none()
+					{
 						return Err(Error::Corrupt("invalid or duplicate inner metadata"));
 					}
 					store.set_raw(TAG_META, &name, &entry);
@@ -133,8 +118,8 @@ impl Store {
 
 	fn set_meta(&mut self, name: &str, value: &str) {
 		let mut entry = FieldAtlas::default();
-		entry.set(META_NAME, name.as_bytes());
-		entry.set(META_VALUE, value.as_bytes());
+		entry.set(meta_field::NAME, name.as_bytes());
+		entry.set(meta_field::VALUE, value.as_bytes());
 		self.set_raw(TAG_META, name, &entry);
 	}
 
@@ -147,27 +132,7 @@ impl Store {
 	fn meta(&self, name: &str) -> Option<String> {
 		let (_, data) = self.entries.get(self.metas.get(name)?)?;
 		let entry = FieldAtlas::deserialize(data).ok()?;
-		entry.get_str(META_VALUE).map(str::to_owned)
-	}
-
-	// This length-prefixed representation is injective and supplies the historical AAD bytes.
-	fn canonical_metadata(&self) -> Result<Vec<u8>> {
-		let mut aad = b"keptino-envelope-v2".to_vec();
-		// metas is a BTreeMap with UTF-8 byte ordering.
-		for name in self.metas.keys() {
-			let value = self.required_meta(name, "metadata value")?;
-			for part in [name.as_bytes(), value.as_bytes()] {
-				let len =
-					u32::try_from(part.len()).map_err(|_| Error::Corrupt("metadata length"))?;
-				aad.extend_from_slice(&len.to_le_bytes());
-				aad.extend_from_slice(part);
-			}
-		}
-		Ok(aad)
-	}
-
-	fn required_meta(&self, name: &str, what: &'static str) -> Result<String> {
-		self.meta(name).ok_or(Error::Corrupt(what))
+		entry.get_str(meta_field::VALUE).map(str::to_owned)
 	}
 
 	fn set_password(&mut self, entry: &FieldAtlas) {
@@ -246,120 +211,19 @@ impl Drop for Store {
 	}
 }
 
-/// The unencrypted outer layer of a vault file.
-struct Envelope {
-	nonce: [u8; NONCE_SIZE],
-	salt: [u8; SALT_SIZE],
-	modified_ts: u64,
-	ciphertext: Vec<u8>,
-	revision: Option<u64>,
-	mirror: Vec<u8>,
-	marked: bool,
-	cost: Option<KdfCost>,
-}
-
 fn nonce_bytes(counter: u128) -> [u8; NONCE_SIZE] {
 	let mut nonce = [0u8; NONCE_SIZE];
 	nonce[..16].copy_from_slice(&counter.to_le_bytes());
 	nonce
 }
 
-impl Envelope {
-	fn parse(file: &[u8]) -> Result<Self> {
-		let mut store = Store::default();
-		for (tag, entry) in deserialize_entries(&erasure::decode(file)?)? {
-			let name = entry
-				.get_str(META_NAME)
-				.ok_or(Error::Corrupt("envelope metadata name"))?;
-			if tag != TAG_META
-				|| store.metas.contains_key(name)
-				|| entry.get_str(META_VALUE).is_none()
-			{
-				return Err(Error::Corrupt("invalid or duplicate envelope metadata"));
-			}
-			store.set_raw(TAG_META, name, &entry);
-		}
-		let marked = match store.meta("format").as_deref() {
-			None | Some("1") => false,
-			Some("2") => true,
-			Some(_) => return Err(Error::Invalid("unsupported vault format; update Keptino")),
-		};
-		let revision = store
-			.meta("revision")
-			.map(|v| v.parse::<u64>().map_err(|_| Error::Corrupt("revision")))
-			.transpose()?;
-		if marked && revision.unwrap_or(0) == 0 {
-			return Err(Error::Corrupt("missing or zero format-2 revision"));
-		}
-		let cost = match (
-			store.meta("kdf_m"),
-			store.meta("kdf_t"),
-			store.meta("kdf_p"),
-		) {
-			(None, None, None) => None,
-			(Some(m), Some(t), Some(p)) => {
-				let read = |field: &str, bounds: std::ops::RangeInclusive<u32>| {
-					field
-						.parse()
-						.ok()
-						.filter(|v| bounds.contains(v))
-						.ok_or(Error::Corrupt("unsupported Argon2 costs"))
-				};
-				Some(KdfCost {
-					memory_kib: read(&m, 4096..=16777216)?,
-					passes: read(&t, 1..=64)?,
-					lanes: read(&p, 1..=16)?,
-				})
-			}
-			_ => return Err(Error::Corrupt("incomplete Argon2 costs")),
-		};
-		let counter = store
-			.required_meta("nonce", "missing nonce")?
-			.parse::<u128>()
-			.map_err(|_| Error::Corrupt("nonce"))?;
-		let salt = Base64::decode_vec(&store.required_meta("salt", "missing salt")?)
-			.ok()
-			.and_then(|salt| <[u8; SALT_SIZE]>::try_from(salt).ok())
-			.ok_or(Error::Corrupt("salt"))?;
-		let modified_ts = store
-			.required_meta("modified_ts", "missing modification time")?
-			.parse::<u64>()
-			.map_err(|_| Error::Corrupt("modification time"))?;
-		let ciphertext = Base64::decode_vec(&store.required_meta("db", "missing database")?)
-			.map_err(|_| Error::Corrupt("database encoding"))?;
-		store.remove_meta("db");
-		Ok(Self {
-			nonce: nonce_bytes(counter),
-			salt,
-			modified_ts,
-			ciphertext,
-			revision,
-			cost,
-			marked,
-			mirror: store.canonical_metadata()?,
-		})
-	}
-	fn unlock(self, key: &Key) -> Result<Store> {
-		let aad: &[u8] = if self.marked { &self.mirror } else { &[] };
-		let compressed = crypto::decrypt_with_aad(self.ciphertext, key, &self.nonce, aad)?;
-		let store = Store::deserialize(&crypto::decompress(&compressed)?)?;
-		for name in ["db_name", "nonce", "salt", "modified_ts"] {
-			store.required_meta(name, "incomplete database")?;
-		}
-		if store.canonical_metadata()? != self.mirror {
-			return Err(Error::Corrupt("inner and outer metadata differ"));
-		}
-		Ok(store)
-	}
-}
-
 pub struct Vault {
-	key: Key,
+	key: LockedKey,
 	store: Store,
 	working: FieldAtlas,
 	source: Source,
 	pub uploads_paused: bool,
-	cost: KdfCost,
+	cost: KdfParams,
 }
 
 impl Vault {
@@ -373,8 +237,11 @@ impl Vault {
 		remote: Option<&[u8]>,
 		mem_kib: u32,
 	) -> Result<Self> {
-		let local = local.map(Envelope::parse);
-		let remote = remote.map(Envelope::parse);
+		let parse = |file: &[u8]| {
+			Envelope::parse(file, KdfParams::memory_only(mem_kib)).map_err(Error::from)
+		};
+		let local = local.map(parse);
+		let remote = remote.map(parse);
 		let mut uploads_paused = false;
 		let (first, second) = match (local, remote) {
 			(None, None) => return Self::create(db_name, password, pepper, mem_kib),
@@ -384,10 +251,7 @@ impl Vault {
 						"a different vault uses this name in the bucket",
 					));
 				}
-				let remote_first = match (local.revision, remote.revision) {
-					(Some(l), Some(r)) if l != r => r > l,
-					_ => remote.modified_ts > local.modified_ts,
-				};
+				let remote_first = !policy::prefer_local(&local, &remote);
 				// A newer legacy timestamp can win selection during rollout.
 				// Keep its local edits, but never overwrite a versioned remote.
 				uploads_paused = !remote_first && remote.revision > local.revision;
@@ -414,16 +278,22 @@ impl Vault {
 		let (candidate, source) = first;
 		let mut cached = None;
 		let mut unlock = |envelope: Envelope| {
-			let cost = envelope.cost.unwrap_or(KdfCost::legacy(mem_kib));
+			let cost = envelope.kdf;
 			if cached
 				.as_ref()
 				.is_none_or(|(previous, _)| *previous != cost)
 			{
-				let key =
-					crypto::derive_master_key_with_cost(password, pepper, &envelope.salt, cost)?;
+				let key = derive_master_key(password, pepper, &envelope.salt, cost)?;
 				cached = Some((cost, key));
 			}
-			envelope.unlock(&cached.as_ref().expect("key derived above").1)
+			let database = envelope
+				.open(&cached.as_ref().expect("key derived above").1)
+				.ok_or(Error::Decryption)?;
+			let store = Store::deserialize(&database)?;
+			if !store.metas.contains_key("db_name") {
+				return Err(Error::Corrupt("incomplete database"));
+			}
+			Ok(store)
 		};
 		let (store, source) = match unlock(candidate) {
 			Ok(store) => (store, source),
@@ -452,7 +322,7 @@ impl Vault {
 	) -> Result<Self> {
 		let mut salt = [0u8; SALT_SIZE];
 		getrandom::fill(&mut salt).map_err(|_| Error::Kdf("no system randomness".into()))?;
-		let key = crypto::derive_master_key(password, pepper, &salt, mem_kib)?;
+		let key = derive_master_key(password, pepper, &salt, KdfParams::memory_only(mem_kib))?;
 		let created_ts = now().to_string();
 		let mut store = Store::default();
 		store.set_meta("db_name", db_name);
@@ -466,7 +336,7 @@ impl Vault {
 			working: blank_entry(),
 			source: Source::New,
 			uploads_paused: false,
-			cost: KdfCost::legacy(mem_kib),
+			cost: KdfParams::memory_only(mem_kib),
 		})
 	}
 
@@ -583,26 +453,17 @@ impl Vault {
 	}
 
 	pub fn save(&mut self) -> Result<Vec<u8>> {
-		self.save_format(WRITE_FORMAT_2)
-	}
-
-	fn save_format(&mut self, marked: bool) -> Result<Vec<u8>> {
 		let next = self
 			.revision()
 			.checked_add(1)
 			.ok_or(Error::Invalid("revision exhausted"))?;
 		self.store.set_meta("revision", &next.to_string());
 		if self.store.meta("kdf_m").is_none() {
-			self.store
-				.set_meta("kdf_m", &self.cost.memory_kib.to_string());
-			self.store.set_meta("kdf_t", &self.cost.passes.to_string());
-			self.store.set_meta("kdf_p", &self.cost.lanes.to_string());
+			for (name, value) in self.cost.meta_pairs() {
+				self.store.set_meta(&name, &value);
+			}
 		}
-		if marked {
-			self.store.set_meta("format", "2");
-		} else {
-			self.store.remove_meta("format");
-		}
+		self.store.remove_meta("format");
 		// Never go backwards: Linux keeps its local copy unless the remote
 		// one is strictly newer, so a slow clock here must not hide a save.
 		let modified_ts = now().max(self.modified_ts().saturating_add(1));
@@ -614,31 +475,23 @@ impl Vault {
 			.map_err(|_| Error::Kdf("no system randomness".into()))?;
 		let counter = u128::from_le_bytes(random).max(1);
 		self.store.set_meta("nonce", &counter.to_string());
-		let compressed = crypto::compress(&self.store.serialize());
-		let aad = if marked {
-			self.store.canonical_metadata()?
-		} else {
-			Vec::new()
-		};
-		let ciphertext =
-			crypto::encrypt_with_aad(&compressed, &self.key, &nonce_bytes(counter), &aad);
-		let mut envelope = Store::default();
-		for (tag, data) in self.store.entries.values() {
-			if *tag == TAG_META {
-				let entry = FieldAtlas::deserialize(data)?;
-				let name = entry.get_str(META_NAME).unwrap_or_default().to_owned();
-				envelope.set_raw(TAG_META, &name, &entry);
-			}
-		}
-		envelope.set_meta("db", &Base64::encode_string(&ciphertext));
-		Ok(erasure::encode(&envelope.serialize()))
+		let database = self.store.serialize();
+		let meta = format::meta_pairs(&database)?;
+		let ciphertext = crypto::encrypt(
+			&crypto::compress(&database),
+			&self.key,
+			&nonce_bytes(counter),
+			&[],
+		);
+		Ok(format::encode_envelope(&meta, &ciphertext))
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::crypto::DEBUG_MEM_KIB;
+	use keptino_core::format::{FormatError, decode_shards, encode_shards};
+	const DEBUG_MEM_KIB: u32 = KdfParams::DEBUG.m_cost;
 
 	const PEPPER: [u8; PEPPER_SIZE] = [9; PEPPER_SIZE];
 
@@ -660,39 +513,56 @@ mod tests {
 		String::from_utf8(vault.get_field(id).unwrap().to_vec()).unwrap()
 	}
 
-	#[test]
-	fn reads_both_formats_preserves_cost_and_refuses_unknown_versions() {
-		let mut vault = open(None, None).unwrap();
-		let first = vault.save_format(true).unwrap();
-		let mut opened = Vault::open(
-			"alias",
-			b"master",
-			&PEPPER,
-			Some(&first),
-			None,
-			DEBUG_MEM_KIB * 2,
+	fn fixture_pepper() -> [u8; PEPPER_SIZE] {
+		let mut pepper = [0u8; PEPPER_SIZE];
+		hex::decode_to_slice(
+			"3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1",
+			&mut pepper,
 		)
 		.unwrap();
+		pepper
+	}
+
+	#[test]
+	fn reads_both_formats_preserves_cost_and_refuses_unknown_versions() {
+		let first = include_bytes!("../tests/fixtures/linux-debug-v2.keptino").as_slice();
+		let pepper = fixture_pepper();
+		let load = |local, remote| {
+			Vault::open(
+				"alias",
+				b"correct horse battery staple",
+				&pepper,
+				local,
+				remote,
+				DEBUG_MEM_KIB * 2,
+			)
+		};
+		let mut opened = load(Some(first), None).unwrap();
 		assert_eq!(opened.revision(), 1);
-		let next = opened.save_format(false).unwrap();
-		assert!(!Envelope::parse(&next).unwrap().marked);
-		let preferred = open(Some(&next), Some(&first)).unwrap();
+		let next = opened.save().unwrap();
+		assert!(
+			Envelope::parse(&next, KdfParams::DEBUG)
+				.unwrap()
+				.aad
+				.is_empty()
+		);
+		let preferred = load(Some(&next), Some(first)).unwrap();
 		assert_eq!(
 			(preferred.source(), preferred.revision()),
 			(Source::Local, 2)
 		);
 		assert!(!preferred.uploads_paused);
 
-		let mut envelope = Store::deserialize(&erasure::decode(&next).unwrap()).unwrap();
+		let mut envelope = Store::deserialize(&decode_shards(&next).unwrap()).unwrap();
 		envelope.set_meta("revision", "3");
-		let damaged = erasure::encode(&envelope.serialize());
-		let recovered = open(Some(&first), Some(&damaged)).unwrap();
+		let damaged = encode_shards(&envelope.serialize());
+		let recovered = load(Some(first), Some(&damaged)).unwrap();
 		assert_eq!(recovered.source(), Source::Local);
 		assert!(recovered.uploads_paused);
-		assert!(open(Some(&damaged), None).is_err());
+		assert!(load(Some(&damaged), None).is_err());
 		envelope.set_meta("format", "3");
 		assert!(matches!(
-			open(Some(&first), Some(&erasure::encode(&envelope.serialize()))),
+			load(Some(first), Some(&encode_shards(&envelope.serialize()))),
 			Err(Error::Invalid(_))
 		));
 	}
@@ -700,12 +570,7 @@ mod tests {
 	#[test]
 	fn legacy_files_require_an_exact_mirror_before_accepting_an_import() {
 		let legacy = include_bytes!("../tests/fixtures/linux-debug.keptino");
-		let mut pepper = [0u8; PEPPER_SIZE];
-		hex::decode_to_slice(
-			"3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1",
-			&mut pepper,
-		)
-		.unwrap();
+		let pepper = fixture_pepper();
 		let load = |file: &[u8]| {
 			Vault::open(
 				"imported-name",
@@ -717,7 +582,7 @@ mod tests {
 			)
 		};
 		assert_eq!(load(legacy).unwrap().revision(), 0);
-		let original = erasure::decode(legacy).unwrap();
+		let original = decode_shards(legacy).unwrap();
 		for (name, value) in [
 			("db_name", Some("imported-name")),
 			("note", Some("extra")),
@@ -729,8 +594,8 @@ mod tests {
 				None => outer.remove_meta(name),
 			}
 			assert!(matches!(
-				load(&erasure::encode(&outer.serialize())),
-				Err(Error::Corrupt("inner and outer metadata differ"))
+				load(&encode_shards(&outer.serialize())),
+				Err(Error::Decryption)
 			));
 		}
 		let mut duplicate = Store::default();
@@ -738,8 +603,8 @@ mod tests {
 		let mut repeated = original;
 		repeated.extend_from_slice(&duplicate.serialize());
 		assert!(matches!(
-			Envelope::parse(&erasure::encode(&repeated)),
-			Err(Error::Corrupt(_))
+			Envelope::parse(&encode_shards(&repeated), KdfParams::DEBUG),
+			Err(FormatError::Damaged)
 		));
 	}
 
@@ -750,46 +615,34 @@ mod tests {
 			.unwrap()
 			.try_into()
 			.unwrap();
-		vault.cost = KdfCost {
-			memory_kib: DEBUG_MEM_KIB,
-			passes: 2,
-			lanes: 2,
+		vault.cost = KdfParams {
+			m_cost: DEBUG_MEM_KIB,
+			t_cost: 2,
+			p_cost: 2,
 		};
-		vault.key =
-			crypto::derive_master_key_with_cost(b"master", &PEPPER, &salt, vault.cost).unwrap();
-		let file = vault.save_format(false).unwrap();
+		vault.key = derive_master_key(b"master", &PEPPER, &salt, vault.cost).unwrap();
+		let file = vault.save().unwrap();
 		let mut reopened = open(Some(&file), None).unwrap();
 		let saved = reopened.save().unwrap();
-		let params = Envelope::parse(&saved).unwrap().cost.unwrap();
+		let params = Envelope::parse(&saved, KdfParams::DEBUG).unwrap().kdf;
 		assert_eq!(
-			(params.memory_kib, params.passes, params.lanes),
+			(params.m_cost, params.t_cost, params.p_cost),
 			(DEBUG_MEM_KIB, 2, 2)
 		);
 
-		let mut header = Store::deserialize(&erasure::decode(&file).unwrap()).unwrap();
+		let mut header = Store::deserialize(&decode_shards(&file).unwrap()).unwrap();
 		header.set_meta("kdf_t", "65");
 		assert!(matches!(
-			Envelope::parse(&erasure::encode(&header.serialize())),
-			Err(Error::Corrupt(_))
+			Envelope::parse(&encode_shards(&header.serialize()), KdfParams::DEBUG),
+			Err(FormatError::Damaged)
 		));
 		let id = header.metas.remove("kdf_p").unwrap();
 		header.entries.remove(&id);
 		header.set_meta("kdf_t", "2");
 		assert!(matches!(
-			Envelope::parse(&erasure::encode(&header.serialize())),
-			Err(Error::Corrupt(_))
+			Envelope::parse(&encode_shards(&header.serialize()), KdfParams::DEBUG),
+			Err(FormatError::Damaged)
 		));
-	}
-
-	#[test]
-	fn canonical_metadata_uses_utf8_byte_lengths() {
-		let mut store = Store::default();
-		store.set_meta("é", "ab");
-		store.set_meta("a", "é");
-		assert_eq!(
-			store.canonical_metadata().unwrap(),
-			b"keptino-envelope-v2\x01\0\0\0a\x02\0\0\0\xc3\xa9\x02\0\0\0\xc3\xa9\x02\0\0\0ab"
-		);
 	}
 
 	#[test]

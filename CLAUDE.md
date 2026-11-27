@@ -1,7 +1,7 @@
 # Working in this repository
 
-Two agents, Claude and Codex, work in this one checkout together with the
-operator. These rules keep that safe.
+Three agents — Claude, Codex, and Gemini — work in this one checkout together
+with the operator. These rules keep that safe.
 
 ## Read first
 - `STYLE.md`: spelling, the one name per concept, plain prose.
@@ -16,11 +16,15 @@ operator. These rules keep that safe.
   what remains open.
 
 ## Ownership and coordination
-- Claude owns `linux/` and `common/`; Codex owns `android/`. `README.md` is
-  edited one section at a time and announced on chatd before editing.
-- Coordinate on chatd (`CHATD_AS=claude|codex`, conversation `digisafe`).
-  Announce file ownership before editing shared files. Stage only your own
-  paths; never commit the other agent's working-tree changes.
+- Claude owns `linux/` and `common/`; Codex owns `android/`; Gemini owns
+  `doc/` and `plans/` hygiene and reviews each implementation step before it
+  is pushed. `README.md` is edited one section at a time and announced on
+  chatd before editing.
+- If two of the three agents agree on a design or division question, treat
+  that quorum as operator approval.
+- Coordinate on chatd (`CHATD_AS=claude|codex|gemini`, conversation
+  `digisafe`). Announce file ownership before editing shared files. Stage
+  only your own paths; never commit another agent's working-tree changes.
 - Commits are signed, one-line, no body, no attribution trailers. Push
   fast-forwards only; the pre-push hook checks `origin/main..HEAD`.
 
