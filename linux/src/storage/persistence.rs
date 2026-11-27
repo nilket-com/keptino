@@ -10,7 +10,7 @@ use crate::{
 };
 use keptino_core::{
 	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
-	format::{Envelope, KdfParams},
+	format::{Envelope, KdfParams, MAX_FILE_BYTES},
 	policy,
 	vault::{Caution, KeyStore, Source, UnlockError, unlock},
 };
@@ -125,11 +125,15 @@ impl OpenedVault {
 		let db = &self.database;
 		let db_name = db.meta("db_name").unwrap_or_default();
 		// Snapshot the encrypted vault before the UI can lock and clear its keys.
-		let bytes = db.encode(WRITE_AAD_FORMAT, KdfParams::BUILD_DEFAULT);
+		let encoded = db.encode(WRITE_AAD_FORMAT, KdfParams::BUILD_DEFAULT);
 		let saved = db.revision();
 		let remote = self.remote.clone();
 		let synced = Arc::clone(&self.synced);
 		async move {
+			let bytes = match encoded {
+				Ok(bytes) => bytes,
+				Err(err) => return format!("Not saved: {err}"),
+			};
 			if to_file(&bytes, &db_name).is_err() {
 				return "Local save failed. Check disk space and file permissions.".into();
 			}
@@ -191,7 +195,7 @@ pub async fn load(
 		return Err("Use a database name without path separators or NUL bytes.".into());
 	}
 	let dir = base_path();
-	let local = match fs::read(db_path(db_name)) {
+	let local = match read_bounded(&db_path(db_name)) {
 		Ok(bytes) => Some(parse_envelope(&bytes, "Local")?),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 		Err(_) => return Err("Cannot read local vault.".into()),
@@ -263,6 +267,18 @@ pub async fn load(
 		remote: provider,
 		synced: Arc::new(Mutex::new(synced)),
 	})
+}
+
+/// Reads a vault file into memory, never more than the file budget plus
+/// one byte, so an oversized or special file cannot fill locked memory
+/// before the parser refuses it.
+fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+	use std::io::Read;
+	let mut bytes = Vec::new();
+	fs::File::open(path)?
+		.take(MAX_FILE_BYTES as u64 + 1)
+		.read_to_end(&mut bytes)?;
+	Ok(bytes)
 }
 
 /// The TPM-sealed pepper, released by systemd-creds for this user. A missing
@@ -427,7 +443,7 @@ mod tests {
 		entry.set_name("bank");
 		entry.set_password("hunter2");
 		db.set_password_entry(entry);
-		let encoded = db.encode(false, KdfParams::BUILD_DEFAULT);
+		let encoded = db.encode(false, KdfParams::BUILD_DEFAULT).unwrap();
 		let envelope = Envelope::parse(&encoded, KdfParams::BUILD_DEFAULT).unwrap();
 		assert_eq!(envelope.revision, Some(1));
 		assert_eq!(envelope.kdf, KdfParams::BUILD_DEFAULT);
@@ -448,14 +464,14 @@ mod tests {
 			"a wrong key is handed back"
 		);
 		let marked = Envelope::parse(
-			&db.encode(true, KdfParams::BUILD_DEFAULT),
+			&db.encode(true, KdfParams::BUILD_DEFAULT).unwrap(),
 			KdfParams::BUILD_DEFAULT,
 		)
 		.unwrap();
 		assert!(!marked.aad.is_empty());
 		assert_eq!(marked.revision, Some(2));
 		let converted = Envelope::parse(
-			&db.encode(false, KdfParams::BUILD_DEFAULT),
+			&db.encode(false, KdfParams::BUILD_DEFAULT).unwrap(),
 			KdfParams::BUILD_DEFAULT,
 		)
 		.unwrap();

@@ -229,7 +229,7 @@ impl Vault {
 		if self.revision() == u64::MAX {
 			return Err(Error::Invalid("revision exhausted"));
 		}
-		Ok(self.database.encode(false, self.cost))
+		Ok(self.database.encode(false, self.cost)?)
 	}
 }
 

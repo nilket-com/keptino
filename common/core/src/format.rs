@@ -49,6 +49,8 @@ pub enum FormatError {
 	Damaged,
 	/// Intact, but written by a newer Keptino.
 	NewerFormat(u32),
+	/// Over a budget of ADR 0006: the file, the database or a record.
+	TooLarge,
 }
 
 impl fmt::Display for FormatError {
@@ -59,16 +61,37 @@ impl fmt::Display for FormatError {
 				f,
 				"the file was written by a newer Keptino (format {format}). Update Keptino to open it."
 			),
+			Self::TooLarge => write!(
+				f,
+				"the vault exceeds the {} MiB budget.",
+				MAX_FILE_BYTES >> 20
+			),
 		}
 	}
 }
 
 impl std::error::Error for FormatError {}
 
+/// The budgets reader and writer share (ADR 0006). A file, a database or a
+/// record list beyond them is refused before it is allocated, and a save
+/// that would exceed them is refused, so a vault one head writes always
+/// opens on the other.
+pub const MAX_FILE_BYTES: usize = 64 << 20;
+/// Sized so that a database within budget always yields a file within
+/// `MAX_FILE_BYTES`: LZ4 adds under one percent to incompressible data,
+/// base64 one third, and the 8+4 parity one half (30 x 1.01 x 4/3 x 1.5 is
+/// under 61 MiB).
+pub const MAX_DATABASE_BYTES: usize = 30 << 20;
+pub const MAX_RECORDS: usize = 100_000;
+pub const MAX_FIELD_BYTES: usize = 16 << 20;
+
 /// Splits one record off the front of `data`.
 pub fn next_record<'a>(data: &mut &'a [u8]) -> Result<(u8, &'a [u8]), FormatError> {
 	let (header, rest) = data.split_at_checked(5).ok_or(FormatError::Damaged)?;
 	let len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+	if len > MAX_FIELD_BYTES {
+		return Err(FormatError::TooLarge);
+	}
 	let (value, rest) = rest.split_at_checked(len).ok_or(FormatError::Damaged)?;
 	*data = rest;
 	Ok((header[0], value))
@@ -129,6 +152,9 @@ impl FieldAtlas {
 pub fn deserialize_records(mut data: &[u8]) -> Result<Vec<(u8, &[u8])>, FormatError> {
 	let mut records = Vec::new();
 	while !data.is_empty() {
+		if records.len() == MAX_RECORDS {
+			return Err(FormatError::TooLarge);
+		}
 		records.push(next_record(&mut data)?);
 	}
 	Ok(records)
@@ -306,6 +332,9 @@ impl Envelope {
 	/// Repairs the shards and reads the envelope. `default_kdf` applies to a
 	/// file that records no cost.
 	pub fn parse(file: &[u8], default_kdf: KdfParams) -> Result<Self, FormatError> {
+		if file.len() > MAX_FILE_BYTES {
+			return Err(FormatError::TooLarge);
+		}
 		let recovered = decode_shards(file)?;
 		let pairs = meta_pairs_in(&recovered, true)?;
 		let mut metadata = HashMap::new();
@@ -385,7 +414,7 @@ impl Envelope {
 	pub fn open(&self, key: &[u8; crate::crypto::KEY_SIZE]) -> Option<Zeroizing<Vec<u8>>> {
 		let compressed =
 			crate::crypto::decrypt(self.ciphertext.clone(), key, &self.nonce, &self.aad)?;
-		let database = crate::crypto::decompress(&compressed).ok()?;
+		let database = crate::crypto::decompress(&compressed, MAX_DATABASE_BYTES).ok()?;
 		let inner = meta_pairs(&database).ok()?;
 		mirrors(&self.mirror, &inner).then_some(database)
 	}
@@ -923,5 +952,46 @@ mod tests {
 				open_fixture(name, file);
 			}
 		}
+	}
+
+	#[test]
+	fn inputs_over_budget_are_refused_before_allocation() {
+		let huge = vec![0u8; MAX_FILE_BYTES + TOTAL_SHARDS];
+		assert_eq!(
+			Envelope::parse(&huge, KdfParams::DEBUG).err(),
+			Some(FormatError::TooLarge)
+		);
+		let mut records = Vec::with_capacity((MAX_RECORDS + 1) * 5);
+		for _ in 0..=MAX_RECORDS {
+			push_record(&mut records, TAG_META, &[]);
+		}
+		assert_eq!(
+			deserialize_records(&records).err(),
+			Some(FormatError::TooLarge)
+		);
+		assert_eq!(
+			deserialize_records(&records[..MAX_RECORDS * 5])
+				.unwrap()
+				.len(),
+			MAX_RECORDS
+		);
+		let mut field = vec![field::NOTE];
+		field.extend_from_slice(&((MAX_FIELD_BYTES + 1) as u32).to_le_bytes());
+		field.resize(5 + MAX_FIELD_BYTES + 1, b'x');
+		assert_eq!(
+			FieldAtlas::deserialize(&field).err(),
+			Some(FormatError::TooLarge)
+		);
+		assert_eq!(
+			crate::crypto::decompress(&crate::crypto::compress(&[7u8; 4096]), 4095).err(),
+			Some(crate::crypto::CorruptPayload),
+			"decompression stops at the budget"
+		);
+		assert_eq!(
+			crate::crypto::decompress(&crate::crypto::compress(&[7u8; 4096]), 4096)
+				.unwrap()
+				.len(),
+			4096
+		);
 	}
 }

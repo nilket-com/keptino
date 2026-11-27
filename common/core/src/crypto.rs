@@ -218,8 +218,12 @@ pub fn compress(msg: &[u8]) -> Zeroizing<Vec<u8>> {
 	writer.0
 }
 
-pub fn decompress(msg: &[u8]) -> Result<Zeroizing<Vec<u8>>, CorruptPayload> {
+/// Decompresses at most `budget` bytes; a stream that would go past the
+/// budget is refused, so a compressed payload cannot expand without bound
+/// into locked memory.
+pub fn decompress(msg: &[u8], budget: usize) -> Result<Zeroizing<Vec<u8>>, CorruptPayload> {
 	let mut writer = WipingWriter::default();
+	let mut remaining = budget;
 	let mut decoder = lz4::Decoder::new(msg).map_err(|_| CorruptPayload)?;
 	// std::io::copy's ordinary scratch buffer would retain plaintext.
 	let mut scratch = Zeroizing::new([0u8; 8192]);
@@ -228,6 +232,7 @@ pub fn decompress(msg: &[u8]) -> Result<Zeroizing<Vec<u8>>, CorruptPayload> {
 		if size == 0 {
 			break;
 		}
+		remaining = remaining.checked_sub(size).ok_or(CorruptPayload)?;
 		writer
 			.write_all(&scratch[..size])
 			.map_err(|_| CorruptPayload)?;
@@ -279,13 +284,17 @@ mod tests {
 		let nonce = [7u8; NONCE_SIZE];
 		let encrypted = encrypt(&compressed, &key, &nonce, b"");
 		assert_eq!(encrypted.len(), compressed.len() + 16);
-		let decoded = decompress(&decrypt(encrypted.clone(), &key, &nonce, b"").unwrap()).unwrap();
+		let decoded = decompress(
+			&decrypt(encrypted.clone(), &key, &nonce, b"").unwrap(),
+			1 << 30,
+		)
+		.unwrap();
 		assert_eq!(&*decoded, &plaintext[..]);
 		assert!(decrypt(encrypted.clone(), &key, &nonce, b"aad").is_none());
 		let mut damaged = encrypted;
 		damaged[0] ^= 1;
 		assert!(decrypt(damaged, &key, &nonce, b"").is_none());
-		assert_eq!(decompress(b"not lz4"), Err(CorruptPayload));
+		assert_eq!(decompress(b"not lz4", 1 << 30), Err(CorruptPayload));
 	}
 
 	#[test]

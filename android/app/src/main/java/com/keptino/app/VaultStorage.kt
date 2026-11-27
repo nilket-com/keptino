@@ -34,6 +34,10 @@ import org.json.JSONObject
 
 const val PRODUCTION_MEMORY_KIB = 4194304
 const val MAX_VAULT_BYTES = 64 * 1024 * 1024
+/** A vault body travels base64-encoded: four thirds of the file budget, plus line breaks a server may add. */
+const val MAX_VAULT_BODY_BYTES = MAX_VAULT_BYTES / 3 * 4 + 64 * 1024
+/** Authorization and upload-URL responses are small JSON objects. */
+const val MAX_METADATA_BYTES = 64 * 1024
 
 data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: String = "", val authUrl: String = "https://api.backblazeb2.com") {
     val sync: Boolean get() = keyId.isNotBlank() && appKey.isNotBlank()
@@ -291,7 +295,7 @@ class Backblaze(private val settings: Settings) {
         require(url.userInfo == null) { "Credentials in URLs are not supported" }
         return url
     }
-    private fun request(stage: String, url: String, token: String, body: ByteArray? = null, headers: Map<String, String> = emptyMap(), missingOk: Boolean = false): ByteArray? {
+    private fun request(stage: String, url: String, token: String, body: ByteArray? = null, headers: Map<String, String> = emptyMap(), missingOk: Boolean = false, limit: Int = MAX_METADATA_BYTES): ByteArray? {
         val conn = checkedUrl(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 15000; conn.readTimeout = 30000; conn.instanceFollowRedirects = false
         conn.setRequestProperty("Authorization", token)
@@ -309,10 +313,14 @@ class Backblaze(private val settings: Settings) {
                 } catch (_: Exception) { "" }
                 error("Backblaze $stage failed (HTTP $code${if (detail.isEmpty()) "" else ", $detail"})")
             }
+            // Refuse a declared oversize before reading a byte; a body without a
+            // declared length is still cut off at the same limit while reading.
+            val declared = conn.contentLengthLong
+            check(declared <= limit) { "Backblaze $stage response is too large" }
             return conn.inputStream.use { stream ->
                 val output = java.io.ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
-                while (true) { val n = stream.read(buffer); if (n < 0) break; check(output.size() + n <= MAX_VAULT_BYTES * 2) { "Remote vault is too large" }; output.write(buffer, 0, n) }
+                while (true) { val n = stream.read(buffer); if (n < 0) break; check(output.size() + n <= limit) { "Backblaze $stage response is too large" }; output.write(buffer, 0, n) }
                 output.toByteArray()
             }
         } finally { conn.disconnect() }
@@ -332,7 +340,7 @@ class Backblaze(private val settings: Settings) {
         val auth = authorize()
         val bucket = encode(bucketField(auth, "bucketName"))
         val file = encode("$name.keptino")
-        val body = request("download", auth.getString("downloadUrl").trimEnd('/') + "/file/$bucket/$file", auth.getString("authorizationToken"), missingOk = true) ?: return null
+        val body = request("download", auth.getString("downloadUrl").trimEnd('/') + "/file/$bucket/$file", auth.getString("authorizationToken"), missingOk = true, limit = MAX_VAULT_BODY_BYTES) ?: return null
         return Base64.decode(body, Base64.DEFAULT).also { require(it.size <= MAX_VAULT_BYTES) { "Remote vault is too large" } }
     }
     fun upload(name: String, bytes: ByteArray) {

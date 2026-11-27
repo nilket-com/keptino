@@ -40,6 +40,7 @@ impl From<keptino_core::format::FormatError> for Error {
 		use keptino_core::format::FormatError;
 		match error {
 			FormatError::Damaged => Error::Corrupt("damaged vault"),
+			FormatError::TooLarge => Error::Invalid("vault exceeds the size budget"),
 			FormatError::NewerFormat(_) => {
 				Error::Invalid("unsupported vault format; update Keptino")
 			}

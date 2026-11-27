@@ -172,13 +172,24 @@ impl<K: KeyStore> EntryAtlas<K> {
 		self.entries.is_empty()
 	}
 
-	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
-		// Size from ciphertext lengths to avoid reallocating plaintext buffers.
-		let size = self
-			.entries
+	/// The size of the serialized records, from the ciphertext lengths, so
+	/// no record is opened to measure it.
+	pub fn serialized_len(&self) -> usize {
+		self.entries
 			.values()
 			.map(|(_, value)| 5 + value.plaintext_len())
-			.sum();
+			.sum()
+	}
+
+	/// Each record's plaintext length, from its ciphertext.
+	pub fn record_lens(&self) -> impl Iterator<Item = usize> + '_ {
+		self.entries
+			.values()
+			.map(|(_, value)| value.plaintext_len())
+	}
+
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		let size = self.serialized_len();
 		let mut buffer = Zeroizing::new(Vec::with_capacity(size));
 		for id in self.entries.keys() {
 			let (tag, value) = self.get(*id).unwrap();
@@ -800,8 +811,39 @@ impl<K: KeyStore> Database<K> {
 	/// bookkeeping: a modification time that never goes backwards, a fresh
 	/// nonce, the next revision, the derivation cost recorded if it never
 	/// was, and the AAD marker only in the marked form. `default_kdf` is the
-	/// cost the database was opened with when none is recorded.
-	pub fn encode(&self, aad_form: bool, default_kdf: KdfParams) -> Vec<u8> {
+	/// cost the database was opened with when none is recorded. A database
+	/// or file over the budgets of ADR 0006 is refused unchanged.
+	pub fn encode(&self, aad_form: bool, default_kdf: KdfParams) -> Result<Vec<u8>, FormatError> {
+		// Refuse before touching the bookkeeping, and without opening a
+		// record: a refused save leaves the revision and timestamps as they
+		// were.
+		{
+			let store = self.read();
+			if store.entries.serialized_len() > format::MAX_DATABASE_BYTES
+				|| store.entries.len() > format::MAX_RECORDS
+				|| store
+					.entries
+					.record_lens()
+					.any(|len| len > format::MAX_FIELD_BYTES)
+			{
+				return Err(FormatError::TooLarge);
+			}
+		}
+		// The bookkeeping is restored if the file still comes out over
+		// budget, which the database budget is sized to prevent.
+		let bookkeeping = [
+			"modified_ts",
+			"nonce",
+			"revision",
+			"kdf_m",
+			"kdf_t",
+			"kdf_p",
+			"format",
+		];
+		let previous: Vec<(&str, Option<String>)> = bookkeeping
+			.iter()
+			.map(|name| (*name, self.meta(name)))
+			.collect();
 		// Never go backwards: a reader keeps its local copy unless the remote
 		// one is strictly newer, so a slow clock must not hide a save.
 		let modified = now_seconds().max(self.modified_ts().saturating_add(1));
@@ -830,6 +872,28 @@ impl<K: KeyStore> Database<K> {
 		} else {
 			self.remove_meta_entry("format");
 		}
+		let restore = |db: &Self| {
+			for (name, value) in &previous {
+				match value {
+					Some(value) => db.set_meta_entry(MetaEntry::new(name, value)),
+					None => {
+						db.remove_meta_entry(name);
+					}
+				}
+			}
+		};
+		// The bookkeeping entries themselves count; a database at the exact
+		// boundary is caught here and left as it was.
+		{
+			let store = self.read();
+			if store.entries.serialized_len() > format::MAX_DATABASE_BYTES
+				|| store.entries.len() > format::MAX_RECORDS
+			{
+				drop(store);
+				restore(self);
+				return Err(FormatError::TooLarge);
+			}
+		}
 		let compressed = crypto::compress(&self.serialize());
 		let meta = self.meta_pairs();
 		let aad = if aad_form {
@@ -840,7 +904,12 @@ impl<K: KeyStore> Database<K> {
 		let ciphertext = self
 			.master_key
 			.with_key(|key| crypto::encrypt(&compressed, key, &nonce, &aad));
-		encode_envelope(&meta, &ciphertext)
+		let file = encode_envelope(&meta, &ciphertext);
+		if file.len() > format::MAX_FILE_BYTES {
+			restore(self);
+			return Err(FormatError::TooLarge);
+		}
+		Ok(file)
 	}
 
 	/// Wipes the master key and every record; the database is empty after.
@@ -1207,7 +1276,7 @@ pub(crate) mod tests {
 		entry.set_name("bank");
 		entry.set_password("hunter2");
 		db.set_password_entry(entry);
-		let file = db.encode(false, KdfParams::DEBUG);
+		let file = db.encode(false, KdfParams::DEBUG).unwrap();
 		let envelope = Envelope::parse(&file, KdfParams::RELEASE).unwrap();
 		assert_eq!(envelope.revision, Some(1));
 		assert_eq!(
@@ -1217,8 +1286,11 @@ pub(crate) mod tests {
 		);
 		assert!(envelope.aad.is_empty());
 		let before = db.modified_ts();
-		let second =
-			Envelope::parse(&db.encode(false, KdfParams::DEBUG), KdfParams::DEBUG).unwrap();
+		let second = Envelope::parse(
+			&db.encode(false, KdfParams::DEBUG).unwrap(),
+			KdfParams::DEBUG,
+		)
+		.unwrap();
 		assert_eq!(second.revision, Some(2));
 		assert!(second.modified > before - 1, "time never goes backwards");
 		assert_ne!(second.nonce, envelope.nonce);
@@ -1237,7 +1309,11 @@ pub(crate) mod tests {
 			Database::open(&envelope, HeapKey::from_bytes(&[1; KEY_SIZE]).unwrap()).is_err(),
 			"the key comes back on failure"
 		);
-		let marked = Envelope::parse(&db.encode(true, KdfParams::DEBUG), KdfParams::DEBUG).unwrap();
+		let marked = Envelope::parse(
+			&db.encode(true, KdfParams::DEBUG).unwrap(),
+			KdfParams::DEBUG,
+		)
+		.unwrap();
 		assert!(!marked.aad.is_empty());
 		assert!(Database::open(&marked, HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap()).is_ok());
 		db.zeroize();
@@ -1267,6 +1343,94 @@ pub(crate) mod tests {
 	}
 
 	#[test]
+	fn a_save_over_budget_is_refused_and_leaves_the_bookkeeping_alone() {
+		let db = Database::new(
+			HeapKey::from_bytes(&[3; KEY_SIZE]).unwrap(),
+			"big",
+			&[1; 32],
+		);
+		let mut entry = Entry::new();
+		entry.set_name("note");
+		db.set_password_entry(entry);
+		let before = (db.revision(), db.modified_ts());
+		// A record whose plaintext would be one byte over the budget, placed
+		// in the atlas as ciphertext: the guard measures without opening it,
+		// which is also what keeps this test cheap in a debug build.
+		let (id, (tag, sealed)) = {
+			let store = db.read();
+			let (id, (tag, sealed)) = store.entries.entries.iter().next().unwrap();
+			(*id, (*tag, sealed.clone()))
+		};
+		let oversized = ProtectedBytes {
+			ciphertext: vec![0; format::MAX_DATABASE_BYTES - 5 + 1 + 16],
+			nonce: sealed.nonce,
+			key: Arc::clone(&sealed.key),
+		};
+		db.write().entries.entries.insert(id + 1, (tag, oversized));
+		assert_eq!(
+			db.encode(false, KdfParams::DEBUG).err(),
+			Some(FormatError::TooLarge)
+		);
+		assert_eq!((db.revision(), db.modified_ts()), before);
+		db.write().entries.entries.remove(&(id + 1));
+		assert!(db.encode(false, KdfParams::DEBUG).is_ok());
+		// Exactly at the boundary before bookkeeping on a database never saved:
+		// the first save adds revision and cost entries, which push it over,
+		// so the save is refused and the bookkeeping left absent.
+		let fresh = Database::new(
+			HeapKey::from_bytes(&[4; KEY_SIZE]).unwrap(),
+			"edge",
+			&[2; 32],
+		);
+		let mut entry = Entry::new();
+		entry.set_name("x");
+		fresh.set_password_entry(entry);
+		let (fid, (ftag, fsealed)) = {
+			let store = fresh.read();
+			let (id, (tag, sealed)) = store.entries.entries.iter().next_back().unwrap();
+			(*id, (*tag, sealed.clone()))
+		};
+		let room = format::MAX_DATABASE_BYTES - fresh.read().entries.serialized_len();
+		let boundary = ProtectedBytes {
+			ciphertext: vec![0; room - 5 + 16],
+			nonce: fsealed.nonce,
+			key: Arc::clone(&fsealed.key),
+		};
+		fresh
+			.write()
+			.entries
+			.entries
+			.insert(fid + 1, (ftag, boundary));
+		assert_eq!(
+			fresh.read().entries.serialized_len(),
+			format::MAX_DATABASE_BYTES
+		);
+		let before = (fresh.revision(), fresh.modified_ts(), fresh.meta("kdf_m"));
+		assert_eq!(
+			fresh.encode(false, KdfParams::DEBUG).err(),
+			Some(FormatError::TooLarge)
+		);
+		assert_eq!(
+			(fresh.revision(), fresh.modified_ts(), fresh.meta("kdf_m")),
+			before
+		);
+		assert_eq!(before.0, None, "revision stays absent");
+		// One record over the field budget is refused even when the database
+		// as a whole is within its budget: the reader would refuse it.
+		let one_field = ProtectedBytes {
+			ciphertext: vec![0; format::MAX_FIELD_BYTES + 1 + 16],
+			nonce: sealed.nonce,
+			key: Arc::clone(&sealed.key),
+		};
+		db.write().entries.entries.insert(id + 1, (tag, one_field));
+		assert_eq!(
+			db.encode(false, KdfParams::DEBUG).err(),
+			Some(FormatError::TooLarge)
+		);
+		db.write().entries.entries.remove(&(id + 1));
+	}
+
+	#[test]
 	fn unlock_orders_the_copies_falls_back_and_derives_once() {
 		let key = |salt: &[u8; 32], cost: KdfParams| -> Result<HeapKey, Never> {
 			let mut bytes = [0u8; KEY_SIZE];
@@ -1286,11 +1450,11 @@ pub(crate) mod tests {
 		let mut entry = Entry::new();
 		entry.set_name("first");
 		created.database.set_password_entry(entry);
-		let older = created.database.encode(false, KdfParams::DEBUG);
+		let older = created.database.encode(false, KdfParams::DEBUG).unwrap();
 		let mut entry = Entry::new();
 		entry.set_name("second");
 		created.database.set_password_entry(entry);
-		let newer = created.database.encode(false, KdfParams::DEBUG);
+		let newer = created.database.encode(false, KdfParams::DEBUG).unwrap();
 		let parse = |file: &[u8]| Envelope::parse(file, KdfParams::DEBUG).unwrap();
 		derivations.set(0);
 		let opened = unlock(
@@ -1390,7 +1554,7 @@ pub(crate) mod tests {
 
 		// A copy from another vault of the same name.
 		let other = unlock("example", None, None, KdfParams::DEBUG, &mut counted).unwrap();
-		let foreign = other.database.encode(false, KdfParams::DEBUG);
+		let foreign = other.database.encode(false, KdfParams::DEBUG).unwrap();
 		assert_eq!(
 			unlock(
 				"example",
