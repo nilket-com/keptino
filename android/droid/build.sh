@@ -15,13 +15,16 @@ if [[ -z "$ndk" || ! -x "$bin/clang" ]]; then
 fi
 api=${ANDROID_API:-30}
 profile=${1:-release}
+# Release uses the workspace's android-release profile (unwinding for JNI).
 case "$profile" in
-	release) flags=(--release) ;;
-	debug) flags=() ;;
+	release) flags=(--profile android-release); out=android-release ;;
+	debug) flags=(); out=debug ;;
 	*) printf 'Usage: %s [release|debug]\n' "$0" >&2; exit 2 ;;
 esac
 
 jni_libs=../app/src/main/jniLibs
+# The workspace's target directory, wherever Cargo resolves it.
+target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 for pair in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
 	target=${pair%%:*}
 	abi=${pair##*:}
@@ -31,8 +34,8 @@ for pair in aarch64-linux-android:arm64-v8a x86_64-linux-android:x86_64; do
 		"CC_$env_target=$bin/$target$api-clang" \
 		"AR_$env_target=$bin/llvm-ar" \
 		"CARGO_TARGET_${env_target^^}_LINKER=$bin/$target$api-clang" \
-		cargo build --locked --target "$target" "${flags[@]}"
+		cargo build --locked -p droid --target "$target" "${flags[@]}"
 	mkdir -p "$jni_libs/$abi"
-	cp "target/$target/$profile/libdroid.so" "$jni_libs/$abi/libdroid.so"
+	cp "$target_dir/$target/$out/libdroid.so" "$jni_libs/$abi/libdroid.so"
 done
 printf 'Built libdroid.so (%s) with %s\n' "$profile" "$(basename "$ndk")"

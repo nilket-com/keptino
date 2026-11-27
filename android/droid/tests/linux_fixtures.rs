@@ -27,7 +27,10 @@ fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 	assert_eq!(text(&vault, field::USERNAME), "alice");
 	assert_eq!(text(&vault, field::PASSWORD), "hunter2 ünïcödé 🔑");
 	assert_eq!(text(&vault, field::PIN), "4921");
-	assert_eq!(text(&vault, field::NOTE), "Security question: first pet\nAnswer: Rex");
+	assert_eq!(
+		text(&vault, field::NOTE),
+		"Security question: first pet\nAnswer: Rex"
+	);
 	assert_eq!(text(&vault, field::URL), "https://bank.example");
 	assert_eq!(text(&vault, field::TAGS), "money, work");
 	let created = text(&vault, field::CREATED_TS);
@@ -42,10 +45,14 @@ fn check(file: &[u8], name: &str, mem_kib: u32, initial_revision: u64) {
 	assert_eq!(vault.commit(), Commit::Updated);
 	let before = vault.modified_ts();
 	let saved = vault.save().unwrap();
-	let mut reopened = Vault::open(name, PASSWORD, &pepper(), Some(file), Some(&saved), mem_kib).unwrap();
+	let mut reopened =
+		Vault::open(name, PASSWORD, &pepper(), Some(file), Some(&saved), mem_kib).unwrap();
 	assert_eq!(reopened.source(), Source::Remote);
 	assert_eq!(reopened.revision(), initial_revision + 1);
-	assert!(reopened.meta("format").is_none(), "every save uses the unmarked form");
+	assert!(
+		reopened.meta("format").is_none(),
+		"every save uses the unmarked form"
+	);
 	assert!(reopened.modified_ts() > before);
 	assert!(reopened.query("bank"));
 	assert_eq!(text(&reopened, field::PASSWORD), "replaced");

@@ -62,7 +62,7 @@ provider_hint() {
 # Prompt for one credential field into the named variable. The value only ever
 # lives in this shell's memory: it is never passed as an argument to an external
 # process and never written to a plaintext file. Non-secret fields are echoed
-# and trimmed; secrets are neither. Cancelled or empty input aborts without
+# and trimmed; secrets are neither. Canceled or empty input aborts without
 # changing anything.
 ask_echo_supported() {
     if [[ -z ${ask_echo_supported:-} ]]; then
@@ -84,7 +84,7 @@ ask_field() {
         __ask_opts+=(-e)
     fi
     if ! __ask_value=$(systemd-ask-password "${__ask_opts[@]}" "$__ask_prompt"); then
-        fail 'Credential entry cancelled; nothing was changed.'
+        fail 'Credential entry canceled; nothing was changed.'
     fi
     if [[ $__ask_echo == yes ]]; then
         __ask_value=${__ask_value#"${__ask_value%%[![:space:]]*}"}
@@ -453,7 +453,7 @@ fi
 # `cargo install cargo-audit --locked` to enable the check.
 if cargo audit --version >/dev/null 2>&1; then
     printf 'Checking dependency advisories (accepted ones are listed with reasons in .cargo/audit.toml)...\n'
-    if ! cargo audit; then
+    if ! (cd .. && cargo audit); then
         printf 'cargo audit reported advisories above; review them. Setup continues.\n' >&2
     fi
 else

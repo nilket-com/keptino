@@ -2,10 +2,10 @@
 //! application. Kotlin reaches it through the `bridge` module.
 
 pub mod atlas;
+mod bridge;
 pub mod crypto;
 pub mod erasure;
 pub mod error;
-mod bridge;
 pub mod security;
 pub mod vault;
 

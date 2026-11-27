@@ -11,8 +11,8 @@
 
 use crate::error::{Error, Result};
 use libc::{
-	MADV_DONTDUMP, MADV_DONTFORK, MADV_WIPEONFORK, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE,
-	PR_SET_DUMPABLE, PROT_READ, PROT_WRITE, RLIMIT_CORE, RLIMIT_MEMLOCK, _SC_PAGESIZE, c_void,
+	_SC_PAGESIZE, MADV_DONTDUMP, MADV_DONTFORK, MADV_WIPEONFORK, MAP_ANONYMOUS, MAP_FAILED,
+	MAP_PRIVATE, PR_SET_DUMPABLE, PROT_READ, PROT_WRITE, RLIMIT_CORE, RLIMIT_MEMLOCK, c_void,
 	getrlimit, madvise, mlock, mmap, munlock, munmap, prctl, rlimit, setrlimit, sysconf,
 };
 use std::{
@@ -161,9 +161,8 @@ pub fn preflight() -> Result<Vec<String>> {
 		Err(error) => warnings.push(error.to_string()),
 	}
 	if swap_active() {
-		warnings.push(
-			"Swap is active: the 4 GiB key derivation arena cannot be locked.".to_owned(),
-		);
+		warnings
+			.push("Swap is active: the 4 GiB key derivation arena cannot be locked.".to_owned());
 	}
 	Ok(warnings)
 }
@@ -299,10 +298,7 @@ mod tests {
 	#[test]
 	fn injected_loader_is_refused() {
 		let error = check_env_value("LD_AUDIT", Some(OsStr::new("/tmp/evil.so"))).unwrap_err();
-		assert_eq!(
-			error.to_string(),
-			"SECURITY VIOLATION: LD_AUDIT is set."
-		);
+		assert_eq!(error.to_string(), "SECURITY VIOLATION: LD_AUDIT is set.");
 		check_env_value("LD_AUDIT", Some(OsStr::new(""))).unwrap();
 		check_env_value("LD_AUDIT", None).unwrap();
 	}

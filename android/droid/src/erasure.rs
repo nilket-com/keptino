@@ -13,7 +13,10 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
 	let shard_size = data.len().div_ceil(DATA_SHARDS).max(MIN_SHARD_SIZE);
 	let mut padded = data.to_vec();
 	padded.resize(shard_size * DATA_SHARDS, 0);
-	let mut shards: Vec<Vec<u8>> = padded.chunks_exact(shard_size).map(<[u8]>::to_vec).collect();
+	let mut shards: Vec<Vec<u8>> = padded
+		.chunks_exact(shard_size)
+		.map(<[u8]>::to_vec)
+		.collect();
 	shards.resize(TOTAL_SHARDS, vec![0; shard_size]);
 	ReedSolomon::new(DATA_SHARDS, PARITY_SHARDS)
 		.and_then(|rs| rs.encode(&mut shards))
@@ -56,7 +59,12 @@ pub fn decode(encoded: &[u8]) -> Result<Vec<u8>> {
 	ReedSolomon::new(DATA_SHARDS, PARITY_SHARDS)
 		.and_then(|rs| rs.reconstruct_data(&mut shards))
 		.map_err(|_| Error::Corrupt("too many damaged shards"))?;
-	let mut recovered: Vec<u8> = shards.into_iter().take(DATA_SHARDS).flatten().flatten().collect();
+	let mut recovered: Vec<u8> = shards
+		.into_iter()
+		.take(DATA_SHARDS)
+		.flatten()
+		.flatten()
+		.collect();
 	recovered.truncate(original_len as usize);
 	Ok(recovered)
 }

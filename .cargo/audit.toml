@@ -1,5 +1,5 @@
-# Advisories accepted for this build, each with the reason and the condition
-# under which it leaves this list. `cargo audit` in setup.sh reads this file,
+# Advisories accepted for the workspace, each with the reason and the condition
+# under which it leaves this list. `cargo audit` from the root reads this file,
 # so a new advisory is still reported while these stay quiet. Review the list
 # whenever a dependency below is upgraded.
 [advisories]

@@ -53,7 +53,8 @@ impl FieldAtlas {
 	}
 
 	pub fn get_str(&self, id: u8) -> Option<&str> {
-		self.get(id).and_then(|bytes| std::str::from_utf8(bytes).ok())
+		self.get(id)
+			.and_then(|bytes| std::str::from_utf8(bytes).ok())
 	}
 
 	pub fn set(&mut self, id: u8, value: &[u8]) {

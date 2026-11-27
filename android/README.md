@@ -23,25 +23,43 @@ vault, copy the existing `<database name>.digisafe` object to that key in the sa
 bucket, preserving its contents. If you have the latest local vault, you can
 import it and use **Save** with sync configured to upload it under the new key.
 
-## Build
+## Install or update over ADB
+
+Enable **USB debugging** on the phone, connect it to your Linux computer, and
+accept the debugging authorization prompt. From the repository root, run:
+
+```sh
+./android/setup.sh
+```
+
+Setup builds the debug APK from the current checkout and installs it in place,
+preserving saved vaults and Keystore settings. For updates, use the same
+debug signing key as the existing install. On first launch, configure the
+pepper and optional sync credentials in the app.
+
+With several devices or emulators connected, use `adb devices -l` to find the
+target and run `./android/setup.sh --serial SERIAL`. Setup also honors
+`ANDROID_SERIAL`.
+
+### Build prerequisites
 
 Use a 64-bit Linux host, Rust, JDK 21, and Android SDK command-line tools. The
 project uses Android command-line tools 23.0 and pins AGP 9.5.1, Gradle 9.9.1, Compose compiler 2.4.21, Compose BOM
 2026.09.00, Android API 37, and NDK 30.0.16248370. AGP provides built-in Kotlin.
 The wrapper downloads Gradle; no system Gradle installation is required.
 
-On the development machine:
+Set `JAVA_HOME` and `ANDROID_HOME` if your tools are outside the default search
+paths. For example:
 
 ```sh
 export JAVA_HOME="$HOME/.local/opt/jdk-21.0.13+9"
 export ANDROID_HOME="$HOME/Android/Sdk"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/23.0/bin:$ANDROID_HOME/platform-tools:$PATH"
-sdkmanager 'cmdline-tools;23.0' 'platform-tools' 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;30.0.16248370'
-rustup target add aarch64-linux-android x86_64-linux-android
-cd android
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Setup uses `sdkmanager` to install missing SDK packages. The native build
+adds the required Rust targets through `rustup`. To build the APK on an
+already configured host without installing it, run `cd android && ./gradlew :app:assembleDebug`.
 
 Gradle invokes `droid/build.sh` to build and package the Rust library for ARM64
 and x86-64. A native library built only for the host will not work in the APK.

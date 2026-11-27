@@ -60,10 +60,11 @@ val buildNative = tasks.register<Exec>("buildNative") {
     inputs.files(
         fileTree(rootProject.file("droid/src")),
         rootProject.file("droid/Cargo.toml"),
-        rootProject.file("droid/Cargo.lock"),
         rootProject.file("droid/build.sh"),
-        fileTree(rootProject.file("../erasure/src")),
-        rootProject.file("../erasure/Cargo.toml"),
+        rootProject.file("../Cargo.toml"),
+        rootProject.file("../Cargo.lock"),
+        fileTree(rootProject.file("../common/erasure/src")),
+        rootProject.file("../common/erasure/Cargo.toml"),
     )
     outputs.dir(file("src/main/jniLibs"))
 }

@@ -2,7 +2,6 @@
 name = "keptino"
 version = "0.2.1"
 edition = "2024"
-resolver = "3"
 authors = ["nilket.com"]
 description = "A password vault by nilket."
 
@@ -42,7 +41,7 @@ chacha20poly1305 = "0.10.1"
 getrandom = "0.4.1"
 hex = "0.4.3"
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "svg", "tiny-skia", "tokio", "wayland"] }
-keptino-erasure = { path = "../erasure" }
+keptino-erasure = { path = "../common/erasure" }
 jiff = "1.0.1"
 landlock = "0.4"
 libc = "0.2.180"
@@ -56,11 +55,3 @@ sha1 = "0.10.6"
 sha3 = "0.10.8"
 zbus = { version = "6", default-features = false, features = ["tokio"] }
 zeroize = "1.8.2"
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
-debug = 0

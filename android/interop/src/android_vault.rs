@@ -25,7 +25,10 @@ fn working_entry(vault: &Vault) -> Value {
 	let mut entry = Map::new();
 	for (key, id) in FIELDS {
 		let value = vault.get_field(id).unwrap();
-		entry.insert(key.into(), json!(String::from_utf8(value.to_vec()).unwrap()));
+		entry.insert(
+			key.into(),
+			json!(String::from_utf8(value.to_vec()).unwrap()),
+		);
 	}
 	Value::Object(entry)
 }
@@ -33,7 +36,9 @@ fn working_entry(vault: &Vault) -> Value {
 fn main() {
 	let args: Vec<String> = std::env::args().collect();
 	let [_, command, file, password, pepper, mem_kib] = args.as_slice() else {
-		eprintln!("Usage: android-vault read|write|metadata <file> <password> <pepper-hex> <mem-kib>");
+		eprintln!(
+			"Usage: android-vault read|write|metadata <file> <password> <pepper-hex> <mem-kib>"
+		);
 		std::process::exit(2);
 	};
 	let path = Path::new(file);
@@ -77,7 +82,10 @@ fn main() {
 			std::io::stdin().read_to_string(&mut input).unwrap();
 			let entries: Vec<Map<String, Value>> = serde_json::from_str(&input).unwrap();
 			for fields in &entries {
-				let name = fields.get("name").and_then(Value::as_str).unwrap_or_default();
+				let name = fields
+					.get("name")
+					.and_then(Value::as_str)
+					.unwrap_or_default();
 				// Start from the stored entry, as the app does after a query.
 				vault.query(name);
 				for (key, id) in FIELDS {

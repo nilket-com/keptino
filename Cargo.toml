@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["linux", "android/droid", "android/interop", "common/erasure"]
+
+# Profiles live here because Cargo ignores them in member manifests.
+# The Linux head aborts on panic: nothing may unwind past a locked,
+# undumpable process. The Android head must unwind so a JNI entry point can
+# turn a panic into a Java exception; it builds with --profile android-release.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = 0
+
+[profile.android-release]
+inherits = "release"
+panic = "unwind"

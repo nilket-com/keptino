@@ -121,7 +121,13 @@ pub(crate) fn derive_master_key_with_cost(
 	let mut derivation_salt = Zeroizing::new([0u8; SALT_SIZE + PEPPER_SIZE]);
 	derivation_salt[..SALT_SIZE].copy_from_slice(salt);
 	derivation_salt[SALT_SIZE..].copy_from_slice(pepper);
-	let main_hash = argon2id(&pre_hash, &*derivation_salt, cost.passes, cost.memory_kib, cost.lanes);
+	let main_hash = argon2id(
+		&pre_hash,
+		&*derivation_salt,
+		cost.passes,
+		cost.memory_kib,
+		cost.lanes,
+	);
 	pre_hash.zeroize();
 	let main_hash = main_hash?;
 	let mut post_hasher = Sha3_256::new();
@@ -193,7 +199,12 @@ pub fn encrypt(msg: &[u8], key: &Key, nonce: &[u8; NONCE_SIZE]) -> Vec<u8> {
 	encrypt_with_aad(msg, key, nonce, &[])
 }
 
-pub(crate) fn encrypt_with_aad(msg: &[u8], key: &Key, nonce: &[u8; NONCE_SIZE], aad: &[u8]) -> Vec<u8> {
+pub(crate) fn encrypt_with_aad(
+	msg: &[u8],
+	key: &Key,
+	nonce: &[u8; NONCE_SIZE],
+	aad: &[u8],
+) -> Vec<u8> {
 	let cipher = XChaCha20Poly1305::new((&**key).into());
 	let mut buffer = Zeroizing::new(Vec::with_capacity(msg.len() + 16));
 	buffer.extend_from_slice(msg);
@@ -240,7 +251,10 @@ mod tests {
 		assert_eq!(&*decoded, &plaintext);
 		let mut damaged = encrypted;
 		damaged[0] ^= 1;
-		assert_eq!(decrypt(damaged, &key, &nonce).unwrap_err(), Error::Decryption);
+		assert_eq!(
+			decrypt(damaged, &key, &nonce).unwrap_err(),
+			Error::Decryption
+		);
 		assert!(decompress(b"not lz4").is_err());
 	}
 

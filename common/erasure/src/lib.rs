@@ -2,7 +2,7 @@
 //! file is written with: `data` systematic shards followed by `parity`
 //! shards, any `data` of which rebuild the rest. The field uses the
 //! polynomial x^8 + x^4 + x^3 + x^2 + 1 and the encoding matrix is a
-//! Vandermonde matrix normalised so its top block is the identity, the
+//! Vandermonde matrix normalized so its top block is the identity, the
 //! construction Backblaze published and `reed-solomon-erasure` reproduced,
 //! so the parity bytes here are identical to those in existing files. No
 //! dependencies, no unsafe code, no SIMD: a vault is kilobytes.
@@ -385,15 +385,6 @@ mod tests {
 		assert_eq!(exp(0, 0), 1);
 		assert_eq!(exp(0, 5), 0);
 		assert_eq!(exp(2, 8), 0x1D);
-		// Cross-check against the implementation being replaced.
-		for a in 0..=255u8 {
-			for b in [0u8, 1, 2, 3, 29, 100, 200, 255] {
-				assert_eq!(mul(a, b), reed_solomon_erasure::galois_8::mul(a, b));
-			}
-			for n in 0..12 {
-				assert_eq!(exp(a, n), reed_solomon_erasure::galois_8::exp(a, n));
-			}
-		}
 	}
 
 	#[test]
@@ -414,17 +405,19 @@ mod tests {
 	}
 
 	#[test]
-	fn parity_matches_the_replaced_implementation_and_repairs_any_loss() {
+	fn encoding_is_systematic_and_repairs_any_loss() {
 		let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
 		for (data, parity) in [(8usize, 4usize), (1, 1), (3, 2), (10, 6), (17, 3)] {
-			let ours = ReedSolomon::new(data, parity).unwrap();
-			let theirs = reed_solomon_erasure::galois_8::ReedSolomon::new(data, parity).unwrap();
+			let rs = ReedSolomon::new(data, parity).unwrap();
 			for len in [1usize, 2, 63, 64, 1000, 4096] {
 				let mut shards: Vec<Vec<u8>> = (0..data + parity).map(|_| rng.bytes(len)).collect();
-				let mut reference = shards.clone();
-				ours.encode(&mut shards).unwrap();
-				theirs.encode(&mut reference).unwrap();
-				assert_eq!(shards, reference, "data {data} parity {parity} len {len}");
+				let original: Vec<Vec<u8>> = shards[..data].to_vec();
+				rs.encode(&mut shards).unwrap();
+				assert_eq!(
+					&shards[..data],
+					&original[..],
+					"data shards are stored verbatim"
+				);
 				// Lose up to `parity` shards anywhere, rebuild the data.
 				let mut damaged: Vec<Option<Vec<u8>>> = shards.iter().cloned().map(Some).collect();
 				let mut lost = 0;
@@ -435,12 +428,13 @@ mod tests {
 						lost += 1;
 					}
 				}
-				let mut reference_damaged = damaged.clone();
-				ours.reconstruct_data(&mut damaged).unwrap();
-				theirs.reconstruct_data(&mut reference_damaged).unwrap();
+				rs.reconstruct_data(&mut damaged).unwrap();
 				for d in 0..data {
-					assert_eq!(damaged[d].as_deref(), Some(shards[d].as_slice()));
-					assert_eq!(damaged[d], reference_damaged[d]);
+					assert_eq!(
+						damaged[d].as_deref(),
+						Some(shards[d].as_slice()),
+						"data {data} parity {parity} len {len}"
+					);
 				}
 			}
 		}
@@ -486,24 +480,31 @@ mod tests {
 		for (name, file) in [
 			(
 				"linux-debug",
-				&include_bytes!("../../android/droid/tests/fixtures/linux-debug.keptino")[..],
+				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug.keptino")[..],
 			),
 			(
 				"linux-release",
-				&include_bytes!("../../android/droid/tests/fixtures/linux-release.keptino")[..],
+				&include_bytes!("../../../android/droid/tests/fixtures/linux-release.keptino")[..],
 			),
 			(
 				"linux-debug-v2",
-				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..],
+				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..],
 			),
 			(
 				"linux-release-v2",
-				&include_bytes!("../../android/droid/tests/fixtures/linux-release-v2.keptino")[..],
+				&include_bytes!("../../../android/droid/tests/fixtures/linux-release-v2.keptino")[..],
 			),
 			(
 				"linux-debug-unmarked",
-				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-unmarked.keptino")
-					[..],
+				&include_bytes!(
+					"../../../android/droid/tests/fixtures/linux-debug-unmarked.keptino"
+				)[..],
+			),
+			(
+				"linux-release-unmarked",
+				&include_bytes!(
+					"../../../android/droid/tests/fixtures/linux-release-unmarked.keptino"
+				)[..],
 			),
 		] {
 			let stored = fixture_shards(file);

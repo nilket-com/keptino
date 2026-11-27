@@ -105,7 +105,11 @@ impl Store {
 	}
 
 	fn serialize(&self) -> Zeroizing<Vec<u8>> {
-		serialize_entries(self.entries.values().map(|(tag, value)| (*tag, value.as_slice())))
+		serialize_entries(
+			self.entries
+				.values()
+				.map(|(tag, value)| (*tag, value.as_slice())),
+		)
 	}
 
 	fn set_raw(&mut self, tag: u8, name: &str, entry: &FieldAtlas) -> (u32, bool) {
@@ -153,7 +157,8 @@ impl Store {
 		for name in self.metas.keys() {
 			let value = self.required_meta(name, "metadata value")?;
 			for part in [name.as_bytes(), value.as_bytes()] {
-				let len = u32::try_from(part.len()).map_err(|_| Error::Corrupt("metadata length"))?;
+				let len =
+					u32::try_from(part.len()).map_err(|_| Error::Corrupt("metadata length"))?;
 				aad.extend_from_slice(&len.to_le_bytes());
 				aad.extend_from_slice(part);
 			}
@@ -266,7 +271,10 @@ impl Envelope {
 			let name = entry
 				.get_str(META_NAME)
 				.ok_or(Error::Corrupt("envelope metadata name"))?;
-			if tag != TAG_META || store.metas.contains_key(name) || entry.get_str(META_VALUE).is_none() {
+			if tag != TAG_META
+				|| store.metas.contains_key(name)
+				|| entry.get_str(META_VALUE).is_none()
+			{
 				return Err(Error::Corrupt("invalid or duplicate envelope metadata"));
 			}
 			store.set_raw(TAG_META, name, &entry);
@@ -283,7 +291,11 @@ impl Envelope {
 		if marked && revision.unwrap_or(0) == 0 {
 			return Err(Error::Corrupt("missing or zero format-2 revision"));
 		}
-		let cost = match (store.meta("kdf_m"), store.meta("kdf_t"), store.meta("kdf_p")) {
+		let cost = match (
+			store.meta("kdf_m"),
+			store.meta("kdf_t"),
+			store.meta("kdf_p"),
+		) {
 			(None, None, None) => None,
 			(Some(m), Some(t), Some(p)) => {
 				let read = |field: &str, bounds: std::ops::RangeInclusive<u32>| {
@@ -368,7 +380,9 @@ impl Vault {
 			(None, None) => return Self::create(db_name, password, pepper, mem_kib),
 			(Some(Ok(local)), Some(Ok(remote))) => {
 				if local.salt != remote.salt {
-					return Err(Error::Invalid("a different vault uses this name in the bucket"));
+					return Err(Error::Invalid(
+						"a different vault uses this name in the bucket",
+					));
 				}
 				let remote_first = match (local.revision, remote.revision) {
 					(Some(l), Some(r)) if l != r => r > l,
@@ -379,7 +393,11 @@ impl Vault {
 				uploads_paused = !remote_first && remote.revision > local.revision;
 				let l = (local, Source::Local);
 				let r = (remote, Source::Remote);
-				if remote_first { (r, Some(l)) } else { (l, Some(r)) }
+				if remote_first {
+					(r, Some(l))
+				} else {
+					(l, Some(r))
+				}
 			}
 			(Some(Ok(local)), Some(Err(Error::Corrupt(_)))) => {
 				uploads_paused = true;
@@ -397,8 +415,12 @@ impl Vault {
 		let mut cached = None;
 		let mut unlock = |envelope: Envelope| {
 			let cost = envelope.cost.unwrap_or(KdfCost::legacy(mem_kib));
-			if cached.as_ref().is_none_or(|(previous, _)| *previous != cost) {
-				let key = crypto::derive_master_key_with_cost(password, pepper, &envelope.salt, cost)?;
+			if cached
+				.as_ref()
+				.is_none_or(|(previous, _)| *previous != cost)
+			{
+				let key =
+					crypto::derive_master_key_with_cost(password, pepper, &envelope.salt, cost)?;
 				cached = Some((cost, key));
 			}
 			envelope.unlock(&cached.as_ref().expect("key derived above").1)
@@ -422,7 +444,12 @@ impl Vault {
 		})
 	}
 
-	fn create(db_name: &str, password: &[u8], pepper: &[u8; PEPPER_SIZE], mem_kib: u32) -> Result<Self> {
+	fn create(
+		db_name: &str,
+		password: &[u8],
+		pepper: &[u8; PEPPER_SIZE],
+		mem_kib: u32,
+	) -> Result<Self> {
 		let mut salt = [0u8; SALT_SIZE];
 		getrandom::fill(&mut salt).map_err(|_| Error::Kdf("no system randomness".into()))?;
 		let key = crypto::derive_master_key(password, pepper, &salt, mem_kib)?;
@@ -494,7 +521,9 @@ impl Vault {
 		if !(field::NAME..=field::MODIFIED_TS).contains(&id) {
 			return Err(Error::Invalid("unknown field"));
 		}
-		Ok(Zeroizing::new(self.working.get(id).unwrap_or_default().to_vec()))
+		Ok(Zeroizing::new(
+			self.working.get(id).unwrap_or_default().to_vec(),
+		))
 	}
 
 	/// Edits the working entry. Nothing reaches the database before `commit`.
@@ -505,7 +534,8 @@ impl Vault {
 		if std::str::from_utf8(value).is_err() {
 			return Err(Error::Invalid("text is not UTF-8"));
 		}
-		self.working.set(field::MODIFIED_TS, now().to_string().as_bytes());
+		self.working
+			.set(field::MODIFIED_TS, now().to_string().as_bytes());
 		self.working.set(id, value);
 		Ok(())
 	}
@@ -546,7 +576,10 @@ impl Vault {
 	/// Encrypts the database into the bytes of a vault file. The Backblaze
 	/// object is the base64 text of the same bytes.
 	pub fn revision(&self) -> u64 {
-		self.store.meta("revision").and_then(|s| s.parse().ok()).unwrap_or(0)
+		self.store
+			.meta("revision")
+			.and_then(|s| s.parse().ok())
+			.unwrap_or(0)
 	}
 
 	pub fn save(&mut self) -> Result<Vec<u8>> {
@@ -560,7 +593,8 @@ impl Vault {
 			.ok_or(Error::Invalid("revision exhausted"))?;
 		self.store.set_meta("revision", &next.to_string());
 		if self.store.meta("kdf_m").is_none() {
-			self.store.set_meta("kdf_m", &self.cost.memory_kib.to_string());
+			self.store
+				.set_meta("kdf_m", &self.cost.memory_kib.to_string());
 			self.store.set_meta("kdf_t", &self.cost.passes.to_string());
 			self.store.set_meta("kdf_p", &self.cost.lanes.to_string());
 		}
@@ -576,7 +610,8 @@ impl Vault {
 		// Older Linux versions increment this field after loading the vault.
 		// Leave room for that increment when choosing a fresh nonce.
 		let mut random = [0u8; 16];
-		getrandom::fill(&mut random[..15]).map_err(|_| Error::Kdf("no system randomness".into()))?;
+		getrandom::fill(&mut random[..15])
+			.map_err(|_| Error::Kdf("no system randomness".into()))?;
 		let counter = u128::from_le_bytes(random).max(1);
 		self.store.set_meta("nonce", &counter.to_string());
 		let compressed = crypto::compress(&self.store.serialize());
@@ -585,7 +620,8 @@ impl Vault {
 		} else {
 			Vec::new()
 		};
-		let ciphertext = crypto::encrypt_with_aad(&compressed, &self.key, &nonce_bytes(counter), &aad);
+		let ciphertext =
+			crypto::encrypt_with_aad(&compressed, &self.key, &nonce_bytes(counter), &aad);
 		let mut envelope = Store::default();
 		for (tag, data) in self.store.entries.values() {
 			if *tag == TAG_META {
@@ -613,7 +649,9 @@ mod tests {
 	fn add(vault: &mut Vault, name: &str, password: &str, tags: &str) -> Commit {
 		vault.clear();
 		vault.set_field(field::NAME, name.as_bytes()).unwrap();
-		vault.set_field(field::PASSWORD, password.as_bytes()).unwrap();
+		vault
+			.set_field(field::PASSWORD, password.as_bytes())
+			.unwrap();
 		vault.set_field(field::TAGS, tags.as_bytes()).unwrap();
 		vault.commit()
 	}
@@ -626,12 +664,23 @@ mod tests {
 	fn reads_both_formats_preserves_cost_and_refuses_unknown_versions() {
 		let mut vault = open(None, None).unwrap();
 		let first = vault.save_format(true).unwrap();
-		let mut opened = Vault::open("alias", b"master", &PEPPER, Some(&first), None, DEBUG_MEM_KIB * 2).unwrap();
+		let mut opened = Vault::open(
+			"alias",
+			b"master",
+			&PEPPER,
+			Some(&first),
+			None,
+			DEBUG_MEM_KIB * 2,
+		)
+		.unwrap();
 		assert_eq!(opened.revision(), 1);
 		let next = opened.save_format(false).unwrap();
 		assert!(!Envelope::parse(&next).unwrap().marked);
 		let preferred = open(Some(&next), Some(&first)).unwrap();
-		assert_eq!((preferred.source(), preferred.revision()), (Source::Local, 2));
+		assert_eq!(
+			(preferred.source(), preferred.revision()),
+			(Source::Local, 2)
+		);
 		assert!(!preferred.uploads_paused);
 
 		let mut envelope = Store::deserialize(&erasure::decode(&next).unwrap()).unwrap();
@@ -706,12 +755,16 @@ mod tests {
 			passes: 2,
 			lanes: 2,
 		};
-		vault.key = crypto::derive_master_key_with_cost(b"master", &PEPPER, &salt, vault.cost).unwrap();
+		vault.key =
+			crypto::derive_master_key_with_cost(b"master", &PEPPER, &salt, vault.cost).unwrap();
 		let file = vault.save_format(false).unwrap();
 		let mut reopened = open(Some(&file), None).unwrap();
 		let saved = reopened.save().unwrap();
 		let params = Envelope::parse(&saved).unwrap().cost.unwrap();
-		assert_eq!((params.memory_kib, params.passes, params.lanes), (DEBUG_MEM_KIB, 2, 2));
+		assert_eq!(
+			(params.memory_kib, params.passes, params.lanes),
+			(DEBUG_MEM_KIB, 2, 2)
+		);
 
 		let mut header = Store::deserialize(&erasure::decode(&file).unwrap()).unwrap();
 		header.set_meta("kdf_t", "65");
@@ -744,8 +797,14 @@ mod tests {
 		let mut vault = open(None, None).unwrap();
 		assert_eq!(vault.source(), Source::New);
 		assert_eq!(vault.commit(), Commit::EmptyName);
-		assert_eq!(add(&mut vault, "bank", "hunter2", "money, work"), Commit::Created);
-		assert_eq!(add(&mut vault, "mail", "pässword 🔑", "work"), Commit::Created);
+		assert_eq!(
+			add(&mut vault, "bank", "hunter2", "money, work"),
+			Commit::Created
+		);
+		assert_eq!(
+			add(&mut vault, "mail", "pässword 🔑", "work"),
+			Commit::Created
+		);
 		assert_eq!(add(&mut vault, "bank", "changed", "money"), Commit::Updated);
 		let file = vault.save().unwrap();
 		assert_eq!(file.len() % 12, 0);
@@ -776,7 +835,15 @@ mod tests {
 			Some(Error::Decryption)
 		);
 		assert_eq!(
-			Vault::open("test", b"master", &[8; 32], Some(&file), None, DEBUG_MEM_KIB).err(),
+			Vault::open(
+				"test",
+				b"master",
+				&[8; 32],
+				Some(&file),
+				None,
+				DEBUG_MEM_KIB
+			)
+			.err(),
 			Some(Error::Decryption)
 		);
 	}
@@ -812,7 +879,10 @@ mod tests {
 		let opened = open(Some(&newer), Some(&older)).unwrap();
 		assert_eq!(opened.source(), Source::Local);
 		assert_eq!(opened.names().len(), 2);
-		assert_eq!(open(Some(&older), Some(&older)).unwrap().source(), Source::Local);
+		assert_eq!(
+			open(Some(&older), Some(&older)).unwrap().source(),
+			Source::Local
+		);
 		assert_eq!(open(None, Some(&older)).unwrap().source(), Source::Remote);
 	}
 

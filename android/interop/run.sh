@@ -11,6 +11,8 @@
 #                         and pepper, and print its entries
 set -euo pipefail
 cd "$(dirname "$0")"
+# The workspace's target directory, wherever Cargo resolves it.
+target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 
 PASSWORD='correct horse battery staple'
 PEPPER_SEED='digisafe test pepper seed'
@@ -153,7 +155,7 @@ roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
 	[[ $profile == release ]] && flag+=(--release)
 	say "Building the $profile harness for format $format"
 	cargo build --quiet --locked "${flag[@]}"
-	bin=${CARGO_TARGET_DIR:-target}/$profile
+	bin=$target_dir/$profile
 	local file="$work/home/.config/keptino/$db.keptino" phone="$work/phone-$db.keptino"
 
 	if [[ $format == unmarked ]]; then
@@ -229,7 +231,7 @@ check() { # <file> <profile>
 	db=$(basename "$1" .keptino)
 	[[ $profile == release ]] && flag+=(--release)
 	cargo build --quiet --locked "${flag[@]}"
-	bin=${CARGO_TARGET_DIR:-target}/$profile
+	bin=$target_dir/$profile
 	# Only in the bucket, so Linux must fetch and decrypt it.
 	base64 -w 0 "$1" >"$work/bucket/$db.keptino"
 	linux read "$db" "$PASSWORD" || { cat "$work/linux.log" >&2; exit 1; }

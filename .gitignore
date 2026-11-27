@@ -2,7 +2,7 @@
 */archive
 */old
 
-linux/target
+/target
 
 *.apk
 *.class
@@ -26,4 +26,3 @@ android/local.properties
 
 android/interop/target
 
-erasure/target

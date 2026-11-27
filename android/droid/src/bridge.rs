@@ -39,7 +39,9 @@ fn register(vault: Vault) -> jlong {
 	let mut guard = lock(&REGISTRY);
 	let registry = guard.get_or_insert_with(Registry::default);
 	registry.last += 1;
-	registry.vaults.insert(registry.last, Arc::new(Mutex::new(vault)));
+	registry
+		.vaults
+		.insert(registry.last, Arc::new(Mutex::new(vault)));
 	registry.last
 }
 
@@ -72,7 +74,9 @@ fn bytes(env: &JNIEnv, array: &JByteArray) -> Result<Zeroizing<Vec<u8>>> {
 	if array.is_null() {
 		return Err(Error::Invalid("missing argument"));
 	}
-	env.convert_byte_array(array).map(Zeroizing::new).map_err(jni_error)
+	env.convert_byte_array(array)
+		.map(Zeroizing::new)
+		.map_err(jni_error)
 }
 
 fn optional_bytes(env: &JNIEnv, array: &JByteArray) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -106,7 +110,11 @@ fn field_id(value: jint) -> Result<u8> {
 
 /// Runs `body`, converting an error or a panic into a pending Java
 /// exception and returning `fallback` to the JVM, which ignores it.
-fn guard<'local, T>(env: &mut JNIEnv<'local>, fallback: T, body: impl FnOnce(&mut JNIEnv<'local>) -> Result<T>) -> T {
+fn guard<'local, T>(
+	env: &mut JNIEnv<'local>,
+	fallback: T,
+	body: impl FnOnce(&mut JNIEnv<'local>) -> Result<T>,
+) -> T {
 	let message = match catch_unwind(AssertUnwindSafe(|| body(env))) {
 		Ok(Ok(value)) => return value,
 		Ok(Err(error)) => error.to_string(),
@@ -135,7 +143,8 @@ pub extern "system" fn Java_com_keptino_app_Core_preflight<'local>(
 ) -> jobjectArray {
 	guard(&mut env, std::ptr::null_mut(), |env| {
 		let warnings = security::preflight()?;
-		let count = jint::try_from(warnings.len()).map_err(|_| Error::Invalid("too many warnings"))?;
+		let count =
+			jint::try_from(warnings.len()).map_err(|_| Error::Invalid("too many warnings"))?;
 		let array = env
 			.new_object_array(count, "java/lang/String", JObject::null())
 			.map_err(jni_error)?;
@@ -201,7 +210,9 @@ pub extern "system" fn Java_com_keptino_app_Core_source<'local>(
 	_this: JObject<'local>,
 	handle: jlong,
 ) -> jint {
-	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.source() as jint)))
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.source() as jint))
+	})
 }
 
 #[unsafe(no_mangle)]
@@ -210,7 +221,9 @@ pub extern "system" fn Java_com_keptino_app_Core_revision<'local>(
 	_this: JObject<'local>,
 	handle: jlong,
 ) -> jlong {
-	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.revision() as jlong)))
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.revision() as jlong))
+	})
 }
 
 #[unsafe(no_mangle)]
@@ -231,7 +244,9 @@ pub extern "system" fn Java_com_keptino_app_Core_modifiedTs<'local>(
 	handle: jlong,
 ) -> jlong {
 	guard(&mut env, 0, |_| {
-		with(handle, |vault| Ok(vault.modified_ts().min(jlong::MAX as u64) as jlong))
+		with(handle, |vault| {
+			Ok(vault.modified_ts().min(jlong::MAX as u64) as jlong)
+		})
 	})
 }
 
@@ -254,7 +269,9 @@ pub extern "system" fn Java_com_keptino_app_Core_next<'local>(
 	_this: JObject<'local>,
 	handle: jlong,
 ) -> jboolean {
-	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.next() as jboolean)))
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.next() as jboolean))
+	})
 }
 
 #[unsafe(no_mangle)]
@@ -263,7 +280,9 @@ pub extern "system" fn Java_com_keptino_app_Core_previous<'local>(
 	_this: JObject<'local>,
 	handle: jlong,
 ) -> jboolean {
-	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.previous() as jboolean)))
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.previous() as jboolean))
+	})
 }
 
 #[unsafe(no_mangle)]
@@ -313,7 +332,9 @@ pub extern "system" fn Java_com_keptino_app_Core_commit<'local>(
 	_this: JObject<'local>,
 	handle: jlong,
 ) -> jint {
-	guard(&mut env, 0, |_| with(handle, |vault| Ok(vault.commit() as jint)))
+	guard(&mut env, 0, |_| {
+		with(handle, |vault| Ok(vault.commit() as jint))
+	})
 }
 
 #[unsafe(no_mangle)]

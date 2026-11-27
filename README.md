@@ -14,7 +14,9 @@ original pepper seed and master password still open the vault.
 
 ### Android
 
-The Android app opens and edits Linux `.keptino` vaults. See
+Connect your phone, authorize USB debugging, and run `./android/setup.sh` to
+build and install Keptino or update it in place. The Android app opens and edits
+Linux `.keptino` vaults. See
 [Android setup, builds, and interoperability tests](android/README.md). Existing
 vaults require the original pepper and a device with enough available memory for
 the Linux 4 GiB password derivation. The platform protections below describe Linux;
@@ -35,7 +37,7 @@ Android uses Android Keystore and the lifecycle protections documented separatel
  - Uniform 24-character password generator; entries are deleted on a confirming second press.
  - Linux vault sync on unlock and save with Backblaze B2, Amazon S3, Google Cloud Storage, or Cloudflare R2. API credentials use systemd-creds.
  - Atomic file io, with the three previous saves kept as `<db>.keptino.1` to `.3` for recovery.
- - Reed-Solomon 8:4 erasure coding with BLAKE3 checksums and 4KiB+ shards, implemented in-tree (`erasure/`, no dependencies) and byte-compatible with every vault ever written.
+ - Reed-Solomon 8:4 erasure coding with BLAKE3 checksums and 4KiB+ shards, implemented in-tree (`common/erasure`, no dependencies) and byte-compatible with every vault ever written.
  - XChaCha20Poly1305 encryption.
  - LZ4 level 9 compression.
  - Simple TLV serialization.
@@ -64,7 +66,7 @@ compromised release that is yanked within days never reaches a build. If
 `cargo-audit` is installed (`cargo install cargo-audit --locked`), setup runs
 `cargo audit` before building and prints any advisories without stopping.
 Advisories that are accepted for now are listed with their reasons in
-`linux/.cargo/audit.toml`, so only new ones appear.
+`.cargo/audit.toml`, so only new ones appear.
 
 Rerunning setup reuses the encrypted credentials in `~/.config/keptino`.
 Setup checks the pepper and the active provider credential. If either file
