@@ -11,6 +11,7 @@ use crate::{
 		self, AAD_FORMAT, Envelope, FieldAtlas, FormatError, KdfParams, TAG_META, TAG_PASSWORD,
 		encode_envelope, envelope_aad, field, meta_field,
 	},
+	policy,
 };
 use chacha20poly1305::{
 	XChaCha20Poly1305,
@@ -849,6 +850,158 @@ impl<K: KeyStore> Database<K> {
 	}
 }
 
+/// Which copy of a vault a session opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+	/// Neither copy existed; the database was created.
+	New,
+	Local,
+	Remote,
+}
+
+/// A reason for the head to pause uploads after an unlock that succeeded:
+/// writing over the other copy might lose something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caution {
+	/// The preferred copy did not open and the other one did.
+	OtherCopyFailed(Source),
+	/// A legacy local copy won on its timestamp over a remote copy that
+	/// carries a revision, as happens once during the rollout of revisions.
+	LegacyLocalOverVersionedRemote,
+}
+
+/// An unlocked vault and how it came to be open.
+pub struct Unlocked<K: KeyStore> {
+	pub database: Database<K>,
+	pub source: Source,
+	/// The cost the opened copy was derived with, which a save records.
+	pub cost: KdfParams,
+	pub caution: Option<Caution>,
+}
+
+/// Why no copy opened. `E` is the head's key derivation error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnlockError<E> {
+	/// The two copies were made with different salts: another vault of the
+	/// same name lives in the bucket.
+	DifferentVault,
+	Derive(E),
+	/// The last copy tried did not open.
+	Open(OpenError),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for UnlockError<E> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::DifferentVault => {
+				f.write_str("A different vault already uses this name in the selected bucket.")
+			}
+			Self::Derive(err) => write!(f, "{err}"),
+			Self::Open(err) => write!(f, "{err}"),
+		}
+	}
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for UnlockError<E> {}
+
+/// Opens the better of the local and remote copies, or creates the vault
+/// when there is neither. `derive` turns a salt and a cost into the master
+/// key; it runs once when both copies share a cost, which they do except
+/// across a rekey. The preferred copy is tried first; when it fails and the
+/// other opens, the result carries a caution so the head pauses uploads
+/// instead of writing over a copy it could not read.
+pub fn unlock<K: KeyStore, E>(
+	db_name: &str,
+	local: Option<Envelope>,
+	remote: Option<Envelope>,
+	default_cost: KdfParams,
+	mut derive: impl FnMut(&[u8; crypto::SALT_SIZE], KdfParams) -> Result<K, E>,
+) -> Result<Unlocked<K>, UnlockError<E>> {
+	let (first, second, caution) = match (local, remote) {
+		(None, None) => {
+			let mut salt = [0u8; crypto::SALT_SIZE];
+			getrandom::fill(&mut salt).expect("Salt generation failed");
+			let key = derive(&salt, default_cost).map_err(UnlockError::Derive)?;
+			let database = Database::try_new(key, db_name, &salt)
+				.map_err(|err| UnlockError::Open(OpenError::Memory(err.to_string())))?;
+			return Ok(Unlocked {
+				database,
+				source: Source::New,
+				cost: default_cost,
+				caution: None,
+			});
+		}
+		(Some(local), None) => ((local, Source::Local), None, None),
+		(None, Some(remote)) => ((remote, Source::Remote), None, None),
+		(Some(local), Some(remote)) => {
+			if local.salt != remote.salt {
+				return Err(UnlockError::DifferentVault);
+			}
+			let local_first = policy::prefer_local(&local, &remote);
+			let caution = (local_first && remote.revision > local.revision)
+				.then_some(Caution::LegacyLocalOverVersionedRemote);
+			let local = (local, Source::Local);
+			let remote = (remote, Source::Remote);
+			if local_first {
+				(local, Some(remote), caution)
+			} else {
+				(remote, Some(local), caution)
+			}
+		}
+	};
+	// A key that failed on one copy serves the other when the costs match.
+	let mut spare: Option<(KdfParams, K)> = None;
+	let mut open = |envelope: &Envelope| -> Result<(Database<K>, KdfParams), UnlockError<E>> {
+		let cost = envelope.kdf;
+		let key = match spare.take() {
+			Some((previous, key)) if previous == cost => key,
+			other => {
+				if let Some((_, key)) = other {
+					key.zeroize();
+				}
+				derive(&envelope.salt, cost).map_err(UnlockError::Derive)?
+			}
+		};
+		match Database::open(envelope, key) {
+			Ok(database) if database.meta("db_name").is_some() => Ok((database, cost)),
+			Ok(database) => {
+				database.zeroize();
+				Err(UnlockError::Open(OpenError::Format(FormatError::Damaged)))
+			}
+			Err((key, err)) => {
+				spare = Some((cost, key));
+				Err(UnlockError::Open(err))
+			}
+		}
+	};
+	let (candidate, source) = first;
+	let outcome = match open(&candidate) {
+		Ok((database, cost)) => Ok((database, cost, source, caution)),
+		Err(err) => match second {
+			None => Err(err),
+			Some((alternate, alternate_source)) => open(&alternate).map(|(database, cost)| {
+				(
+					database,
+					cost,
+					alternate_source,
+					Some(Caution::OtherCopyFailed(source)),
+				)
+			}),
+		},
+	};
+	// A key left over from a failed attempt is wiped on every path out.
+	if let Some((_, key)) = spare.take() {
+		key.zeroize();
+	}
+	let (database, source, cost, caution) = outcome.map(|(d, c, s, w)| (d, s, c, w))?;
+	Ok(Unlocked {
+		database,
+		source,
+		cost,
+		caution,
+	})
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
 	use super::*;
@@ -857,7 +1010,7 @@ pub(crate) mod tests {
 	/// A heap key for tests: a wiping array behind a mutex.
 	pub struct HeapKey(Mutex<Zeroizing<[u8; KEY_SIZE]>>);
 
-	#[derive(Debug)]
+	#[derive(Debug, PartialEq, Eq)]
 	pub struct Never;
 	impl std::fmt::Display for Never {
 		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1089,5 +1242,202 @@ pub(crate) mod tests {
 		assert!(Database::open(&marked, HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap()).is_ok());
 		db.zeroize();
 		assert!(db.names().is_empty());
+	}
+
+	/// A vault file with exactly the meta entries the database holds: the
+	/// save path's cryptography without its bookkeeping, for copies whose
+	/// revision and timestamps a test wants to control.
+	fn file_as_is(db: &Database<HeapKey>, outer_revision: Option<&str>) -> Vec<u8> {
+		let counter: u128 = db.meta("nonce").unwrap().parse().unwrap();
+		let mut nonce = [0u8; NONCE_SIZE];
+		nonce[..16].copy_from_slice(&counter.to_le_bytes());
+		let compressed = crypto::compress(&db.serialize());
+		let ciphertext = db
+			.master_key
+			.with_key(|key| crypto::encrypt(&compressed, key, &nonce, &[]));
+		let mut meta = db.meta_pairs();
+		if let Some(revision) = outer_revision {
+			for (name, value) in &mut meta {
+				if name == "revision" {
+					*value = revision.to_owned();
+				}
+			}
+		}
+		encode_envelope(&meta, &ciphertext)
+	}
+
+	#[test]
+	fn unlock_orders_the_copies_falls_back_and_derives_once() {
+		let key = |salt: &[u8; 32], cost: KdfParams| -> Result<HeapKey, Never> {
+			let mut bytes = [0u8; KEY_SIZE];
+			bytes.copy_from_slice(
+				blake3::hash(&[salt.as_slice(), &cost.m_cost.to_le_bytes()].concat()).as_bytes(),
+			);
+			HeapKey::from_bytes(&bytes)
+		};
+		let derivations = std::cell::Cell::new(0);
+		let mut counted = |salt: &[u8; 32], cost: KdfParams| {
+			derivations.set(derivations.get() + 1);
+			key(salt, cost)
+		};
+		let created = unlock("example", None, None, KdfParams::DEBUG, &mut counted).unwrap();
+		assert_eq!((created.source, created.caution), (Source::New, None));
+		assert_eq!(created.database.meta("db_name").as_deref(), Some("example"));
+		let mut entry = Entry::new();
+		entry.set_name("first");
+		created.database.set_password_entry(entry);
+		let older = created.database.encode(false, KdfParams::DEBUG);
+		let mut entry = Entry::new();
+		entry.set_name("second");
+		created.database.set_password_entry(entry);
+		let newer = created.database.encode(false, KdfParams::DEBUG);
+		let parse = |file: &[u8]| Envelope::parse(file, KdfParams::DEBUG).unwrap();
+		derivations.set(0);
+		let opened = unlock(
+			"example",
+			Some(parse(&older)),
+			Some(parse(&newer)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!((opened.source, opened.caution), (Source::Remote, None));
+		assert_eq!(opened.database.names().len(), 2);
+		assert_eq!(opened.cost, KdfParams::DEBUG);
+		assert_eq!(derivations.get(), 1);
+		let opened = unlock(
+			"example",
+			Some(parse(&newer)),
+			Some(parse(&older)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(opened.source, Source::Local);
+		let opened = unlock(
+			"example",
+			Some(parse(&older)),
+			Some(parse(&older)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(opened.source, Source::Local, "local wins a tie");
+		let opened = unlock(
+			"example",
+			None,
+			Some(parse(&older)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(opened.source, Source::Remote);
+
+		// The preferred copy fails its mirror check; the other opens under
+		// the same key, derived once.
+		let damaged = file_as_is(&opened.database, Some("9"));
+		derivations.set(0);
+		let recovered = unlock(
+			"example",
+			Some(parse(&older)),
+			Some(parse(&damaged)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(recovered.source, Source::Local);
+		assert_eq!(
+			recovered.caution,
+			Some(Caution::OtherCopyFailed(Source::Remote))
+		);
+		assert_eq!(derivations.get(), 1);
+		assert_eq!(
+			unlock(
+				"example",
+				None,
+				Some(parse(&damaged)),
+				KdfParams::DEBUG,
+				&mut counted
+			)
+			.err(),
+			Some(UnlockError::Open(OpenError::Decryption))
+		);
+		let wrong = |_: &[u8; 32], _: KdfParams| HeapKey::from_bytes(&[1; KEY_SIZE]);
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&older)),
+				None,
+				KdfParams::DEBUG,
+				wrong
+			)
+			.err(),
+			Some(UnlockError::Open(OpenError::Decryption))
+		);
+		let failing =
+			|_: &[u8; 32], _: KdfParams| -> Result<HeapKey, &'static str> { Err("no memory") };
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&older)),
+				None,
+				KdfParams::DEBUG,
+				failing
+			)
+			.err(),
+			Some(UnlockError::Derive("no memory"))
+		);
+
+		// A copy from another vault of the same name.
+		let other = unlock("example", None, None, KdfParams::DEBUG, &mut counted).unwrap();
+		let foreign = other.database.encode(false, KdfParams::DEBUG);
+		assert_eq!(
+			unlock(
+				"example",
+				Some(parse(&older)),
+				Some(parse(&foreign)),
+				KdfParams::DEBUG,
+				&mut counted
+			)
+			.err(),
+			Some(UnlockError::DifferentVault)
+		);
+
+		// A legacy local copy, newer by timestamp, over a versioned remote.
+		let db = &opened.database;
+		db.set_meta_entry(MetaEntry::new("revision", "5"));
+		db.set_meta_entry(MetaEntry::new("modified_ts", "100"));
+		let versioned = file_as_is(db, None);
+		db.remove_meta_entry("revision");
+		db.set_meta_entry(MetaEntry::new("modified_ts", "200"));
+		let legacy = file_as_is(db, None);
+		let legacy_envelope = parse(&legacy);
+		assert_eq!(legacy_envelope.revision, None);
+		let rollout = unlock(
+			"example",
+			Some(legacy_envelope),
+			Some(parse(&versioned)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(rollout.source, Source::Local);
+		assert_eq!(
+			rollout.caution,
+			Some(Caution::LegacyLocalOverVersionedRemote)
+		);
+		let settled = unlock(
+			"example",
+			Some(parse(&versioned)),
+			Some(parse(&legacy)),
+			KdfParams::DEBUG,
+			&mut counted,
+		)
+		.unwrap();
+		assert_eq!(
+			(settled.source, settled.caution),
+			(Source::Remote, None),
+			"a legacy remote never pauses uploads"
+		);
 	}
 }

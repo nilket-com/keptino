@@ -6,10 +6,9 @@ use crate::{
 	security::{LockedKey, derive_master_key},
 };
 use keptino_core::{
-	crypto::{PEPPER_SIZE, SALT_SIZE},
+	crypto::PEPPER_SIZE,
 	format::{Envelope, KdfParams, field},
-	policy,
-	vault::{Database, OpenError, PasswordEntry},
+	vault::{self, Database, OpenError, PasswordEntry, UnlockError, unlock},
 };
 use zeroize::Zeroizing;
 /// Where an opened database came from.
@@ -40,7 +39,9 @@ pub struct Vault {
 
 impl Vault {
 	/// Opens the newer of the local and remote copies, preferring the local
-	/// one on a tie, or creates an empty database when there is neither.
+	/// one on a tie, or creates an empty database when there is neither. The
+	/// selection, the fallback and the cautions are the core's; this head
+	/// decides what to do about a copy that does not parse.
 	pub fn open(
 		db_name: &str,
 		password: &[u8],
@@ -49,96 +50,79 @@ impl Vault {
 		remote: Option<&[u8]>,
 		mem_kib: u32,
 	) -> Result<Self> {
-		let default_cost = KdfParams::memory_only(mem_kib);
-		let parse = |file: &[u8]| Envelope::parse(file, default_cost).map_err(Error::from);
-		let local = local.map(parse);
-		let remote = remote.map(parse);
-		let mut uploads_paused = false;
-		let (first, second) = match (local, remote) {
-			(None, None) => return Self::create(db_name, password, pepper, default_cost),
-			(Some(Ok(local)), Some(Ok(remote))) => {
-				if local.salt != remote.salt {
-					return Err(Error::Invalid(
-						"a different vault uses this name in the bucket",
-					));
-				}
-				let remote_first = !policy::prefer_local(&local, &remote);
-				// A newer legacy timestamp can win selection during rollout.
-				// Keep its local edits, but never overwrite a versioned remote.
-				uploads_paused = !remote_first && remote.revision > local.revision;
-				let l = (local, Source::Local);
-				let r = (remote, Source::Remote);
-				if remote_first {
-					(r, Some(l))
-				} else {
-					(l, Some(r))
-				}
-			}
-			(Some(Ok(local)), Some(Err(Error::Corrupt(_)))) => {
-				uploads_paused = true;
-				((local, Source::Local), None)
-			}
-			(Some(Err(Error::Corrupt(_))), Some(Ok(remote))) => {
-				uploads_paused = true;
-				((remote, Source::Remote), None)
-			}
-			(Some(Err(err)), _) | (_, Some(Err(err))) => return Err(err),
-			(Some(Ok(local)), None) => ((local, Source::Local), None),
-			(None, Some(Ok(remote))) => ((remote, Source::Remote), None),
-		};
-		let (candidate, source) = first;
-		let mut cached = None;
-		let mut unlock = |envelope: Envelope| -> Result<_> {
-			let cost = envelope.kdf;
-			let key = match cached.take() {
-				Some((previous, key)) if previous == cost => key,
-				_ => derive_master_key(password, pepper, &envelope.salt, cost)?,
-			};
-			match Database::open(&envelope, key) {
-				Ok(database) if database.meta("db_name").is_some() => Ok((database, cost)),
-				Ok(_) => Err(Error::Corrupt("incomplete database")),
-				Err((key, error)) => {
-					cached = Some((cost, key));
-					Err(match error {
-						OpenError::Decryption => Error::Decryption,
-						OpenError::Format(error) => error.into(),
-						OpenError::Memory(_) => Error::Memory("cannot allocate vault key memory"),
-					})
-				}
-			}
-		};
-		let ((database, cost), source) = match unlock(candidate) {
-			Ok(opened) => (opened, source),
-			Err(err) => {
-				let (alternate, source) = second.ok_or(err)?;
-				uploads_paused = true;
-				(unlock(alternate)?, source)
-			}
-		};
-		Ok(Self {
-			database,
-			source,
-			working: PasswordEntry::try_new()?,
-			uploads_paused,
-			cost,
-		})
+		Self::open_at(
+			db_name,
+			password,
+			pepper,
+			local,
+			remote,
+			KdfParams::memory_only(mem_kib),
+		)
 	}
 
+	/// A new vault derived at `cost`, for tests of costs other than the
+	/// default.
+	#[cfg(test)]
 	fn create(
 		db_name: &str,
 		password: &[u8],
 		pepper: &[u8; PEPPER_SIZE],
 		cost: KdfParams,
 	) -> Result<Self> {
-		let mut salt = [0u8; SALT_SIZE];
-		getrandom::fill(&mut salt).map_err(|_| Error::Kdf("no system randomness".into()))?;
-		let key = derive_master_key(password, pepper, &salt, cost)?;
+		Self::open_at(db_name, password, pepper, None, None, cost)
+	}
+
+	fn open_at(
+		db_name: &str,
+		password: &[u8],
+		pepper: &[u8; PEPPER_SIZE],
+		local: Option<&[u8]>,
+		remote: Option<&[u8]>,
+		default_cost: KdfParams,
+	) -> Result<Self> {
+		let parse = |file: &[u8]| Envelope::parse(file, default_cost).map_err(Error::from);
+		let local = local.map(parse);
+		let remote = remote.map(parse);
+		// A copy that fails to parse is set aside and the other one opened,
+		// with uploads paused so it is not written over blindly.
+		let mut uploads_paused = false;
+		let (local, remote) = match (local, remote) {
+			(Some(Ok(local)), Some(Err(Error::Corrupt(_)))) => {
+				uploads_paused = true;
+				(Some(local), None)
+			}
+			(Some(Err(Error::Corrupt(_))), Some(Ok(remote))) => {
+				uploads_paused = true;
+				(None, Some(remote))
+			}
+			(Some(Err(err)), _) | (_, Some(Err(err))) => return Err(err),
+			(local, remote) => (local.map(Result::unwrap), remote.map(Result::unwrap)),
+		};
+		let derive =
+			|salt: &[u8; 32], cost: KdfParams| derive_master_key(password, pepper, salt, cost);
+		let unlocked =
+			unlock(db_name, local, remote, default_cost, derive).map_err(|err| match err {
+				UnlockError::DifferentVault => {
+					Error::Invalid("a different vault uses this name in the bucket")
+				}
+				UnlockError::Derive(err) => err,
+				UnlockError::Open(OpenError::Decryption) => Error::Decryption,
+				UnlockError::Open(OpenError::Format(err)) => err.into(),
+				UnlockError::Open(OpenError::Memory(_)) => {
+					Error::Memory("cannot allocate vault key memory")
+				}
+			})?;
+		let source = match unlocked.source {
+			vault::Source::New => Source::New,
+			vault::Source::Local => Source::Local,
+			vault::Source::Remote => Source::Remote,
+		};
 		Ok(Self {
-			database: Database::try_new(key, db_name, &salt)?,
+			database: unlocked.database,
 			working: PasswordEntry::try_new()?,
-			source: Source::New,
-			uploads_paused: false,
-			cost,
+			source,
+			uploads_paused: uploads_paused || unlocked.caution.is_some(),
+			cost: unlocked.cost,
 		})
 	}
 

@@ -12,7 +12,7 @@ use keptino_core::{
 	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
 	format::{Envelope, KdfParams},
 	policy,
-	vault::KeyStore,
+	vault::{Caution, KeyStore, Source, UnlockError, unlock},
 };
 use std::{
 	env, fs,
@@ -211,35 +211,42 @@ pub async fn load(
 		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None, None),
 		Err(err) => return Err(err),
 	};
-	let local = local.map(|envelope| Candidate {
-		envelope,
-		source: "local",
-	});
-	let remote = remote.map(|envelope| Candidate {
-		envelope,
-		source: "remote",
-	});
-	let database = match (local, remote) {
-		(None, None) => new_db(db_name, master_password)?,
-		(Some(only), None) | (None, Some(only)) => open_candidates(only, None, master_password)?.0,
-		(Some(local), Some(remote)) => {
-			if local.envelope.salt != remote.envelope.salt {
-				return Err(
-					"A different vault already uses this name in the selected bucket.".into(),
-				);
-			}
-			let (first, second) = if policy::prefer_local(&local.envelope, &remote.envelope) {
-				(local, remote)
-			} else {
-				(remote, local)
-			};
-			let (database, rejected) = open_candidates(first, Some(second), master_password)?;
-			if let Some(rejected) = rejected {
-				provider = Err(rejected);
-			}
-			database
-		}
+	// One derivation serves both copies, which share a salt and, except
+	// across a rekey, a cost; the password is wiped when the closure drops.
+	let password = master_password;
+	let pepper = load_pepper()?;
+	let derive = |salt: &[u8; SALT_SIZE], cost: KdfParams| {
+		master_key_derivation(&password, &pepper, salt, cost)
 	};
+	let unlocked = unlock(db_name, local, remote, KdfParams::BUILD_DEFAULT, derive).map_err(
+		|err| match err {
+			UnlockError::Open(_) => {
+				"Cannot decrypt vault. Check the master password and pepper.".to_owned()
+			}
+			other => other.to_string(),
+		},
+	)?;
+	let database = unlocked.database;
+	match unlocked.source {
+		Source::New => info("New database created."),
+		Source::Local => info("Local database loaded."),
+		Source::Remote => info("Remote database loaded."),
+	}
+	if let Some(caution) = unlocked.caution {
+		let note = match caution {
+			Caution::OtherCopyFailed(Source::Remote) => {
+				"The remote copy failed authentication and may be corrupt or tampered with; opened the local copy."
+			}
+			Caution::OtherCopyFailed(_) => {
+				"The local copy failed authentication and may be corrupt or tampered with; opened the remote copy."
+			}
+			Caution::LegacyLocalOverVersionedRemote => {
+				"The local copy predates revisions and was opened; the remote copy carries a revision."
+			}
+		};
+		warn(note);
+		provider = Err(note.to_owned());
+	}
 	let opened = database.revision();
 	if let Err(err) = check_revision(opened, last_seen_revision(db_name), db_name) {
 		database.zeroize();
@@ -256,55 +263,6 @@ pub async fn load(
 		remote: provider,
 		synced: Arc::new(Mutex::new(synced)),
 	})
-}
-
-struct Candidate {
-	envelope: Envelope,
-	source: &'static str,
-}
-
-/// Derives the key once (both candidates share a salt) and opens the first
-/// copy that authenticates. A copy that fails while the other opens is
-/// reported, and the caller pauses uploads so it is not overwritten blindly.
-fn open_candidates(
-	first: Candidate,
-	second: Option<Candidate>,
-	password: Zeroizing<String>,
-) -> Result<(Database, Option<String>), String> {
-	// The password is consumed by the first derivation; the second copy
-	// shares the salt and, except across a rekey, the cost, so the same key
-	// serves it. A different cost on the second copy is reported as a
-	// failure to open it, which is also what a forged cost would produce.
-	let key = master_key_derivation(password, first.envelope.salt, first.envelope.kdf)?;
-	let key = match Database::open(&first.envelope, key) {
-		Ok(database) => {
-			info(&format!("{} database loaded.", first.source));
-			return Ok((database, None));
-		}
-		Err((key, why)) => {
-			warn(&format!("{} copy: {why}", first.source));
-			key
-		}
-	};
-	if let Some(second) = second
-		&& second.envelope.kdf == first.envelope.kdf
-		&& let Ok(database) = Database::open(&second.envelope, key)
-	{
-		let rejected = format!(
-			"The {} copy failed authentication and may be corrupt or tampered with; opened the {} copy.",
-			first.source, second.source
-		);
-		warn(&rejected);
-		return Ok((database, Some(rejected)));
-	}
-	Err("Cannot decrypt vault. Check the master password and pepper.".into())
-}
-
-fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database, String> {
-	let mut salt = [0u8; SALT_SIZE];
-	getrandom::fill(&mut salt).unwrap();
-	let master_key = master_key_derivation(master_password, salt, KdfParams::BUILD_DEFAULT)?;
-	Ok(Database::new(master_key, db_name, &salt))
 }
 
 /// The TPM-sealed pepper, released by systemd-creds for this user. A missing
@@ -329,13 +287,13 @@ fn load_pepper() -> Result<Zeroizing<[u8; PEPPER_SIZE]>, String> {
 
 /// Derives the master key and moves it into secret memory.
 fn master_key_derivation(
-	password: Zeroizing<String>,
-	salt: [u8; SALT_SIZE],
+	password: &str,
+	pepper: &[u8; PEPPER_SIZE],
+	salt: &[u8; SALT_SIZE],
 	kdf: KdfParams,
 ) -> Result<SecretMemory, String> {
-	let pepper = load_pepper()?;
 	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
-	crypto::derive_master_key(password.as_bytes(), &pepper, &salt, kdf, &mut key)
+	crypto::derive_master_key(password.as_bytes(), pepper, salt, kdf, &mut key)
 		.map_err(|err| err.to_string())?;
 	SecretMemory::from_bytes(&key).map_err(|_| "Secret memory unavailable.".into())
 }

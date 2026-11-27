@@ -143,7 +143,8 @@ duplicates of the atlas, envelope, Argon2 derivation, AEAD, LZ4, erasure
 framing and in-memory vault store are deleted. Every committed fixture is
 parsed and repaired byte for byte by core's tests, the debug fixtures are
 decrypted end to end with the fixture pepper, and the release fixtures by an
-ignored 4 GiB test both agents ran. Sharing the remaining unlock orchestration is pending.
+ignored 4 GiB test both agents ran. ADR 0005 shared the remaining unlock
+orchestration across both heads.
 
 ## Status, 2026-11-26 evening
 
