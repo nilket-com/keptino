@@ -852,6 +852,7 @@ dependencies = [
  "jni 0.21.1",
  "keptino-core",
  "keptino-fido",
+ "keptino-s3",
  "libc",
  "zeroize",
 ]

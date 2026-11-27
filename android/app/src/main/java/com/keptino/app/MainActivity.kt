@@ -51,6 +51,11 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private var requestR2 by mutableStateOf(false)
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        requestR2 = BuildConfig.DEBUG && intent.action == "com.keptino.app.IMPORT_R2"
+    }
     private val vm: VaultViewModel by viewModels()
     private val timer = Handler(Looper.getMainLooper())
     private var idleDeadline = 0L
@@ -63,6 +68,7 @@ class MainActivity : ComponentActivity() {
     private var clipboardToken: String? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestR2 = savedInstanceState == null && BuildConfig.DEBUG && intent.action == "com.keptino.app.IMPORT_R2"
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         window.decorView.apply {
             filterTouchesWhenObscured = true
@@ -85,7 +91,7 @@ class MainActivity : ComponentActivity() {
                 warnings = nativeWarnings + withContext(Dispatchers.IO) { deviceWarnings(applicationContext) }
                 vm.refreshKeyProtection()
             }
-            KeptinoTheme { VaultScreen(vm, ::copySecret, ::lockVault, ::authenticate, { AndroidSecurityKey(this) }, warnings) }
+            KeptinoTheme { VaultScreen(vm, ::copySecret, ::lockVault, ::authenticate, { AndroidSecurityKey(this) }, warnings, requestR2) { requestR2 = false } }
         }
     }
     internal suspend fun authenticate(cipher: Cipher): Cipher = withContext(Dispatchers.Main.immediate) {
@@ -218,12 +224,19 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Unit, authenticate: suspend (Cipher) -> Cipher, securityKey: () -> AndroidSecurityKey, warnings: List<String>) {
+private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Unit, authenticate: suspend (Cipher) -> Cipher, securityKey: () -> AndroidSecurityKey, warnings: List<String>, requestR2: Boolean, handledR2: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
     var seed by remember { mutableStateOf("") }
     var pepper by remember { mutableStateOf("") }
+    var r2 by remember { mutableStateOf(false) }
+    var account by remember { mutableStateOf("") }
+    var bucket by remember { mutableStateOf("") }
+    var confirmUsb by remember { mutableStateOf(false) }
+    LaunchedEffect(requestR2, vm.unlocked, vm.busy) {
+        if (requestR2 && !vm.unlocked && !vm.busy) { confirmUsb = true; handledR2() }
+    }
     var keyId by remember { mutableStateOf("") }
     var appKey by remember { mutableStateOf("") }
     var authUrl by remember { mutableStateOf("https://api.backblazeb2.com") }
@@ -300,16 +313,31 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 } else Text("Working…")
             }
             if (vm.status.isNotEmpty()) Text(vm.status)
+            if (!vm.unlocked && BuildConfig.DEBUG) {
+                OutlinedButton(enabled = !vm.busy, onClick = { confirmUsb = true }) { Text("Import R2 setup from Linux") }
+                if (confirmUsb) AlertDialog(onDismissRequest = { confirmUsb = false },
+                    title = { Text("Use this Linux computer’s R2 setup?") },
+                    text = { Text("Keptino will check the bucket, then ask you to unlock the phone to save the Linux pepper and R2 credentials.") },
+                    confirmButton = { TextButton(onClick = { confirmUsb = false; vm.importR2(authenticate) }) { Text("Receive setup") } },
+                    dismissButton = { TextButton(onClick = { confirmUsb = false }) { Text("Cancel") } })
+            }
             if (!vm.configured) {
                 Text("Connect to your Linux vault", style = MaterialTheme.typography.titleLarge)
                 Text("Use the original pepper seed, or import its 64-character hexadecimal value. Seed derivation requires 4 GiB of available memory. Setup is encrypted with Android Keystore.")
                 Input("Original pepper seed", seed, { seed = it }, secret = true, enabled = !vm.busy)
                 Input("Or original pepper (hex)", pepper, { pepper = it }, secret = true, enabled = !vm.busy)
-                Text("Backblaze sync (optional)")
-                Input("Application key ID", keyId, { keyId = it }, enabled = !vm.busy)
-                Input("Application key", appKey, { appKey = it }, secret = true, enabled = !vm.busy)
-                if (BuildConfig.DEBUG) Input("Backblaze API base URL", authUrl, { authUrl = it }, enabled = !vm.busy)
-                Button(enabled = !vm.busy, onClick = { vm.setup(seed, pepper, keyId, appKey, authUrl, authenticate); seed = ""; pepper = ""; appKey = "" }) { Text("Save setup") }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Checkbox(r2, { r2 = it; keyId = ""; appKey = "" }, enabled = !vm.busy)
+                    Text("Use Cloudflare R2")
+                }
+                if (r2) {
+                    Input("R2 account ID", account, { account = it }, enabled = !vm.busy)
+                    Input("R2 bucket name", bucket, { bucket = it }, enabled = !vm.busy)
+                } else Text("Backblaze sync (optional)")
+                Input(if (r2) "R2 access key ID" else "Application key ID", keyId, { keyId = it }, enabled = !vm.busy)
+                Input(if (r2) "R2 secret access key" else "Application key", appKey, { appKey = it }, secret = true, enabled = !vm.busy)
+                if (BuildConfig.DEBUG && !r2) Input("Backblaze API base URL", authUrl, { authUrl = it }, enabled = !vm.busy)
+                Button(enabled = !vm.busy, onClick = { vm.setup(seed, pepper, keyId, appKey, authUrl, authenticate, if (r2) "r2" else "b2", account, bucket); seed = ""; pepper = ""; appKey = "" }) { Text("Save setup") }
             } else if (!vm.unlocked) {
                 Input("Database name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
                 Input("Master password", password, { password = it }, secret = true, enabled = !vm.busy)

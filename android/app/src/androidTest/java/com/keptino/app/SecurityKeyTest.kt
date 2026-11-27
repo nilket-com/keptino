@@ -157,7 +157,7 @@ class SecurityKeyTest {
         val name = "rekey-" + java.util.UUID.randomUUID()
         val original = byteArrayOf(1)
         val successor = byteArrayOf(2)
-        val offline = BackblazeSession(client, name, original, offline = true, initiallyPaused = false)
+        val offline = CloudSession(client, name, original, offline = true, initiallyPaused = false)
         assertEquals("?", offline.predecessor)
         offline.rekeyCommitted()
         assertFalse(offline.upload(successor) { true })
@@ -167,7 +167,7 @@ class SecurityKeyTest {
         assertFalse(offline.upload(successor) { true })
         assertArrayEquals(original, client.download(name))
 
-        fun restart() = BackblazeSession(client, name, successor, offline = true, initiallyPaused = false,
+        fun restart() = CloudSession(client, name, successor, offline = true, initiallyPaused = false,
             pendingPredecessor = fingerprint(original))
         assertFalse(restart().upload(successor) { false })
         assertArrayEquals(original, client.download(name))

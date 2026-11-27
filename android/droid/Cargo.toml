@@ -9,6 +9,7 @@ description = "Keptino vault core for Android."
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+keptino-s3 = { path = "../../common/s3" }
 getrandom = "0.4.1"
 jni = { version = "0.21.1", default-features = false }
 keptino-core = { path = "../../common/core" }

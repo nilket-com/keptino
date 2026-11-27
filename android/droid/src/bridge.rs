@@ -700,3 +700,54 @@ pub extern "system" fn Java_com_keptino_app_Core_prepareKeys<'local>(
 		Ok(register(next))
 	})
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_signR2<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	put: jboolean,
+	account: JString<'local>,
+	bucket: JString<'local>,
+	name: JString<'local>,
+	id: JString<'local>,
+	secret: JString<'local>,
+	body: JByteArray<'local>,
+	seconds: jlong,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let account = string(env, &account)?;
+		if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
+			return Err(Error::Invalid("invalid R2 account ID"));
+		}
+		let endpoint = keptino_s3::validate_endpoint(&format!(
+			"https://{}.r2.cloudflarestorage.com",
+			account.to_ascii_lowercase()
+		))
+		.map_err(|_| Error::Invalid("invalid R2 endpoint"))?;
+		let signed = keptino_s3::sign(
+			if put != 0 {
+				keptino_s3::Method::Put
+			} else {
+				keptino_s3::Method::Get
+			},
+			&endpoint,
+			&string(env, &bucket)?,
+			&format!("{}.keptino", string(env, &name)?.as_str()),
+			"auto",
+			&string(env, &id)?,
+			&string(env, &secret)?,
+			&bytes(env, &body)?,
+			u64::try_from(seconds).map_err(|_| Error::Invalid("invalid system time"))?,
+		)
+		.map_err(|_| Error::Invalid("invalid R2 request"))?;
+		string_array(
+			env,
+			vec![
+				signed.url,
+				signed.amz_date,
+				signed.content_sha256,
+				signed.authorization,
+			],
+		)
+	})
+}

@@ -16,6 +16,8 @@ class DifferentVault(message: String) : RuntimeException(message)
 
 object Core {
     init { System.loadLibrary("droid") }
+    @JvmStatic external fun signR2(put: Boolean, account: String, bucket: String, name: String,
+        id: String, secret: String, body: ByteArray, seconds: Long): Array<String>
     @JvmStatic external fun preflight(): Array<String>
     @JvmStatic external fun derivePepper(seed: ByteArray, memKib: Int): ByteArray
     fun open(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo? = null): Long =

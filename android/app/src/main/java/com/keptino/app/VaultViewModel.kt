@@ -36,7 +36,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var healthRows by mutableStateOf<Array<String>?>(null); private set
     internal var generator by mutableStateOf(GeneratorOptions())
     var keyProtection by mutableStateOf<String?>(null); private set
-    private var sessionSync: BackblazeSession? = null
+    private var sessionSync: CloudSession? = null
     private var heldFile: ByteArray? = null
     var slots by mutableStateOf<Array<String>?>(null); private set
     var adoptName by mutableStateOf<String?>(null); private set
@@ -70,10 +70,11 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun changeSetup() { if (!busy && !unlocked) { configured = false; status = "Leave both pepper fields empty to keep the saved pepper" } }
-    fun setup(seed: String, pepperHex: String, keyIdInput: String, appKeyInput: String, authUrl: String, authenticate: suspend (Cipher) -> Cipher) = task { started ->
+    fun setup(seed: String, pepperHex: String, keyIdInput: String, appKeyInput: String, authUrl: String, authenticate: suspend (Cipher) -> Cipher,
+              provider: String = "b2", account: String = "", bucket: String = "") = task { started ->
         // Backblaze keys never contain whitespace; keyboards and pastes often add some.
         val keyId = keyIdInput.trim(); val appKey = appKeyInput.trim()
-        require((keyId.isBlank() && appKey.isBlank()) || (keyId.isNotBlank() && appKey.isNotBlank())) { "Enter both Backblaze credentials or leave both empty" }
+        require((keyId.isBlank() && appKey.isBlank()) || (keyId.isNotBlank() && appKey.isNotBlank())) { "Enter both access keys or leave both empty" }
         val pepper = withContext(Dispatchers.IO) {
             if (pepperHex.isNotBlank()) {
                 require(pepperHex.matches(Regex("[0-9a-fA-F]{64}"))) { "Pepper must be exactly 64 hexadecimal characters" }
@@ -86,13 +87,34 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         try {
-            withContext(Dispatchers.IO) { storage.writeSettings(Settings(pepper, keyId, appKey, authUrl), authenticate) }
+            withContext(Dispatchers.IO) { storage.writeSettings(Settings(pepper, keyId, appKey, authUrl, provider, account.trim(), bucket.trim()), authenticate) }
             configured = true
             refreshKeyProtection()
             if (started == generation) status = "Setup saved"
         } finally {
             pepper.fill(0)
         }
+    }
+    fun importR2(authenticate: suspend (Cipher) -> Cipher) = task { started ->
+        check(!unlocked)
+        val name = dbName
+        status = "Waiting for the USB setup helper on Linux…"
+        val cache = getApplication<Application>().cacheDir
+        val (token, received) = withContext(Dispatchers.IO) { UsbSetup.receive(cache) }
+        try {
+            val found = withContext(Dispatchers.IO) { R2(received).fetch(name).bytes != null }
+            check(started == generation) { "Setup canceled" }
+            withContext(Dispatchers.IO) { storage.writeSettings(received, authenticate) }
+            withContext(Dispatchers.IO) { UsbSetup.receipt(cache, token, if (found) "found" else "empty") }
+            if (started == generation) {
+                configured = true
+                refreshKeyProtection()
+                status = if (found) "R2 setup saved. Found $name.keptino." else "R2 setup saved. No $name.keptino in the bucket."
+            }
+        } catch (e: Exception) {
+            UsbSetup.receipt(cache, token, "failed")
+            throw e
+        } finally { received.pepper.fill(0) }
     }
     private var activeKey by mutableStateOf<AndroidSecurityKey?>(null)
     val keyInstruction get() = activeKey?.instruction.orEmpty()
@@ -121,11 +143,11 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             settings = openedSettings
             if (started != generation) return@task
             refreshKeyProtection()
-            val sync = if (openedSettings.sync) Backblaze(openedSettings.copy(pepper = ByteArray(0))) else null
+            val sync = openedSettings.remote()
             val cloudSession = withContext(Dispatchers.IO + NonCancellable) {
                 val local = storage.read(name)
-                val remote = if (offline) null else sync?.download(name)
-                require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable Backblaze sync." }
+                val remote = if (offline) null else sync?.fetch(name)?.bytes
+                require(local != null || remote != null) { "No database found. Import a Linux .keptino file or enable vault sync." }
                 val markers = storage.markers(name)
                 val marker = if (local == null || markers.isEmpty()) null else {
                     val stamp = runCatching { Core.fileStamp(local) }.getOrNull()
@@ -150,7 +172,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
                 emptyBucket = !adopt && unknown && !offline && remote == null && !Core.uploadsPaused(pendingHandle)
                 sync?.let {
                     val pending = if (!adopt && !identical && (offline || matches || unknown)) marker?.predecessor else null
-                    BackblazeSession(it, name, if (offline) local else remote, offline,
+                    CloudSession(it, name, if (offline) local else remote, offline,
                         Core.uploadsPaused(pendingHandle) || (!adopt && unknown), pending)
                 }
             }
@@ -331,7 +353,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             val result = try {
                 if (sync.upload(encoded) { started == generation }) {
                     withContext(Dispatchers.IO) { storage.clearMarker(name, encoded) }
-                    "Saved locally and to Backblaze"
+                    "Saved locally and to ${sync.label}"
                 }
                 else "Saved locally. The remote copy changed. Uploads paused. Reopen to reconcile."
             } catch (e: Exception) {

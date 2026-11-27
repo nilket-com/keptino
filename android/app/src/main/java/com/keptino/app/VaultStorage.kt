@@ -39,7 +39,37 @@ const val MAX_VAULT_BODY_BYTES = MAX_VAULT_BYTES / 3 * 4 + 64 * 1024
 /** Authorization and upload-URL responses are small JSON objects. */
 const val MAX_METADATA_BYTES = 64 * 1024
 
-data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: String = "", val authUrl: String = "https://api.backblazeb2.com") {
+data class Settings(val pepper: ByteArray, val keyId: String = "", val appKey: String = "", val authUrl: String = "https://api.backblazeb2.com",
+                    val provider: String = "b2", val account: String = "", val bucket: String = "") {
+    override fun toString() = "Keptino settings ($provider)"
+    internal fun encode(): ByteArray {
+        // Older Android readers always treat keyId/appKey as B2 credentials.
+        val json = JSONObject().put("pepper", Base64.encodeToString(pepper, Base64.NO_WRAP))
+            .put("keyId", if (provider == "b2") keyId else "").put("appKey", if (provider == "b2") appKey else "")
+            .put("authUrl", authUrl).put("provider", provider)
+        if (provider == "r2") json.put("r2Access", keyId).put("r2Secret", appKey).put("account", account).put("bucket", bucket)
+        return json.toString().toByteArray()
+    }
+
+    companion object {
+        internal fun parse(plain: ByteArray): Settings {
+            val json = JSONObject(String(plain, Charsets.UTF_8))
+            val provider = json.optString("provider", "b2")
+            return Settings(Base64.decode(json.getString("pepper"), Base64.DEFAULT),
+                json.getString(if (provider == "r2") "r2Access" else "keyId"),
+                json.getString(if (provider == "r2") "r2Secret" else "appKey"),
+                json.getString("authUrl"), provider, json.optString("account"), json.optString("bucket"))
+        }
+    }
+    init {
+        require(provider in setOf("b2", "r2")) { "Unknown sync provider" }
+        if (provider == "r2") {
+            require(account.matches(Regex("[0-9a-fA-F]{32}"))) { "Enter the 32-character R2 account ID" }
+            require(bucket.matches(Regex("[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"))) { "Invalid R2 bucket name" }
+            require(keyId.isNotBlank() && appKey.isNotBlank()) { "Enter both R2 access keys" }
+        }
+    }
+    fun remote(): VaultRemote? = if (!sync) null else if (provider == "r2") R2(copy(pepper = byteArrayOf())) else Backblaze(copy(pepper = byteArrayOf()))
     val sync: Boolean get() = keyId.isNotBlank() && appKey.isNotBlank()
 }
 
@@ -120,11 +150,6 @@ class VaultStorage(private val context: Context) {
         }
     }
 
-    private fun parse(plain: ByteArray): Settings {
-        val json = JSONObject(String(plain, Charsets.UTF_8))
-        return Settings(Base64.decode(json.getString("pepper"), Base64.DEFAULT), json.getString("keyId"), json.getString("appKey"), json.getString("authUrl"))
-    }
-
     private fun decryptCipher(alias: String, bytes: ByteArray, offset: Int): Cipher {
         val key = store.getKey(alias, null) as? SecretKey ?: error("Settings key unavailable. Re-enter setup using the original pepper.")
         return Cipher.getInstance("AES/GCM/NoPadding").apply {
@@ -168,10 +193,7 @@ class VaultStorage(private val context: Context) {
     }
 
     suspend fun writeSettings(settings: Settings, authenticate: suspend (Cipher) -> Cipher) = settingsLock.withLock {
-        replaceSettings(authenticate) {
-            JSONObject().put("pepper", Base64.encodeToString(settings.pepper, Base64.NO_WRAP))
-                .put("keyId", settings.keyId).put("appKey", settings.appKey).put("authUrl", settings.authUrl).toString().toByteArray()
-        }
+        replaceSettings(authenticate) { settings.encode() }
     }
 
     suspend fun settings(authenticate: suspend (Cipher) -> Cipher): Settings = settingsLock.withLock {
@@ -180,7 +202,7 @@ class VaultStorage(private val context: Context) {
             val cipher = authenticate(decryptCipher(alias(bytes), bytes, 16))
             val plain = cipher.doFinal(bytes, 28, bytes.size - 28)
             // Finish retiring the old credential if a prior migration was interrupted after commit.
-            return@withLock try { retireLegacy(); parse(plain) } finally { plain.fill(0) }
+            return@withLock try { retireLegacy(); Settings.parse(plain) } finally { plain.fill(0) }
         }
         val bytes = legacy.readFully()
         require(bytes.size >= 28) { "Invalid legacy settings" }
@@ -188,7 +210,7 @@ class VaultStorage(private val context: Context) {
         try {
             replaceSettings(authenticate) {
                 val plain = decryptCipher(legacyAlias, bytes, 0).doFinal(bytes, 12, bytes.size - 12)
-                try { migrated = parse(plain); plain } catch (e: Exception) { plain.fill(0); throw e }
+                try { migrated = Settings.parse(plain); plain } catch (e: Exception) { plain.fill(0); throw e }
             }
             checkNotNull(migrated)
         } catch (e: Exception) {
@@ -331,8 +353,22 @@ class VaultStorage(private val context: Context) {
     }
 }
 
+internal fun java.io.InputStream.readBounded(limit: Int, label: String): ByteArray {
+    val output = java.io.ByteArrayOutputStream()
+    val buffer = ByteArray(8192)
+    while (true) {
+        val count = read(buffer, 0, minOf(buffer.size, limit - output.size() + 1))
+        if (count < 0) return output.toByteArray()
+        check(count <= limit - output.size()) { "$label is too large" }
+        output.write(buffer, 0, count)
+    }
+}
+
 /** B2 carries base64 of the Linux .keptino file, not the raw file. */
-class Backblaze(private val settings: Settings) {
+class Backblaze(private val settings: Settings) : VaultRemote {
+    override val label = "Backblaze"
+    override fun fetch(name: String) = RemoteObject(download(name))
+    override fun put(name: String, bytes: ByteArray, previous: RemoteObject): Boolean { upload(name, bytes); return true }
     private fun checkedUrl(value: String): URL {
         val url = URL(value)
         require(url.protocol == "https" || (BuildConfig.DEBUG && url.protocol == "http" && url.host in listOf("10.0.2.2", "127.0.0.1", "localhost"))) { "Backblaze requires HTTPS" }
@@ -351,7 +387,7 @@ class Backblaze(private val settings: Settings) {
             if (code !in 200..299) {
                 // B2 error bodies are small JSON objects: {"status":401,"code":"bad_auth_token","message":"..."}
                 val detail = try {
-                    val text = conn.errorStream?.use { String(it.readNBytes(4096)) }.orEmpty()
+                    val text = conn.errorStream?.use { String(it.readBounded(4096, "Backblaze error")) }.orEmpty()
                     val json = JSONObject(text)
                     listOf(json.optString("code"), json.optString("message")).filter { it.isNotBlank() }.joinToString(": ")
                 } catch (_: Exception) { "" }
@@ -361,12 +397,7 @@ class Backblaze(private val settings: Settings) {
             // declared length is still cut off at the same limit while reading.
             val declared = conn.contentLengthLong
             check(declared <= limit) { "Backblaze $stage response is too large" }
-            return conn.inputStream.use { stream ->
-                val output = java.io.ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                while (true) { val n = stream.read(buffer); if (n < 0) break; check(output.size() + n <= limit) { "Backblaze $stage response is too large" }; output.write(buffer, 0, n) }
-                output.toByteArray()
-            }
+            return conn.inputStream.use { it.readBounded(limit, "Backblaze $stage response") }
         } finally { conn.disconnect() }
     }
     private fun authorize(): JSONObject {
@@ -426,14 +457,15 @@ internal data class RekeyMarker(val salt: String, val revision: ULong, val prede
     }
 }
 
-internal class BackblazeSession(
-    private val client: Backblaze,
+internal class CloudSession(
+    private val client: VaultRemote,
     private val name: String,
     original: ByteArray?,
     private var offline: Boolean,
     initiallyPaused: Boolean,
     pendingPredecessor: String? = null,
 ) {
+    val label get() = client.label
     private var expected = pendingPredecessor ?: fingerprint(original)
     val predecessor get() = if (offline && pendingPredecessorAtOpen == null) "?" else expected
     private val pendingPredecessorAtOpen = pendingPredecessor
@@ -444,16 +476,18 @@ internal class BackblazeSession(
 
     suspend fun upload(bytes: ByteArray, active: () -> Boolean): Boolean {
         if (paused) return false
-        val observed = withContext(Dispatchers.IO) { fingerprint(client.download(name)) }
+        val remote = withContext(Dispatchers.IO) { client.fetch(name) }
+        val observed = fingerprint(remote.bytes)
         if (!active()) return false
         if (observed != expected && !(offline && pendingPredecessorAtOpen == null && observed == "-")) {
             paused = true
             return false
         }
-        expected = withContext(Dispatchers.IO) {
-            client.upload(name, bytes)
-            fingerprint(bytes)
+        if (!withContext(Dispatchers.IO) { client.put(name, bytes, remote) }) {
+            paused = true
+            return false
         }
+        expected = fingerprint(bytes)
         offline = false
         return true
     }

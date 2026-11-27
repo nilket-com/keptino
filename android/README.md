@@ -2,7 +2,7 @@
 
 The Android application reads and writes Linux `.keptino` vaults. It uses a Rust
 core for the vault, key derivation and encryption; Kotlin handles the editor,
-Android Keystore, local files and Backblaze. The former plaintext JSON prototype
+Android Keystore, local files, Backblaze B2 and Cloudflare R2. The former plaintext JSON prototype
 is not used or automatically imported.
 
 ## Move an existing Android vault
@@ -69,19 +69,40 @@ has no recorded costs. New saves record the Argon2id memory, passes and lanes as
 ordinary TLV metadata. Android bounds these costs before derivation and checks
 them against the authenticated inner copy before opening the vault.
 
+## Use your Linux R2 setup on Android
+
+With the Samsung or another Android phone connected over authorized USB
+debugging, run this command from the repository root:
+
+```sh
+./android/setup.sh --r2
+```
+
+The installer updates Keptino in place. On the phone, tap **Receive setup**
+and approve the device authentication prompt. The helper reads the existing
+Linux `pepper.cred` and `r2.cred` with systemd-creds and sends them through
+an app-private FIFO. The phone reads the selected vault object before saving
+its settings. The terminal reports whether it found the vault. The vault
+master password stays with you and is used on the ordinary unlock screen.
+
+Use `--serial SERIAL --r2` if several devices are attached. For manual
+setup, select **Use Cloudflare R2** and enter the account ID, bucket, access
+key ID and secret access key, along with the original pepper. R2 uses the
+same default-jurisdiction endpoint, `auto` region and base64 object as Linux.
+A changed object stops the conditional upload and preserves the local save.
+
 ## Open an existing Linux vault
 
 1. Configure a device PIN, pattern or password. In Keptino setup, enter the **original pepper seed** used by Linux, or its original
    32-byte pepper encoded as 64 hexadecimal characters. A new seed cannot unlock
    an existing vault. Do not paste real credentials into test fixtures or logs.
-2. Optionally enter the Backblaze application key ID and application key. Both
-   must be supplied to enable sync. For sync between Android and Linux, configure
-   Linux to use Backblaze and restrict the key to the same bucket on both devices.
-   Keptino reads the bucket name from Backblaze when it authorizes the key.
-   Leaving both empty enables local import/export use.
-3. Enter the database name. Import a Linux `.keptino` file, or unlock with
-   Backblaze enabled to download it. Import refuses to overwrite an existing local
-   file. The original imported file is left unchanged.
+2. For sync, use the same provider and bucket as Linux. R2 settings can be
+   transferred over USB as described above. For Backblaze B2, enter the
+   bucket-restricted application key ID and application key. Leave sync disabled
+   to use local import and export.
+3. Enter the database name used on Linux. Unlock with sync enabled to download
+   the encrypted vault, or import a Linux `.keptino` file. Import refuses to
+   overwrite an existing local file.
 4. Enter the master password and unlock. “Open local copy only” skips network
    access explicitly. Failed remote requests do not silently create an empty vault.
 5. Find an entry by name or tag; previous/next navigate the entries. Password,
@@ -136,7 +157,7 @@ Concurrent writes between the final check and the upload remain possible.
 
 ## Device behavior
 
-Android Keystore encrypts the pepper and optional Backblaze credentials with
+Android Keystore encrypts the pepper and optional sync credentials with
 AES-GCM. Saving setup and unlocking the vault require the system prompt for a
 strong biometric or the device credential, including offline unlocks. The prompt
 authorizes that specific cipher operation. The master password still unlocks the

@@ -213,7 +213,7 @@ class VaultIntegrationTest {
         val original = byteArrayOf(1)
         val edit = byteArrayOf(2)
         val concurrent = byteArrayOf(3)
-        val session = BackblazeSession(client, name, original, offline = true, initiallyPaused = false)
+        val session = CloudSession(client, name, original, offline = true, initiallyPaused = false)
         assertTrue(session.upload(original) { true }) // First upload from an offline vault to an empty bucket.
         assertFalse(session.upload(edit) { false }) // Lock during the remote check.
         assertArrayEquals(original, client.download(name))
@@ -224,7 +224,7 @@ class VaultIntegrationTest {
             assertTrue(session.paused)
             assertArrayEquals(concurrent, client.download(name))
         }
-        val fallback = BackblazeSession(client, name, concurrent, offline = false, initiallyPaused = true)
+        val fallback = CloudSession(client, name, concurrent, offline = false, initiallyPaused = true)
         assertFalse(fallback.upload(edit) { true })
         assertArrayEquals(concurrent, client.download(name))
     }

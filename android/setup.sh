@@ -3,20 +3,25 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 [--serial ADB_SERIAL]"
+    echo "Usage: $0 [--serial ADB_SERIAL] [--r2]"
+    echo "--r2 imports the Linux pepper and Cloudflare R2 settings over USB after installation."
     echo "Connect a device with USB debugging enabled and authorize this computer."
 }
 
 fail() { echo "$*" >&2; exit 1; }
 
 serial=${ANDROID_SERIAL:-}
-case ${1:-} in
+provision=false
+while (( $# )); do
+case "$1" in
     -h|--help) usage; exit 0 ;;
     --serial|-s)
-        [[ $# == 2 && -n ${2:-} ]] || { usage >&2; exit 2; }
-        serial=$2 ;;
-    *) [[ $# == 0 ]] || { usage >&2; exit 2; } ;;
+        [[ -n ${2:-} ]] || { usage >&2; exit 2; }
+        serial=$2; shift 2 ;;
+    --r2) provision=true; shift ;;
+    *) usage >&2; exit 2 ;;
 esac
+done
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
@@ -59,3 +64,5 @@ printf 'Building Keptino for installation on %s\n' "$serial"
 ./gradlew :app:assembleDebug
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 printf 'Installed Keptino on %s.\n' "$serial"
+
+if $provision; then exec python3 ./provision-r2.py --adb "$adb" --serial "$serial"; fi
