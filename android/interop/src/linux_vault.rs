@@ -81,7 +81,21 @@ fn main() {
 			for fields in &entries {
 				set(&vault.database, fields);
 			}
-			assert_eq!(runtime.block_on(vault.save()), "Database saved and synced.");
+			// A harness may change the bucket between the open and the save,
+			// to see the save refuse the upload.
+			if let Ok(between) = std::env::var("KEPTINO_INTEROP_BETWEEN") {
+				let status = std::process::Command::new("sh")
+					.arg("-c")
+					.arg(between)
+					.status()
+					.expect("run the between hook");
+				assert!(status.success(), "the between hook failed");
+			}
+			let saved = runtime.block_on(vault.save());
+			if saved != "Database saved and synced." {
+				eprintln!("{saved}");
+				std::process::exit(3);
+			}
 		}
 		_ => std::process::exit(2),
 	}

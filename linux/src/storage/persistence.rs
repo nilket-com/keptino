@@ -174,12 +174,22 @@ impl OpenedVault {
 			}
 			let result = match remote {
 				Ok(provider) => match provider.fetch(&base_path(), &db_name).await {
-					Ok(current) => {
-						let current = current.as_deref().map(blake3::hash);
+					Ok(fetched) => {
+						let current = fetched.bytes.as_deref().map(blake3::hash);
 						if current != *synced.lock().unwrap_or_else(|e| e.into_inner()) {
 							Err("The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.".into())
 						} else {
-							let uploaded = provider.upload(&base_path(), &db_name, &bytes).await;
+							// The store is asked to refuse the write if the
+							// object moved between the fetch and now; an S3
+							// object without a usable tag is not replaced.
+							let uploaded = match fetched.precondition() {
+								Ok(precondition) => {
+									provider
+										.upload(&base_path(), &db_name, &bytes, precondition)
+										.await
+								}
+								Err(err) => Err(err),
+							};
 							if uploaded.is_ok() {
 								*synced.lock().unwrap_or_else(|e| e.into_inner()) =
 									Some(blake3::hash(&bytes));
@@ -268,7 +278,8 @@ async fn open(db_name: &str, input: UnlockInput, adopt: bool) -> Result<OpenedVa
 		.map(|bytes| parse_envelope(bytes, "Local"))
 		.transpose()?;
 	let download = async {
-		let (remote, bytes) = Remote::download(&dir, db_name).await?;
+		let (remote, fetched) = Remote::download(&dir, db_name).await?;
+		let bytes = fetched.bytes;
 		let fingerprint = bytes.as_deref().map(blake3::hash);
 		let envelope = bytes
 			.as_deref()

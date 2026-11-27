@@ -1,14 +1,6 @@
 use super::secret::SecretMemory;
-use aws_credential_types::Credentials;
-use aws_sigv4::{
-	http_request::{
-		PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest, SigningSettings,
-		UriPathNormalizationMode, sign,
-	},
-	sign::v4,
-};
 use base64ct::{Base64, Encoding};
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use keptino_s3 as s3;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
@@ -22,11 +14,6 @@ use std::{
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
-const KEY_CHARS: &AsciiSet = &NON_ALPHANUMERIC
-	.remove(b'-')
-	.remove(b'.')
-	.remove(b'_')
-	.remove(b'~');
 const BAD_CREDENTIAL: &str = "Invalid storage credential. Run setup with --configure-storage.";
 const B2_AUTH_URL: &str = "https://api.backblazeb2.com/b2api/v2/b2_authorize_account";
 
@@ -36,6 +23,8 @@ enum Provider {
 	Aws,
 	Gcs,
 	R2,
+	/// Any S3-compatible store at an endpoint the user names.
+	S3,
 }
 
 impl Provider {
@@ -46,6 +35,7 @@ impl Provider {
 				"aws" => Ok(Self::Aws),
 				"gcs" => Ok(Self::Gcs),
 				"r2" => Ok(Self::R2),
+				"s3" => Ok(Self::S3),
 				_ => Err("Unknown storage provider. Run setup with --configure-storage.".into()),
 			},
 			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::Backblaze),
@@ -59,6 +49,7 @@ impl Provider {
 			Self::Aws => "aws",
 			Self::Gcs => "gcs",
 			Self::R2 => "r2",
+			Self::S3 => "s3",
 		}
 	}
 
@@ -89,9 +80,21 @@ impl Provider {
 		credentials: &[u8],
 		db_name: &str,
 		body: Option<String>,
+		precondition: Precondition<'_>,
 	) -> Result<Response> {
+		// Plaintext is refused, except that a debug build may talk to a store
+		// on the loopback address, as `keptino_s3::validate_endpoint` allows
+		// for the RustFS check; a release build never does.
+		let loopback_http = cfg!(debug_assertions)
+			&& self == Self::S3
+			&& std::str::from_utf8(credentials)
+				.ok()
+				.and_then(|c| c.split('\0').next())
+				.is_some_and(|e| {
+					e.starts_with("http://127.0.0.1") || e.starts_with("http://localhost")
+				});
 		let client = Client::builder()
-			.https_only(true)
+			.https_only(!loopback_http)
 			.redirect(reqwest::redirect::Policy::none())
 			.timeout(Duration::from_secs(30))
 			.build()
@@ -101,26 +104,38 @@ impl Provider {
 			.split('\0')
 			.collect();
 		let key = format!("{db_name}.keptino");
-		let key = utf8_percent_encode(&key, KEY_CHARS).to_string();
 		let req = match fields.as_slice() {
 			[_, id, secret] if self == Self::Backblaze && !id.is_empty() && !secret.is_empty() => {
-				backblaze_request(&client, id, secret, &key, body).await?
+				backblaze_request(&client, id, secret, &s3::encode_segment(&key), body).await?
 			}
-			[bucket, location, id, secret]
-				if self != Self::Backblaze && !id.is_empty() && !secret.is_empty() =>
-			{
+			[bucket, location, id, secret] if matches!(self, Self::Aws | Self::Gcs | Self::R2) => {
 				let (endpoint, region) = self.endpoint(location)?;
-				if bucket.is_empty()
-					|| matches!(*bucket, "." | "..")
-					|| !bucket.bytes().all(|b| {
-						b.is_ascii_lowercase()
-							|| b.is_ascii_digit()
-							|| matches!(b, b'-' | b'.' | b'_')
-					}) {
-					return Err(BAD_CREDENTIAL.into());
-				}
-				let url = format!("{endpoint}/{bucket}/{key}");
-				s3_request(&client, &url, region, id, secret, body, SystemTime::now())?
+				let endpoint = s3::validate_endpoint(&endpoint).map_err(|_| BAD_CREDENTIAL)?;
+				s3_request(
+					&client,
+					&endpoint,
+					bucket,
+					&key,
+					region,
+					id,
+					secret,
+					body,
+					precondition,
+				)?
+			}
+			[..] if self == Self::S3 => {
+				let (endpoint, bucket, region, id, secret) = s3_fields(&fields)?;
+				s3_request(
+					&client,
+					&endpoint,
+					bucket,
+					&key,
+					region,
+					id,
+					secret,
+					body,
+					precondition,
+				)?
 			}
 			_ => return Err(BAD_CREDENTIAL.into()),
 		};
@@ -157,19 +172,34 @@ impl Provider {
 		}
 	}
 
-	async fn download(self, credentials: &[u8], db_name: &str) -> Result<Option<Vec<u8>>> {
-		let resp = self.request(credentials, db_name, None).await?;
+	async fn download(self, credentials: &[u8], db_name: &str) -> Result<Fetched> {
+		let resp = self
+			.request(credentials, db_name, None, Precondition::None)
+			.await?;
 		let status = resp.status();
+		let etag = resp
+			.headers()
+			.get(reqwest::header::ETAG)
+			.and_then(|v| v.to_str().ok())
+			.map(str::to_owned);
 		if status == StatusCode::NOT_FOUND {
 			let bytes = bounded_body(resp, "storage response").await?;
 			if self.missing_key(&bytes) {
-				return Ok(None);
+				return Ok(Fetched {
+					bytes: None,
+					etag: None,
+					conditional: self != Self::Backblaze,
+				});
 			}
 		} else if status == StatusCode::OK {
 			let body = bounded_body(resp, "vault download").await?;
 			let text = std::str::from_utf8(&body).map_err(|_| "Invalid remote vault encoding.")?;
 			let data = Base64::decode_vec(text).map_err(|_| "Invalid remote vault encoding.")?;
-			return Ok(Some(data));
+			return Ok(Fetched {
+				bytes: Some(data),
+				etag,
+				conditional: self != Self::Backblaze,
+			});
 		}
 		Err(format!(
 			"{} download failed (HTTP {}).",
@@ -179,18 +209,65 @@ impl Provider {
 	}
 
 	fn missing_key(self, bytes: &[u8]) -> bool {
-		#[derive(Deserialize)]
-		struct StorageError {
-			#[serde(alias = "Code")]
-			code: String,
-		}
 		if self == Self::Backblaze {
+			#[derive(Deserialize)]
+			struct StorageError {
+				code: String,
+			}
 			serde_json::from_slice::<StorageError>(bytes).is_ok_and(|e| e.code == "not_found")
 		} else {
-			quick_xml::de::from_reader::<_, StorageError>(bytes)
-				.is_ok_and(|e| e.code == "NoSuchKey")
+			s3::is_missing_key(bytes)
 		}
 	}
+}
+
+/// What a fetch of the remote object came back with: the vault bytes, if
+/// any, and the entity tag a later upload may condition on.
+pub(super) struct Fetched {
+	pub bytes: Option<Vec<u8>>,
+	pub etag: Option<String>,
+	/// Whether the store speaks S3, where a replacement must be conditioned
+	/// on a strong entity tag from the very fetch that was compared.
+	pub conditional: bool,
+}
+
+impl Fetched {
+	/// The precondition a save over this fetch uses. An S3 object that came
+	/// without a strong, quoted entity tag is not replaced at all: the save
+	/// stays local rather than racing an unconditional write.
+	pub fn precondition(&self) -> Result<Precondition<'_>> {
+		match (&self.bytes, &self.etag, self.conditional) {
+			(_, _, false) => Ok(Precondition::None),
+			(None, _, true) => Ok(Precondition::Absent),
+			(Some(_), Some(etag), true) if is_strong_etag(etag) => Ok(Precondition::Matches(etag)),
+			(Some(_), _, true) => Err(
+				"The store returned no usable entity tag for the vault object. Saved locally only; unlock again to retry."
+					.into(),
+			),
+		}
+	}
+}
+
+/// A strong entity tag: quoted, not weak (`W/`), not a wildcard, printable.
+fn is_strong_etag(etag: &str) -> bool {
+	etag.len() >= 3
+		&& etag.starts_with('"')
+		&& etag.ends_with('"')
+		&& etag != "\"*\""
+		&& etag[1..etag.len() - 1]
+			.bytes()
+			.all(|b| b.is_ascii_graphic() && b != b'"')
+}
+
+/// What an upload insists on at the store: the object as fetched, or its
+/// absence. A store that ignores the header behaves as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Precondition<'a> {
+	None,
+	/// `If-Match`: the object still has this entity tag.
+	Matches(&'a str),
+	/// `If-None-Match: *`: no object exists.
+	Absent,
 }
 
 /// Vault objects are kilobytes to a few megabytes. This process cannot swap,
@@ -233,7 +310,7 @@ pub(super) struct Remote {
 }
 
 impl Remote {
-	pub(super) async fn download(dir: &Path, db_name: &str) -> Result<(Self, Option<Vec<u8>>)> {
+	pub(super) async fn download(dir: &Path, db_name: &str) -> Result<(Self, Fetched)> {
 		let provider = Provider::selected(dir)?;
 		let credential_file = provider.credential_file_hash(dir)?;
 		let credentials = provider.credentials(dir)?;
@@ -245,8 +322,8 @@ impl Remote {
 			credential: Arc::new(credential),
 			credential_file,
 		};
-		let bytes = provider.download(&credentials, db_name).await?;
-		Ok((remote, bytes))
+		let fetched = provider.download(&credentials, db_name).await?;
+		Ok((remote, fetched))
 	}
 
 	/// The session credential, after checking that setup has not replaced
@@ -267,17 +344,40 @@ impl Remote {
 
 	/// The current remote object, re-read with the configuration this vault
 	/// was opened with, so a save can see what it is about to replace.
-	pub(super) async fn fetch(&self, dir: &Path, db_name: &str) -> Result<Option<Vec<u8>>> {
+	pub(super) async fn fetch(&self, dir: &Path, db_name: &str) -> Result<Fetched> {
 		let credentials = self.session_credentials(dir)?;
 		self.provider.download(&credentials, db_name).await
 	}
 
-	pub(super) async fn upload(&self, dir: &Path, db_name: &str, bytes: &[u8]) -> Result<()> {
+	/// Uploads over the object the save fetched, and no other: a store that
+	/// honors the precondition answers 412 when the object changed meanwhile.
+	pub(super) async fn upload(
+		&self,
+		dir: &Path,
+		db_name: &str,
+		bytes: &[u8],
+		precondition: Precondition<'_>,
+	) -> Result<()> {
 		let credentials = self.session_credentials(dir)?;
 		let response = self
 			.provider
-			.request(&credentials, db_name, Some(Base64::encode_string(bytes)))
+			.request(
+				&credentials,
+				db_name,
+				Some(Base64::encode_string(bytes)),
+				precondition,
+			)
 			.await?;
+		// 412 is the precondition failing; S3 may answer 409 to a conditional
+		// write that lost a race, or 404 to If-Match on an object deleted
+		// meanwhile. Each means the object is not what was fetched.
+		if precondition != Precondition::None
+			&& matches!(
+				response.status(),
+				StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT | StatusCode::NOT_FOUND
+			) {
+			return Err("The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.".into());
+		}
 		if !response.status().is_success() {
 			return Err(format!(
 				"{} upload failed (HTTP {}).",
@@ -289,48 +389,63 @@ impl Remote {
 	}
 }
 
+/// The five fields of an `s3` credential, each checked as the request will
+/// use it: endpoint, bucket, region, access key id, secret.
+fn s3_fields<'a>(fields: &[&'a str]) -> Result<(s3::Endpoint, &'a str, &'a str, &'a str, &'a str)> {
+	let [endpoint, bucket, region, id, secret] = fields else {
+		return Err(BAD_CREDENTIAL.into());
+	};
+	let endpoint = s3::validate_endpoint(endpoint).map_err(|_| BAD_CREDENTIAL)?;
+	s3::validate_bucket(bucket).map_err(|_| BAD_CREDENTIAL)?;
+	if region.is_empty() || id.is_empty() || secret.is_empty() {
+		return Err(BAD_CREDENTIAL.into());
+	}
+	Ok((endpoint, bucket, region, id, secret))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn s3_request(
 	client: &Client,
-	url: &str,
+	endpoint: &s3::Endpoint,
+	bucket: &str,
+	key: &str,
 	region: &str,
 	id: &str,
 	secret: &str,
 	body: Option<String>,
-	time: SystemTime,
+	precondition: Precondition<'_>,
 ) -> Result<RequestBuilder> {
 	let method = if body.is_some() {
-		Method::PUT
+		s3::Method::Put
 	} else {
-		Method::GET
+		s3::Method::Get
 	};
-	let identity = Credentials::new(id, secret, None, None, "Keptino").into();
-	let mut settings = SigningSettings::default();
-	settings.percent_encoding_mode = PercentEncodingMode::Single;
-	settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
-	settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
-	let params = v4::SigningParams::builder()
-		.identity(&identity)
-		.region(region)
-		.name("s3")
-		.time(time)
-		.settings(settings)
-		.build()
-		.map_err(|_| BAD_CREDENTIAL)?
-		.into();
+	let now = SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or_default();
 	let payload = body.as_deref().unwrap_or_default().as_bytes();
-	let signable = SignableRequest::new(
-		method.as_str(),
-		url,
-		std::iter::empty(),
-		SignableBody::Bytes(payload),
+	let signed = s3::sign(
+		method, endpoint, bucket, key, region, id, secret, payload, now,
 	)
-	.map_err(|_| "Invalid storage request.")?;
-	let (headers, _) = sign(signable, &params)
-		.map_err(|_| "Cannot sign storage request.")?
-		.into_parts();
-	let mut req = client.request(method, url);
-	for (name, value) in headers.headers() {
-		req = req.header(name, value);
+	.map_err(|_| BAD_CREDENTIAL)?;
+	let mut req = client
+		.request(
+			if body.is_some() {
+				Method::PUT
+			} else {
+				Method::GET
+			},
+			&signed.url,
+		)
+		.header("host", &signed.host)
+		.header("x-amz-date", &signed.amz_date)
+		.header("x-amz-content-sha256", &signed.content_sha256)
+		.header("authorization", &signed.authorization);
+	match precondition {
+		Precondition::None => {}
+		Precondition::Matches(etag) => req = req.header("if-match", etag),
+		Precondition::Absent => req = req.header("if-none-match", "*"),
 	}
 	if let Some(body) = body {
 		req = req.body(body);
@@ -416,27 +531,22 @@ mod tests {
 	#[test]
 	fn signs_the_transmitted_path_and_body() {
 		let client = Client::new();
-		let key = utf8_percent_encode("Team + 100% 🔑.digisafe", KEY_CHARS);
-		let url = format!("https://s3.us-east-1.amazonaws.com/vaults/{key}");
-		// Fixed SigV4 vectors calculated independently for these wire bytes.
-		for (body, expected_signature) in [
-			(
-				None,
-				"fe72847b4acfb310f484520a7e04dc6f69a40fe7c9cc054ea5806b30069cf9ec",
-			),
-			(
-				Some("ZmFrZQ=="),
-				"b67ac51ee4dc1f4b74b74f490b96be2a7e57289d910ddf43f6f24b9a582e5e9e",
-			),
+		let endpoint = s3::validate_endpoint("https://s3.us-east-1.amazonaws.com").unwrap();
+		for (body, precondition) in [
+			(None, Precondition::None),
+			(Some("ZmFrZQ=="), Precondition::Matches("\"abc\"")),
+			(Some("ZmFrZQ=="), Precondition::Absent),
 		] {
 			let req = s3_request(
 				&client,
-				&url,
+				&endpoint,
+				"vaults",
+				"Team + 100% 🔑.digisafe",
 				"us-east-1",
 				"test-id",
 				"test-secret",
 				body.map(String::from),
-				SystemTime::UNIX_EPOCH,
+				precondition,
 			)
 			.unwrap()
 			.build()
@@ -449,18 +559,102 @@ mod tests {
 				req.body().and_then(reqwest::Body::as_bytes),
 				body.map(str::as_bytes)
 			);
+			let headers = req.headers();
+			assert_eq!(headers["host"], "s3.us-east-1.amazonaws.com");
 			assert!(
-				req.headers()["authorization"]
+				headers["authorization"]
 					.to_str()
 					.unwrap()
-					.ends_with(expected_signature)
+					.starts_with("AWS4-HMAC-SHA256 Credential=test-id/")
+			);
+			assert_eq!(
+				headers.get("if-match").map(|v| v.to_str().unwrap()),
+				match precondition {
+					Precondition::Matches(tag) => Some(tag),
+					_ => None,
+				}
+			);
+			assert_eq!(
+				headers.get("if-none-match").map(|v| v.to_str().unwrap()),
+				matches!(precondition, Precondition::Absent).then_some("*")
 			);
 		}
 	}
 
 	#[test]
+	fn the_s3_credential_needs_all_five_fields_checked() {
+		let parse = |credential: &str| {
+			let fields: Vec<&str> = credential.split('\0').collect();
+			s3_fields(&fields).map(|(endpoint, bucket, region, id, _)| {
+				(
+					endpoint.host().to_owned(),
+					bucket.to_owned(),
+					region.to_owned(),
+					id.to_owned(),
+				)
+			})
+		};
+		assert_eq!(
+			parse("https://strix:9000/\0keptino\0us-east-1\0id\0secret").unwrap(),
+			(
+				"strix:9000".to_string(),
+				"keptino".into(),
+				"us-east-1".into(),
+				"id".into()
+			)
+		);
+		for bad in [
+			"https://host\0bucket\0us-east-1\0id",
+			"ftp://host\0bucket\0us-east-1\0id\0secret",
+			"https://host/x\0bucket\0us-east-1\0id\0secret",
+			"https://host\0Bucket\0us-east-1\0id\0secret",
+			"https://host\0bucket\0\0id\0secret",
+			"https://host\0bucket\0us-east-1\0\0secret",
+		] {
+			assert_eq!(parse(bad).err().as_deref(), Some(BAD_CREDENTIAL), "{bad}");
+		}
+	}
+
+	#[test]
+	fn an_s3_object_is_replaced_only_under_a_strong_entity_tag() {
+		let fetched = |bytes: Option<Vec<u8>>, etag: Option<&str>, conditional: bool| Fetched {
+			bytes,
+			etag: etag.map(str::to_owned),
+			conditional,
+		};
+		assert_eq!(
+			fetched(None, None, true).precondition().unwrap(),
+			Precondition::Absent
+		);
+		assert_eq!(
+			fetched(Some(vec![1]), Some("\"abc123\""), true)
+				.precondition()
+				.unwrap(),
+			Precondition::Matches("\"abc123\"")
+		);
+		for unusable in [
+			None,
+			Some(""),
+			Some("abc"),
+			Some("W/\"abc\""),
+			Some("\"*\""),
+			Some("\"\""),
+		] {
+			let err = fetched(Some(vec![1]), unusable, true)
+				.precondition()
+				.unwrap_err();
+			assert!(err.contains("no usable entity tag"), "{unusable:?}: {err}");
+		}
+		// Backblaze has its own API and no conditional write; nothing is required.
+		assert_eq!(
+			fetched(Some(vec![1]), None, false).precondition().unwrap(),
+			Precondition::None
+		);
+	}
+
+	#[test]
 	fn only_provider_missing_object_errors_can_start_a_vault() {
-		for provider in [Provider::Aws, Provider::Gcs, Provider::R2] {
+		for provider in [Provider::Aws, Provider::Gcs, Provider::R2, Provider::S3] {
 			assert!(provider.missing_key(b"<Error><Code>NoSuchKey</Code></Error>"));
 			assert!(!provider.missing_key(b"<Error><Code>NoSuchBucket</Code></Error>"));
 			assert!(!provider.missing_key(b""));

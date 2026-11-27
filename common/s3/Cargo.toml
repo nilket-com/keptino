@@ -1,0 +1,14 @@
+[package]
+name = "keptino-s3"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "S3 Signature Version 4 for Keptino: endpoint and bucket validation, request signing and error bodies, with no I/O."
+
+[dependencies]
+hmac = "0.12.1"
+sha2 = "0.10.9"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+hex = "0.4.3"

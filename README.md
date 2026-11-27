@@ -109,8 +109,16 @@ also lists the provider credential.
 ### Cloud storage on Linux
 
 Keptino syncs one object named `<database name>.keptino` in a private
-bucket. All four providers store the same Base64-encoded encrypted vault.
+bucket. Every provider stores the same Base64-encoded encrypted vault.
 Existing installations default to Backblaze B2 and reuse `backblaze.cred`.
+Besides the four named services, `s3` points Keptino at any S3-compatible
+store of your own, such as RustFS or MinIO on a host you run: enter the
+`https://` endpoint, the bucket, the region (`us-east-1` unless the store
+says otherwise) and a key pair allowed to get and put objects. The
+endpoint's certificate must be trusted by this machine; plaintext HTTP is
+refused. Every S3 request, to a named service or your own endpoint, is
+signed by Keptino's own Signature Version 4 code, and a save asks the
+store to refuse the write if the object changed since it was fetched.
 
 | Provider | What to provision | Free storage terms |
 | --- | --- | --- |

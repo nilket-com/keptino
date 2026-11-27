@@ -20,7 +20,7 @@ fi
 #   aws:       bucket, region, access key ID, secret        (4 NUL-separated fields)
 #   gcs:       bucket, location, HMAC access ID, HMAC secret
 #   r2:        bucket, account ID (32 hex), access key ID, secret
-providers=(backblaze aws gcs r2)
+providers=(backblaze aws gcs r2 s3)
 provider_file_name=storage-provider
 
 usage() {
@@ -47,6 +47,7 @@ provider_label() {
         aws) printf 'AWS S3' ;;
         gcs) printf 'Google Cloud Storage' ;;
         r2) printf 'Cloudflare R2' ;;
+        s3) printf 'S3-compatible endpoint' ;;
     esac
 }
 
@@ -56,6 +57,7 @@ provider_hint() {
         aws) printf 'Use an IAM access key pair granted s3:GetObject and s3:PutObject on vault objects and s3:ListBucket on the bucket, so a first unlock can tell a missing vault from denied access.\n' ;;
         gcs) printf 'Use an HMAC key for a service account with Storage Object User (roles/storage.objectUser) on a Standard bucket; enter its location, e.g. us-central1.\n' ;;
         r2) printf 'Use an Object Read & Write API token scoped to a Standard bucket in the default jurisdiction; the account ID is on the R2 overview page.\n' ;;
+        s3) printf 'Any store speaking path-style S3 over TLS, such as RustFS or MinIO on your own host: a key pair allowed to get and put objects in the bucket. The endpoint certificate must be trusted by this machine.\n' ;;
     esac
 }
 
@@ -78,7 +80,7 @@ ask_echo_supported() {
 
 ask_field() {
     local -n __ask_target=$1
-    local __ask_prompt=$2 __ask_echo=${3:-no} __ask_value
+    local __ask_prompt=$2 __ask_echo=${3:-no} __ask_empty=${4:-} __ask_value
     local -a __ask_opts=(-n)
     if [[ $__ask_echo == yes ]] && ask_echo_supported; then
         __ask_opts+=(-e)
@@ -90,7 +92,7 @@ ask_field() {
         __ask_value=${__ask_value#"${__ask_value%%[![:space:]]*}"}
         __ask_value=${__ask_value%"${__ask_value##*[![:space:]]}"}
     fi
-    if [[ -z $__ask_value ]]; then
+    if [[ -z $__ask_value && $__ask_empty != allow_empty ]]; then
         fail "Empty value for '${__ask_prompt%:}'; nothing was changed."
     fi
     __ask_target=$__ask_value
@@ -111,6 +113,7 @@ validate_bucket() {
         aws) pattern='^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$' ;;
         r2)  pattern='^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$' ;;
         gcs) pattern='^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$' ;;
+        s3)  pattern='^[a-z0-9._-]{1,222}$' ;;
     esac
     if [[ ! $bucket =~ $pattern || $bucket == *..* || $bucket =~ [^.]{64} ]]; then
         fail "Invalid bucket name for $(provider_label "$provider"). Enter the name of an existing bucket."
@@ -167,10 +170,34 @@ provision_object_store() {
     mv -- "$temp_dir/$provider.cred" "$config_dir/$provider.cred"
 }
 
+# An S3-compatible store of the user's own: the endpoint is part of the
+# credential, so one provider name covers RustFS, MinIO and the rest.
+provision_s3() {
+    local endpoint bucket region key_id secret
+    printf 'Provisioning S3-compatible endpoint credentials...\n'
+    provider_hint s3
+    ask_field endpoint "Enter endpoint URL (https://host or https://host:port):" yes
+    endpoint=${endpoint%/}
+    if [[ ! $endpoint =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]; then
+        fail "Invalid endpoint '$endpoint': expected https://host or https://host:port with no path."
+    fi
+    ask_field bucket "Enter bucket name:" yes
+    validate_bucket s3 "$bucket"
+    ask_field region "Enter region (default us-east-1):" yes allow_empty
+    region=${region:-us-east-1}
+    validate_dns_label 'region' "$region" 'us-east-1'
+    ask_field key_id "Enter access key ID:"
+    ask_field secret "Enter secret access key:"
+    printf '%s\0%s\0%s\0%s\0%s' "$endpoint" "$bucket" "$region" "$key_id" "$secret" | encrypt_credential s3
+    unset key_id secret
+    mv -- "$temp_dir/s3.cred" "$config_dir/s3.cred"
+}
+
 provision_provider() {
     case $1 in
         backblaze) provision_backblaze ;;
         aws|gcs|r2) provision_object_store "$1" ;;
+        s3) provision_s3 ;;
         *) fail "Unknown storage provider: $1" ;;
     esac
 }
@@ -200,13 +227,14 @@ read_storage_provider() {
 choose_provider() {
     local choice
     printf 'Choose the remote storage used to sync the vault:\n'
-    printf '  1) Backblaze B2 (default)\n  2) AWS S3\n  3) Google Cloud Storage\n  4) Cloudflare R2\n'
-    read -r -p 'Provider [1-4 or name, default 1]: ' choice || choice=''
+    printf '  1) Backblaze B2 (default)\n  2) AWS S3\n  3) Google Cloud Storage\n  4) Cloudflare R2\n  5) Any S3-compatible endpoint (RustFS, MinIO, ...)\n'
+    read -r -p 'Provider [1-5 or name, default 1]: ' choice || choice=''
     case ${choice,,} in
         ''|1|backblaze|b2) selected_provider=backblaze ;;
-        2|aws|s3) selected_provider=aws ;;
+        2|aws) selected_provider=aws ;;
         3|gcs|gcp|google) selected_provider=gcs ;;
         4|r2|cloudflare) selected_provider=r2 ;;
+        5|s3|custom|rustfs|minio) selected_provider=s3 ;;
         *) fail "Unknown storage provider '$choice'. Expected one of: ${providers[*]}." ;;
     esac
 }
@@ -424,7 +452,11 @@ check_credential_encryption
 # plaintext only ever crosses a pipe, never a file or argv.
 credential_format_ok() {
     local name=$1 credential=$2 expected_separators=2 separators
-    [[ $name == backblaze ]] || expected_separators=3
+    case $name in
+        backblaze) expected_separators=2 ;;
+        s3) expected_separators=4 ;;
+        *) expected_separators=3 ;;
+    esac
     separators=$(systemd-creds decrypt --user --name="$name" "$credential" - 2>/dev/null | tr -dc '\0' | wc -c) || return 1
     (( separators == expected_separators ))
 }
