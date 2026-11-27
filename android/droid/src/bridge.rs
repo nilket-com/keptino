@@ -301,6 +301,36 @@ pub extern "system" fn Java_com_keptino_app_Core_clear<'local>(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_generatePassword<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+) {
+	guard(&mut env, (), |_| {
+		with(handle, |vault| {
+			vault.generate_password();
+			Ok(())
+		})
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_deleteSelected<'local>(
+	mut env: JNIEnv<'local>,
+	_this: JObject<'local>,
+	handle: jlong,
+	confirmed_name: JString<'local>,
+) -> jboolean {
+	guard(&mut env, 0, |env| {
+		let name = string(env, &confirmed_name)?;
+		with(
+			handle,
+			|vault| Ok(vault.delete_selected(&name)? as jboolean),
+		)
+	})
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_keptino_app_Core_getField<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,

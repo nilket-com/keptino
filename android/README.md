@@ -86,6 +86,9 @@ them against the authenticated inner copy before opening the vault.
    access explicitly. Failed remote requests do not silently create an empty vault.
 5. Find an entry by name or tag; previous/next navigate the entries. Password,
    PIN and note start hidden. Reveal a field to edit it; copy does not require reveal.
+   **Generate password** fills the working password with 24 random characters.
+   **Revert entry edits** restores the stored value. **Delete entry** asks you
+   to confirm the selected name and takes effect on disk when you save.
 6. Use **Set entry**, then **Save**. Save writes the encrypted local file atomically
    before uploading. An upload failure reports that the local save succeeded.
    **Export saved vault** exports the last saved encrypted file for Linux to open.

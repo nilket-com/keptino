@@ -1,4 +1,4 @@
-use crate::gui::{clipboard, components, generator, messages::Message, session_lock};
+use crate::gui::{clipboard, components, messages::Message, session_lock};
 use crate::storage::{
 	PasswordEntry,
 	persistence::{self, OpenedVault},
@@ -12,6 +12,7 @@ use iced::{
 	},
 	window,
 };
+use keptino_core::generator;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 

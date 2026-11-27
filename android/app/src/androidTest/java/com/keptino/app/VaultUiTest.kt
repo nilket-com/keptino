@@ -44,6 +44,68 @@ class VaultUiTest {
         LegacySettings.clear(context)
     }
 
+    @Test fun generateRevertAndConfirmDelete() {
+        val credential = DeviceCredential.fromArguments()
+        assumeTrue(args.containsKey("password") && args.containsKey("pepperHex"))
+        val name = "generator-delete-" + java.util.UUID.randomUUID()
+        val storage = VaultStorage(context)
+        val pepper = pepper()
+        try { LegacySettings.write(context, Settings(pepper)) } finally { pepper.fill(0) }
+        storage.write(name, instrumentation.context.assets.open("linux-debug-unmarked.keptino").use { it.readBytes() })
+        ActivityScenario.launch(MainActivity::class.java).use {
+            fun click(text: String) = compose.onNodeWithText(text, substring = false).performScrollTo().performClick()
+            fun unlock() {
+                compose.onNodeWithText("Database name").performTextReplacement(name)
+                compose.onNodeWithText("Master password").performTextReplacement(args.getString("password")!!)
+                androidx.test.espresso.Espresso.closeSoftKeyboard()
+                click("Unlock")
+                credential.enterPin()
+                compose.waitUntil(120_000) { shown("Find by name or tag") }
+            }
+            fun find(entry: String) {
+                compose.onNodeWithText("Find by name or tag").performTextReplacement(entry)
+                click("Find")
+            }
+            unlock()
+            find("bank")
+            click("Generate password")
+            compose.onNodeWithText("Delete entry").assertDoesNotExist()
+            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
+            val passwordField = compose.onNodeWithText("Password", substring = false)
+            val generated = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
+            org.junit.Assert.assertEquals(24, generated.length)
+            click("Revert entry edits")
+            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
+            passwordField.assertTextContains("hunter2 ünïcödé 🔑")
+            click("Generate password")
+            click("Set entry")
+            click("Save")
+            compose.waitUntil(30_000) { shown("Saved locally") }
+            click("Delete entry")
+            compose.onNodeWithText("Delete 'bank'?").assertExists()
+            compose.onNodeWithText("Cancel").performClick()
+            compose.onNodeWithText("Delete entry").assertExists()
+            click("Delete entry")
+            compose.onNodeWithText("Delete", substring = false).performClick()
+            find("bank")
+            compose.onNodeWithText("No matching entry").assertExists()
+            click("Lock")
+            compose.onNodeWithText("Discard and lock").performClick()
+            unlock()
+            find("bank")
+            click("Delete entry")
+            compose.onNodeWithText("Delete", substring = false).performClick()
+            click("Save")
+            compose.waitUntil(30_000) { shown("Saved locally") }
+            click("Lock")
+            unlock()
+            find("bank")
+            compose.onNodeWithText("No matching entry").assertExists()
+            find("mail")
+            compose.onNodeWithText("Delete entry").assertExists()
+        }
+    }
+
     @Test fun productionLinuxVaultCanBeEditedAndSavedThroughUi() {
         val credential = DeviceCredential.fromArguments()
         assumeTrue("Pass uiFixture and production fixture credentials", args.containsKey("uiFixture"))

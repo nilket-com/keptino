@@ -15,6 +15,8 @@ object Core {
     @JvmStatic external fun clear(h: Long)
     @JvmStatic external fun getField(h: Long, field: Int): ByteArray
     @JvmStatic external fun setField(h: Long, field: Int, value: ByteArray)
+    @JvmStatic external fun generatePassword(h: Long)
+    @JvmStatic external fun deleteSelected(h: Long, confirmedName: String): Boolean
     @JvmStatic external fun commit(h: Long): Int
     @JvmStatic external fun save(h: Long): ByteArray
     @JvmStatic external fun close(h: Long)

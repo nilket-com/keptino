@@ -29,7 +29,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private var handle = 0L
     var editing by mutableStateOf(false); private set
     private var committedDirty = false
-    private var currentEntryName = ""
+    private var currentEntryName by mutableStateOf("")
+    val deletableName: String? get() = currentEntryName.takeIf { unlocked && !busy && !editing && it.isNotEmpty() }
     private var generation = 0L
     // A save owns this handle until the local atomic write returns, even if the UI locks.
     private var savingHandle = 0L
@@ -127,6 +128,20 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun edit(id: Int, text: String) = action {
         val bytes = text.toByteArray(); try { Core.setField(handle, id, bytes) } finally { bytes.fill(0) }
         fields = fields.toMutableList().also { it[id - 1] = text }; editing = true; dirty = true
+    }
+    fun generatePassword() = action {
+        Core.generatePassword(handle)
+        editing = true
+        dirty = true
+        if (3 in revealed) fields = fields.toMutableList().also { it[2] = read(3) }
+        status = "Password generated. Set the entry to keep it."
+    }
+    fun deleteEntry(confirmedName: String) = action {
+        if (deletableName != confirmedName || !Core.deleteSelected(handle, confirmedName)) return@action
+        committedDirty = true
+        dirty = true
+        refresh()
+        status = "Entry '$confirmedName' deleted. Save to persist changes."
     }
     fun reveal(id: Int) = action {
         if (id in revealed) { revealed = revealed - id; fields = fields.toMutableList().also { it[id - 1] = "" } }

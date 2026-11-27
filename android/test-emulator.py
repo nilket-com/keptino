@@ -128,6 +128,7 @@ try:
                   run_id = Path(directory).name
                   local_name = run_id + '-local'
                   remote_name = run_id + '-remote'
+                  instrument('generate-and-delete', 'com.keptino.app.VaultUiTest#generateRevertAndConfirmDelete', common)
                   instrument('credential-cancel', 'com.keptino.app.VaultUiTest#cancelledCredentialPromptKeepsVaultLocked', {})
                   instrument('production-ui', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName=local_name))
                   collect('android-ui-roundtrip.keptino', 'android-ui-roundtrip.keptino')

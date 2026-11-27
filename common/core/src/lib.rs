@@ -8,5 +8,6 @@
 
 pub mod crypto;
 pub mod format;
+pub mod generator;
 pub mod policy;
 pub mod vault;

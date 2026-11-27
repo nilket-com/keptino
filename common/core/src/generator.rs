@@ -6,8 +6,7 @@ use zeroize::Zeroizing;
 
 const ALPHABET: &[u8] =
 	b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+[]{}:,.?";
-/// 24 characters from an 84-symbol alphabet is about 153 bits, far beyond
-/// what the 4 GiB derivation protects on the master password.
+/// Default length used by both password editors.
 pub const LENGTH: usize = 24;
 
 pub fn password(length: usize) -> Zeroizing<String> {

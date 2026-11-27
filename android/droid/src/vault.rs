@@ -171,6 +171,24 @@ impl Vault {
 		self.working = PasswordEntry::new();
 	}
 
+	/// Generate into the sealed working entry. Commit and save remain explicit.
+	pub fn generate_password(&mut self) {
+		use keptino_core::generator::{LENGTH, password};
+		self.working.set_password(&password(LENGTH));
+	}
+
+	pub fn delete_selected(&mut self, confirmed_name: &str) -> Result<bool> {
+		if confirmed_name.is_empty() || self.working.get_name() != confirmed_name {
+			return Ok(false);
+		}
+		let blank = PasswordEntry::try_new()?;
+		if !self.database.delete_password_entry(confirmed_name) {
+			return Ok(false);
+		}
+		self.working = blank;
+		Ok(true)
+	}
+
 	pub fn get_field(&self, id: u8) -> Result<Zeroizing<Vec<u8>>> {
 		if !(field::NAME..=field::MODIFIED_TS).contains(&id) {
 			return Err(Error::Invalid("unknown field"));
@@ -386,6 +404,44 @@ mod tests {
 			Envelope::parse(&encode_shards(&header.serialize()), KdfParams::DEBUG),
 			Err(FormatError::Damaged)
 		));
+	}
+
+	#[test]
+	fn generate_edits_only_the_working_password_and_delete_checks_the_selection() {
+		let mut vault = open(None, None).unwrap();
+		add(&mut vault, "first", "original", "one");
+		add(&mut vault, "second", "untouched", "two");
+		assert!(vault.query("first"));
+		vault.generate_password();
+		let generated = vault.get_field(field::PASSWORD).unwrap();
+		assert_eq!(generated.len(), keptino_core::generator::LENGTH);
+		assert!(vault.query("one"));
+		assert_eq!(
+			vault.get_field(field::PASSWORD).unwrap().as_slice(),
+			b"original"
+		);
+		vault.generate_password();
+		let generated = vault.get_field(field::PASSWORD).unwrap();
+		assert_eq!(vault.commit(), Commit::Updated);
+		let saved = vault.save().unwrap();
+		assert!(!vault.delete_selected("second").unwrap());
+		assert!(!vault.delete_selected("").unwrap());
+		assert!(vault.delete_selected("first").unwrap());
+		assert!(vault.get_field(field::NAME).unwrap().is_empty());
+		assert!(!vault.query("one"));
+		assert!(vault.query("second"));
+		let removed = vault.save().unwrap();
+		let mut before = open(Some(&saved), None).unwrap();
+		assert!(before.query("first"));
+		assert_eq!(before.get_field(field::PASSWORD).unwrap(), generated);
+		let mut after = open(Some(&removed), None).unwrap();
+		assert!(!after.query("first"));
+		assert!(!after.query("one"));
+		assert!(after.query("two"));
+		assert_eq!(
+			after.get_field(field::PASSWORD).unwrap().as_slice(),
+			b"untouched"
+		);
 	}
 
 	#[test]

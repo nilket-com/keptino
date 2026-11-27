@@ -1,7 +1,6 @@
 mod clipboard;
 mod colors;
 mod components;
-mod generator;
 mod messages;
 mod session_lock;
 mod state;

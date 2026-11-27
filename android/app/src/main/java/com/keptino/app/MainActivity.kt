@@ -222,6 +222,8 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     var authUrl by remember { mutableStateOf("https://api.backblazeb2.com") }
     var offline by remember { mutableStateOf(false) }
     var confirmLock by remember(vm.unlocked) { mutableStateOf(false) }
+    val deletableName = vm.deletableName
+    var confirmDelete by remember(deletableName) { mutableStateOf(false) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -296,13 +298,17 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                         modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret }, singleLine = id != 5,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
                         trailingIcon = if (secret) {{ TextButton(enabled = !vm.busy, onClick = { vm.reveal(id) }) { Text(if (visible) "Hide" else "Reveal") } }} else null)
-                    if (id == 3 || id == 4) TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
+                    if (id == 3 || id == 4) Row {
+                        TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
+                        if (id == 3) TextButton(enabled = !vm.busy, onClick = vm::generatePassword) { Text("Generate password") }
+                    }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(enabled = !vm.busy, onClick = vm::newEntry) { Text("New") }
                     Button(enabled = !vm.busy, onClick = vm::commit) { Text("Set entry") }
                     Button(enabled = !vm.busy, onClick = vm::save) { Text("Save") }
                 }
+                if (deletableName != null) OutlinedButton(onClick = { confirmDelete = true }) { Text("Delete entry") }
                 if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
                 Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
@@ -310,6 +316,11 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
             }
         }
     }
+    if (deletableName != null && confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false },
+        title = { Text("Delete '$deletableName'?") },
+        text = { Text("Save the vault to make this deletion permanent.") },
+        confirmButton = { TextButton(onClick = { confirmDelete = false; vm.deleteEntry(deletableName) }) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
     if (vm.unlocked && confirmLock) AlertDialog(onDismissRequest = { confirmLock = false }, title = { Text("Discard unsaved changes?") },
         text = { Text("Save first to keep changes to this vault.") },
         confirmButton = { TextButton(onClick = { confirmLock = false; lock() }) { Text("Discard and lock") } },
