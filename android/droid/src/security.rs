@@ -10,6 +10,7 @@
 //! and the derivation arena is excluded from dumps.
 
 use crate::error::{Error, Result};
+use keptino_core::vault::KeyStore;
 use keptino_core::{
 	crypto::{self, Block, PEPPER_SIZE, SALT_SIZE},
 	format::KdfParams,
@@ -19,6 +20,7 @@ use libc::{
 	MAP_PRIVATE, PR_SET_DUMPABLE, PROT_READ, PROT_WRITE, RLIMIT_CORE, RLIMIT_MEMLOCK, c_void,
 	getrlimit, madvise, mlock, mmap, munlock, munmap, prctl, rlimit, setrlimit, sysconf,
 };
+use std::sync::Mutex;
 use std::{
 	env,
 	ffi::OsStr,
@@ -246,40 +248,46 @@ impl Drop for LockedPage {
 }
 
 /// A 32-byte key in its own locked page.
-pub struct LockedKey(LockedPage);
-
-pub const LOCKED_KEY_SIZE: usize = 32;
+pub struct LockedKey(Mutex<LockedPage>);
 
 impl LockedKey {
-	pub fn new() -> Result<Self> {
-		LockedPage::new().map(Self)
+	fn new() -> Result<Self> {
+		Ok(Self(Mutex::new(LockedPage::new()?)))
 	}
 
-	pub fn copy_from(bytes: &[u8; LOCKED_KEY_SIZE]) -> Result<Self> {
+	// Only a newly allocated, exclusively held key can be filled.
+	fn bytes_mut(&mut self) -> &mut [u8; crypto::KEY_SIZE] {
+		let page = self.0.get_mut().unwrap_or_else(|err| err.into_inner());
+		(&mut page[..crypto::KEY_SIZE])
+			.try_into()
+			.expect("a page holds a key")
+	}
+}
+
+impl KeyStore for LockedKey {
+	type Error = Error;
+
+	fn from_bytes(bytes: &[u8; crypto::KEY_SIZE]) -> Result<Self> {
 		let mut key = Self::new()?;
-		key.copy_from_slice(bytes);
+		key.bytes_mut().copy_from_slice(bytes);
 		Ok(key)
 	}
 
-	pub fn is_locked(&self) -> bool {
-		self.0.is_locked()
+	fn fresh() -> Result<Self> {
+		let mut key = Self::new()?;
+		getrandom::fill(key.bytes_mut()).map_err(|_| Error::Memory("no system randomness"))?;
+		Ok(key)
 	}
-}
 
-impl Deref for LockedKey {
-	type Target = [u8; LOCKED_KEY_SIZE];
-	fn deref(&self) -> &[u8; LOCKED_KEY_SIZE] {
-		self.0[..LOCKED_KEY_SIZE]
+	fn with_key<T>(&self, f: impl FnOnce(&[u8; crypto::KEY_SIZE]) -> T) -> T {
+		let page = self.0.lock().unwrap_or_else(|err| err.into_inner());
+		f(page[..crypto::KEY_SIZE]
 			.try_into()
-			.expect("a page holds a key")
+			.expect("a page holds a key"))
 	}
-}
 
-impl DerefMut for LockedKey {
-	fn deref_mut(&mut self) -> &mut [u8; LOCKED_KEY_SIZE] {
-		(&mut self.0[..LOCKED_KEY_SIZE])
-			.try_into()
-			.expect("a page holds a key")
+	fn zeroize(&self) {
+		self.0.lock().unwrap_or_else(|err| err.into_inner())[..].zeroize();
 	}
 }
 
@@ -315,7 +323,7 @@ pub fn derive_pepper(seed: &[u8], mem_kib: u32) -> Result<LockedKey> {
 	}
 	let mut key = LockedKey::new()?;
 	let mut blocks = derivation_arena(mem_kib)?;
-	crypto::derive_pepper_in(seed, mem_kib, &mut blocks, &mut key)?;
+	crypto::derive_pepper_in(seed, mem_kib, &mut blocks, key.bytes_mut())?;
 	Ok(key)
 }
 
@@ -327,7 +335,7 @@ pub(crate) fn derive_master_key(
 ) -> Result<LockedKey> {
 	let mut key = LockedKey::new()?;
 	let mut blocks = derivation_arena(cost.m_cost)?;
-	crypto::derive_master_key_in(password, pepper, salt, cost, &mut blocks, &mut key)?;
+	crypto::derive_master_key_in(password, pepper, salt, cost, &mut blocks, key.bytes_mut())?;
 	Ok(key)
 }
 
@@ -339,7 +347,7 @@ mod tests {
 	fn derives_the_fixture_pepper_in_a_key_page() {
 		let pepper = derive_pepper(b"correct horse", KdfParams::DEBUG.m_cost).unwrap();
 		assert_eq!(
-			hex::encode(pepper.as_slice()),
+			pepper.with_key(|bytes| hex::encode(bytes.as_slice())),
 			include_str!("../tests/fixtures/pepper_m12.hex").trim()
 		);
 		assert!(matches!(
@@ -370,15 +378,15 @@ mod tests {
 
 	#[test]
 	fn locked_key_holds_bytes_and_is_page_backed() {
-		let key = LockedKey::copy_from(&[7u8; LOCKED_KEY_SIZE]).unwrap();
-		assert_eq!(*key, [7u8; LOCKED_KEY_SIZE]);
-		assert!(key.0.len() >= 4096);
-		assert!(key.0[LOCKED_KEY_SIZE..].iter().all(|byte| *byte == 0));
-		let mut other = LockedKey::new().unwrap();
-		other.copy_from_slice(&*key);
-		assert_eq!(*other, *key);
-		drop(key);
-		assert_eq!(other[0], 7);
+		let key = LockedKey::from_bytes(&[7; crypto::KEY_SIZE]).unwrap();
+		{
+			let page = key.0.lock().unwrap();
+			assert!(page.len() >= 4096);
+			assert!(page[crypto::KEY_SIZE..].iter().all(|byte| *byte == 0));
+		}
+		key.with_key(|bytes| assert_eq!(bytes, &[7; crypto::KEY_SIZE]));
+		key.zeroize();
+		key.with_key(|bytes| assert_eq!(bytes, &[0; crypto::KEY_SIZE]));
 	}
 
 	#[test]

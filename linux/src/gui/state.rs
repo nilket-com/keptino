@@ -1,6 +1,6 @@
 use crate::gui::{clipboard, components, generator, messages::Message, session_lock};
 use crate::storage::{
-	entry::PasswordEntry,
+	PasswordEntry,
 	persistence::{self, OpenedVault},
 };
 use iced::{
@@ -495,7 +495,7 @@ mod tests {
 	use super::*;
 
 	fn unlocked() -> AppState {
-		let db = crate::storage::database::Database::test_database();
+		let db = crate::storage::test_database();
 		let mut entry = PasswordEntry::new();
 		entry.set_name("example");
 		entry.set_password("secret");

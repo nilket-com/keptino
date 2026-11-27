@@ -915,7 +915,6 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 name = "droid"
 version = "0.2.0"
 dependencies = [
- "base64ct",
  "getrandom 0.4.3",
  "hex",
  "jni 0.21.1",
@@ -2053,7 +2052,6 @@ dependencies = [
  "aws-sigv4",
  "base64ct",
  "blake3",
- "chacha20poly1305",
  "getrandom 0.4.3",
  "hex",
  "iced",
@@ -2079,6 +2077,7 @@ dependencies = [
  "base64ct",
  "blake3",
  "chacha20poly1305",
+ "getrandom 0.4.3",
  "hex",
  "keptino-erasure",
  "lz4",

@@ -1,23 +1,18 @@
 //! Where the Linux head keeps a vault and how it opens one: files under
 //! `~/.config/keptino`, the TPM-sealed pepper through systemd-creds, the
 //! storage provider, and the choice between the local and remote copies.
-//! The file format, the cryptography and the selection rules themselves are
-//! `keptino_core`'s; this module supplies the I/O around them.
+//! The file format, the cryptography, the database model and the selection
+//! rules are `keptino_core`'s; this module supplies the I/O around them.
 
 use crate::{
 	logger::{error, info, warn},
-	storage::{
-		SYSTEMD_CREDS,
-		database::{Database, InteriorDatabase},
-		entry::MetaEntry,
-		remote::Remote,
-		secret::SecretMemory,
-	},
+	storage::{Database, MetaEntry, SYSTEMD_CREDS, SecretMemory, remote::Remote},
 };
 use keptino_core::{
-	crypto::{self, KEY_SIZE, NONCE_SIZE, PEPPER_SIZE, SALT_SIZE},
-	format::{AAD_FORMAT, Envelope, KdfParams, encode_envelope, envelope_aad},
+	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
+	format::{Envelope, KdfParams},
 	policy,
+	vault::KeyStore,
 };
 use std::{
 	env, fs,
@@ -27,7 +22,6 @@ use std::{
 	path::{Path, PathBuf},
 	process::Command,
 	sync::{Arc, Mutex},
-	time::SystemTime,
 };
 use zeroize::Zeroizing;
 
@@ -76,19 +70,6 @@ fn check_revision(
 			"{rollback} To accept the older copy, remove ~/.config/keptino/{db_name}.revision and unlock again."
 		)
 	})
-}
-
-fn current_revision(db: &Database) -> Option<u64> {
-	db.get_meta_entry("revision")?.get_value().parse().ok()
-}
-
-/// The master key's bytes, copied briefly out of secret memory for a cipher
-/// operation and wiped after.
-fn key_bytes(key: &SecretMemory) -> Zeroizing<[u8; KEY_SIZE]> {
-	let mapped = key.read().expect("Master key mapping failed");
-	let mut bytes = Zeroizing::new([0u8; KEY_SIZE]);
-	bytes.copy_from_slice(&mapped[..KEY_SIZE]);
-	bytes
 }
 
 pub(crate) fn base_path() -> PathBuf {
@@ -142,10 +123,10 @@ impl OpenedVault {
 
 	pub fn save(&self) -> impl Future<Output = String> + use<> {
 		let db = &self.database;
-		let db_name = db.get_meta_entry("db_name").unwrap().get_value().to_owned();
+		let db_name = db.meta("db_name").unwrap_or_default();
 		// Snapshot the encrypted vault before the UI can lock and clear its keys.
-		let bytes = db_to_vec(db, WRITE_AAD_FORMAT);
-		let saved = current_revision(db);
+		let bytes = db.encode(WRITE_AAD_FORMAT, KdfParams::BUILD_DEFAULT);
+		let saved = db.revision();
 		let remote = self.remote.clone();
 		let synced = Arc::clone(&self.synced);
 		async move {
@@ -259,7 +240,7 @@ pub async fn load(
 			database
 		}
 	};
-	let opened = current_revision(&database);
+	let opened = database.revision();
 	if let Err(err) = check_revision(opened, last_seen_revision(db_name), db_name) {
 		database.zeroize();
 		return Err(err);
@@ -295,92 +276,35 @@ fn open_candidates(
 	// serves it. A different cost on the second copy is reported as a
 	// failure to open it, which is also what a forged cost would produce.
 	let key = master_key_derivation(password, first.envelope.salt, first.envelope.kdf)?;
-	let bytes = key_bytes(&key);
-	if let Some(database) = first.envelope.open(&bytes) {
-		info(&format!("{} database loaded.", first.source));
-		return Ok((
-			Database::old(key, InteriorDatabase::deserialize(&database)),
-			None,
-		));
-	}
+	let key = match Database::open(&first.envelope, key) {
+		Ok(database) => {
+			info(&format!("{} database loaded.", first.source));
+			return Ok((database, None));
+		}
+		Err((key, why)) => {
+			warn(&format!("{} copy: {why}", first.source));
+			key
+		}
+	};
 	if let Some(second) = second
 		&& second.envelope.kdf == first.envelope.kdf
-		&& let Some(database) = second.envelope.open(&bytes)
+		&& let Ok(database) = Database::open(&second.envelope, key)
 	{
 		let rejected = format!(
 			"The {} copy failed authentication and may be corrupt or tampered with; opened the {} copy.",
 			first.source, second.source
 		);
 		warn(&rejected);
-		return Ok((
-			Database::old(key, InteriorDatabase::deserialize(&database)),
-			Some(rejected),
-		));
+		return Ok((database, Some(rejected)));
 	}
-	key.zeroize().ok();
 	Err("Cannot decrypt vault. Check the master password and pepper.".into())
 }
 
 fn new_db(db_name: &str, master_password: Zeroizing<String>) -> Result<Database, String> {
-	let created_ts = SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.unwrap()
-		.as_secs()
-		.to_string();
 	let mut salt = [0u8; SALT_SIZE];
 	getrandom::fill(&mut salt).unwrap();
 	let master_key = master_key_derivation(master_password, salt, KdfParams::BUILD_DEFAULT)?;
-	let db = Database::new(master_key);
-	db.set_meta_entry(MetaEntry::new("db_name", db_name));
-	db.set_meta_entry(MetaEntry::new("nonce", "0"));
-	db.set_meta_entry(MetaEntry::new("salt", &to_base64(&salt)));
-	db.set_meta_entry(MetaEntry::new("created_ts", &created_ts));
-	db.set_meta_entry(MetaEntry::new("modified_ts", &created_ts));
-	Ok(db)
-}
-
-/// Encrypts the database into the bytes of a vault file: unmarked and
-/// mirrored, or the marked AAD form when `aad_form` is set. Every save
-/// advances the revision and records the derivation cost it was opened with.
-fn db_to_vec(db: &Database, aad_form: bool) -> Vec<u8> {
-	let modified_ts = SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.unwrap()
-		.as_secs()
-		.to_string();
-	db.set_meta_entry(MetaEntry::new("modified_ts", &modified_ts));
-	// Local copies can be saved independently while a provider is unavailable.
-	// Keep the existing decimal u128 field while giving each save a fresh nonce.
-	let mut nonce = [0u8; NONCE_SIZE];
-	getrandom::fill(&mut nonce[..16]).unwrap();
-	let stored_nonce = u128::from_le_bytes(nonce[..16].try_into().unwrap());
-	db.set_meta_entry(MetaEntry::new("nonce", &stored_nonce.to_string()));
-	let revision = current_revision(db).unwrap_or(0) + 1;
-	db.set_meta_entry(MetaEntry::new("revision", &revision.to_string()));
-	// A vault that never recorded its cost was opened with the build's
-	// constants; record them so every build reads it back the same way.
-	if db.get_meta_entry("kdf_m").is_none() {
-		for (name, value) in KdfParams::BUILD_DEFAULT.meta_pairs() {
-			db.set_meta_entry(MetaEntry::new(&name, &value));
-		}
-	}
-	if aad_form {
-		db.set_meta_entry(MetaEntry::new("format", &AAD_FORMAT.to_string()));
-	} else {
-		db.remove_meta_entry("format");
-	}
-	let compressed = crypto::compress(&db.serialize());
-	// The envelope mirrors every meta entry; the inner copy is what a reader
-	// compares it against after decryption.
-	let meta = db.meta_pairs();
-	let aad = if aad_form {
-		envelope_aad(&meta)
-	} else {
-		Vec::new()
-	};
-	let key = db.clone_master_key();
-	let ciphertext = crypto::encrypt(&compressed, &key_bytes(&key.read().unwrap()), &nonce, &aad);
-	encode_envelope(&meta, &ciphertext)
+	Ok(Database::new(master_key, db_name, &salt))
 }
 
 /// The TPM-sealed pepper, released by systemd-creds for this user. A missing
@@ -403,7 +327,7 @@ fn load_pepper() -> Result<Zeroizing<[u8; PEPPER_SIZE]>, String> {
 	Ok(pepper)
 }
 
-/// Derives the master key straight into secret memory.
+/// Derives the master key and moves it into secret memory.
 fn master_key_derivation(
 	password: Zeroizing<String>,
 	salt: [u8; SALT_SIZE],
@@ -413,16 +337,7 @@ fn master_key_derivation(
 	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
 	crypto::derive_master_key(password.as_bytes(), &pepper, &salt, kdf, &mut key)
 		.map_err(|err| err.to_string())?;
-	let master_key = SecretMemory::new_pages(1).map_err(|_| "Secret memory unavailable.")?;
-	master_key
-		.write(0, &*key)
-		.map_err(|_| "Secret memory unavailable.")?;
-	Ok(master_key)
-}
-
-fn to_base64(msg: &[u8]) -> String {
-	use base64ct::{Base64, Encoding};
-	Base64::encode_string(msg)
+	SecretMemory::from_bytes(&key).map_err(|_| "Secret memory unavailable.".into())
 }
 
 /// Previous saves kept beside the vault as `<db>.keptino.1` (the newest)
@@ -500,6 +415,7 @@ fn rotate_generations(path: &Path, keep: usize) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::storage::test_database;
 
 	#[test]
 	fn vault_files_are_private_and_replace_stale_temporaries() {
@@ -544,59 +460,50 @@ mod tests {
 		fs::remove_dir_all(&dir).unwrap();
 	}
 
-	fn fixture_database() -> Database {
-		let db = Database::test_database();
-		db.set_meta_entry(MetaEntry::new("db_name", "example"));
-		db.set_meta_entry(MetaEntry::new("salt", &to_base64(&[42; SALT_SIZE])));
-		db.set_meta_entry(MetaEntry::new("nonce", "7"));
-		db
-	}
-
-	fn parse(bytes: &[u8]) -> Envelope {
-		Envelope::parse(bytes, KdfParams::BUILD_DEFAULT).unwrap()
-	}
-
+	/// The core model over real secret memory: the save path and the reopen
+	/// path through `memfd_secret`-backed keys.
 	#[test]
-	fn saves_are_unmarked_mirrored_files_that_reopen_and_advance_the_revision() {
-		let db = fixture_database();
-		let key = db.clone_master_key();
-		let encoded = db_to_vec(&db, false);
-		let envelope = parse(&encoded);
-		assert_eq!(envelope.salt, [42; SALT_SIZE]);
+	fn saves_reopen_through_secret_memory_keys() {
+		let db = test_database();
+		let mut entry = crate::storage::PasswordEntry::new();
+		entry.set_name("bank");
+		entry.set_password("hunter2");
+		db.set_password_entry(entry);
+		let encoded = db.encode(false, KdfParams::BUILD_DEFAULT);
+		let envelope = Envelope::parse(&encoded, KdfParams::BUILD_DEFAULT).unwrap();
 		assert_eq!(envelope.revision, Some(1));
 		assert_eq!(envelope.kdf, KdfParams::BUILD_DEFAULT);
 		assert!(envelope.aad.is_empty());
-		assert!(!envelope.mirror.iter().any(|(name, _)| name == "format"));
-		let inner = envelope.open(&key_bytes(&key.read().unwrap())).unwrap();
-		let reopened = InteriorDatabase::deserialize(&inner);
+		let reopened = Database::open(&envelope, SecretMemory::from_bytes(&[42; 32]).unwrap())
+			.unwrap_or_else(|(_, why)| panic!("reopens under the same key: {why}"));
+		assert_eq!(reopened.meta("db_name").as_deref(), Some("example"));
 		assert_eq!(
-			reopened.get_meta_entry("db_name").unwrap().get_value(),
-			"example"
+			reopened
+				.get_password_entry_by_name("bank")
+				.unwrap()
+				.get_password()
+				.as_str(),
+			"hunter2"
 		);
-		assert_eq!(
-			reopened.get_meta_entry("revision").unwrap().get_value(),
-			"1"
+		assert!(
+			Database::open(&envelope, SecretMemory::from_bytes(&[1; 32]).unwrap()).is_err(),
+			"a wrong key is handed back"
 		);
-		// Each save takes a fresh nonce and the next revision.
-		let next = parse(&db_to_vec(&db, false));
-		assert_ne!(next.nonce, envelope.nonce);
-		assert_eq!(next.revision, Some(2));
-		assert!(Envelope::parse(&encoded[1..], KdfParams::DEBUG).is_err());
-	}
-
-	#[test]
-	fn the_marked_form_is_written_on_request_and_converted_back() {
-		let db = fixture_database();
-		let key = db.clone_master_key();
-		let marked = parse(&db_to_vec(&db, true));
+		let marked = Envelope::parse(
+			&db.encode(true, KdfParams::BUILD_DEFAULT),
+			KdfParams::BUILD_DEFAULT,
+		)
+		.unwrap();
 		assert!(!marked.aad.is_empty());
-		assert_eq!(marked.revision, Some(1));
-		assert!(marked.open(&key_bytes(&key.read().unwrap())).is_some());
-		let converted = parse(&db_to_vec(&db, false));
+		assert_eq!(marked.revision, Some(2));
+		let converted = Envelope::parse(
+			&db.encode(false, KdfParams::BUILD_DEFAULT),
+			KdfParams::BUILD_DEFAULT,
+		)
+		.unwrap();
 		assert!(converted.aad.is_empty());
-		assert!(!converted.mirror.iter().any(|(name, _)| name == "format"));
-		assert_eq!(converted.revision, Some(2));
-		assert!(converted.open(&key_bytes(&key.read().unwrap())).is_some());
+		assert_eq!(converted.revision, Some(3));
+		assert!(Envelope::parse(&encoded[1..], KdfParams::DEBUG).is_err());
 	}
 
 	#[test]

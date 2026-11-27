@@ -1,3 +1,4 @@
+use keptino_core::vault::KeyStore;
 use libc::{
 	_SC_PAGESIZE, MAP_FAILED, MAP_SHARED, O_CLOEXEC, PROT_READ, PROT_WRITE, SYS_memfd_secret,
 	ftruncate, mmap, munmap, off_t, syscall, sysconf,
@@ -100,7 +101,7 @@ impl SecretMemory {
 		self.map(false)
 	}
 
-	pub fn zeroize(&self) -> io::Result<()> {
+	pub fn erase(&self) -> io::Result<()> {
 		let mut guard = self.map(true)?;
 		guard.zeroize();
 		self.length.store(0, Ordering::Release);
@@ -108,10 +109,32 @@ impl SecretMemory {
 	}
 }
 
+/// The core's key storage, backed by `memfd_secret`: pages outside the
+/// kernel's direct map, mapped only for the duration of one operation.
+impl KeyStore for SecretMemory {
+	type Error = io::Error;
+
+	fn from_bytes(key: &[u8; 32]) -> io::Result<Self> {
+		let memory = Self::new_pages(1)?;
+		memory.write(0, key)?;
+		Ok(memory)
+	}
+
+	fn with_key<T>(&self, f: impl FnOnce(&[u8; 32]) -> T) -> T {
+		let mapped = self.read().expect("Memory key mapping failed");
+		let key: &[u8; 32] = mapped[..32].try_into().expect("a stored key is 32 bytes");
+		f(key)
+	}
+
+	fn zeroize(&self) {
+		let _ = self.erase();
+	}
+}
+
 impl Drop for SecretMemory {
 	fn drop(&mut self) {
 		// Closing the final fd also releases the secret pages if mapping fails.
-		let _ = self.zeroize();
+		let _ = self.erase();
 	}
 }
 
@@ -154,7 +177,7 @@ mod tests {
 		assert!(secret.mapping.try_lock().is_err());
 		drop(guard);
 		assert!(secret.mapping.try_lock().is_ok());
-		secret.zeroize().unwrap();
+		secret.erase().unwrap();
 		assert!(secret.read().unwrap().is_empty());
 		assert!(secret.map(true).unwrap().iter().all(|b| *b == 0));
 		assert!(secret.write(usize::MAX, b"x").is_err());

@@ -13,6 +13,7 @@ use jni::{
 	sys::{JNI_VERSION_1_6, jboolean, jbyteArray, jint, jlong, jobjectArray},
 };
 use keptino_core::crypto::PEPPER_SIZE;
+use keptino_core::vault::KeyStore;
 use std::{
 	collections::HashMap,
 	ffi::c_void,
@@ -167,7 +168,7 @@ pub extern "system" fn Java_com_keptino_app_Core_derivePepper<'local>(
 	guard(&mut env, std::ptr::null_mut(), |env| {
 		let seed = bytes(env, &seed)?;
 		let pepper = security::derive_pepper(&seed, mem_kib(mem)?)?;
-		byte_array(env, &*pepper)
+		pepper.with_key(|bytes| byte_array(env, bytes))
 	})
 }
 

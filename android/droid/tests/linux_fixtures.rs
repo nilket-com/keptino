@@ -3,6 +3,7 @@
 
 use droid::{Commit, Error, Source, Vault, field, security};
 use keptino_core::format::KdfParams;
+use keptino_core::vault::KeyStore;
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
 const PEPPER_SEED: &[u8] = b"digisafe test pepper seed";
@@ -117,5 +118,5 @@ fn opens_and_edits_a_linux_release_vault() {
 #[ignore]
 fn derives_the_pepper_of_linux_setup() {
 	let derived = security::derive_pepper(PEPPER_SEED, KdfParams::RELEASE.m_cost).unwrap();
-	assert_eq!(*derived, pepper());
+	derived.with_key(|key| assert_eq!(key, &pepper()));
 }

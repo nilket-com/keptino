@@ -1,0 +1,1093 @@
+//! The database in memory, with every record sealed. Entries are kept as
+//! ciphertext under keys that live in the head's secret storage, and each
+//! password entry's secret fields are sealed again under a key of their own,
+//! so an idle vault holds no entry plaintext and a record is decrypted only
+//! for the moment it is used. The head supplies the storage through
+//! [`KeyStore`]: `memfd_secret` pages on Linux, locked pages on Android.
+
+use crate::{
+	crypto::{self, KEY_SIZE, NONCE_SIZE},
+	format::{
+		self, AAD_FORMAT, Envelope, FieldAtlas, FormatError, KdfParams, TAG_META, TAG_PASSWORD,
+		encode_envelope, envelope_aad, field, meta_field,
+	},
+};
+use chacha20poly1305::{
+	XChaCha20Poly1305,
+	aead::{AeadInPlace, KeyInit},
+};
+use std::{
+	collections::BTreeMap,
+	mem,
+	sync::{Arc, RwLock},
+	time::SystemTime,
+};
+use zeroize::{Zeroize, Zeroizing};
+
+/// A 32-byte key that lives where the head can protect it. The bytes are
+/// exposed only inside `with_key`, for the duration of one cipher operation.
+pub trait KeyStore: Send + Sync + Sized + 'static {
+	type Error: std::error::Error + Send + Sync + 'static;
+
+	/// Stores a key the caller already holds, such as the derived master key.
+	fn from_bytes(key: &[u8; KEY_SIZE]) -> Result<Self, Self::Error>;
+
+	/// Maps the key, runs `f` over it, and unmaps it.
+	fn with_key<T>(&self, f: impl FnOnce(&[u8; KEY_SIZE]) -> T) -> T;
+
+	/// Wipes the key; the store is unusable afterwards.
+	fn zeroize(&self);
+
+	/// A store holding fresh random bytes, for a per-record or per-entry key.
+	fn fresh() -> Result<Self, Self::Error> {
+		let mut bytes = Zeroizing::new([0u8; KEY_SIZE]);
+		getrandom::fill(&mut *bytes).expect("Memory key generation failed");
+		Self::from_bytes(&bytes)
+	}
+}
+
+fn try_fresh_key<K: KeyStore>() -> Result<Arc<K>, K::Error> {
+	K::fresh().map(Arc::new)
+}
+
+/// Why a vault file did not open under a key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenError {
+	/// Wrong key, tampered envelope or damaged payload: the AEAD or the
+	/// mirror check refused it.
+	Decryption,
+	/// Authenticated, but the database inside is not well formed.
+	Format(FormatError),
+	/// The head could not provide secret storage for the records.
+	Memory(String),
+}
+
+impl std::fmt::Display for OpenError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Decryption => {
+				f.write_str("Cannot decrypt vault. Check the master password and pepper.")
+			}
+			Self::Format(err) => write!(f, "Vault contents: {err}"),
+			Self::Memory(what) => write!(f, "Secret memory unavailable: {what}"),
+		}
+	}
+}
+
+impl std::error::Error for OpenError {}
+
+/// Bytes sealed under a shared key with a caller-supplied context as
+/// associated data. Cloning copies the ciphertext only.
+pub struct ProtectedBytes<K: KeyStore> {
+	ciphertext: Vec<u8>,
+	nonce: [u8; NONCE_SIZE],
+	key: Arc<K>,
+}
+
+impl<K: KeyStore> Clone for ProtectedBytes<K> {
+	fn clone(&self) -> Self {
+		Self {
+			ciphertext: self.ciphertext.clone(),
+			nonce: self.nonce,
+			key: Arc::clone(&self.key),
+		}
+	}
+}
+
+impl<K: KeyStore> ProtectedBytes<K> {
+	pub fn plaintext_len(&self) -> usize {
+		self.ciphertext.len() - 16
+	}
+
+	pub fn seal(key: &Arc<K>, plaintext: &[u8], context: &[u8]) -> Self {
+		let mut nonce = [0u8; NONCE_SIZE];
+		getrandom::fill(&mut nonce).expect("Memory nonce generation failed");
+		// Reserve the authentication tag up front, so encryption cannot leave
+		// a reallocated plaintext buffer behind.
+		let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext.len() + 16));
+		buffer.extend_from_slice(plaintext);
+		key.with_key(|key| {
+			XChaCha20Poly1305::new(key.into())
+				.encrypt_in_place((&nonce).into(), context, &mut *buffer)
+				.expect("Memory encryption failed");
+		});
+		Self {
+			ciphertext: mem::take(&mut *buffer),
+			nonce,
+			key: Arc::clone(key),
+		}
+	}
+
+	/// The plaintext. A record that fails to authenticate is a corrupted
+	/// process, and the process stops rather than return something else.
+	pub fn open(&self, context: &[u8]) -> Zeroizing<Vec<u8>> {
+		let mut buffer = Zeroizing::new(self.ciphertext.clone());
+		self.key.with_key(|key| {
+			XChaCha20Poly1305::new(key.into())
+				.decrypt_in_place((&self.nonce).into(), context, &mut *buffer)
+				.expect("Memory authentication failed");
+		});
+		buffer
+	}
+}
+
+/// Entry records sealed under one key, with the record's position and tag
+/// as context, so a record cannot be swapped for another.
+pub struct EntryAtlas<K: KeyStore> {
+	entries: BTreeMap<u32, (u8, ProtectedBytes<K>)>,
+	key: Arc<K>,
+}
+
+impl<K: KeyStore> Default for EntryAtlas<K> {
+	fn default() -> Self {
+		Self::try_new().expect("Secret memory unavailable")
+	}
+}
+
+impl<K: KeyStore> EntryAtlas<K> {
+	pub fn try_new() -> Result<Self, K::Error> {
+		Ok(Self {
+			entries: BTreeMap::new(),
+			key: try_fresh_key()?,
+		})
+	}
+
+	fn context(id: u32, tag: u8) -> [u8; 5] {
+		let mut context = [0; 5];
+		context[..4].copy_from_slice(&id.to_le_bytes());
+		context[4] = tag;
+		context
+	}
+
+	pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
+		self.entries.keys().copied()
+	}
+
+	pub fn len(&self) -> usize {
+		self.entries.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.entries.is_empty()
+	}
+
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		// Size from ciphertext lengths to avoid reallocating plaintext buffers.
+		let size = self
+			.entries
+			.values()
+			.map(|(_, value)| 5 + value.plaintext_len())
+			.sum();
+		let mut buffer = Zeroizing::new(Vec::with_capacity(size));
+		for id in self.entries.keys() {
+			let (tag, value) = self.get(*id).unwrap();
+			buffer.push(tag);
+			buffer.extend_from_slice(&(value.len() as u32).to_le_bytes());
+			buffer.extend_from_slice(&value);
+		}
+		buffer
+	}
+
+	pub fn set(&mut self, id: u32, tag: u8, value: &[u8]) {
+		let sealed = ProtectedBytes::seal(&self.key, value, &Self::context(id, tag));
+		self.entries.insert(id, (tag, sealed));
+	}
+
+	pub fn get(&self, id: u32) -> Option<(u8, Zeroizing<Vec<u8>>)> {
+		let (tag, sealed) = self.entries.get(&id)?;
+		Some((*tag, sealed.open(&Self::context(id, *tag))))
+	}
+
+	/// Drops a record; its ciphertext goes with it and its key is per-atlas,
+	/// so nothing of the plaintext remains recoverable from this object.
+	pub fn remove(&mut self, id: u32) -> bool {
+		self.entries.remove(&id).is_some()
+	}
+
+	pub fn clear(&mut self) {
+		self.entries.clear();
+		self.key.zeroize();
+	}
+}
+
+/// A name and a value: the database's own bookkeeping.
+#[derive(Clone, Default)]
+pub struct MetaEntry {
+	fields: FieldAtlas,
+}
+
+impl From<FieldAtlas> for MetaEntry {
+	fn from(fields: FieldAtlas) -> Self {
+		Self { fields }
+	}
+}
+
+impl MetaEntry {
+	pub fn new(name: &str, value: &str) -> Self {
+		let mut entry = Self::default();
+		entry.fields.set(meta_field::NAME, name.as_bytes());
+		entry.fields.set(meta_field::VALUE, value.as_bytes());
+		entry
+	}
+
+	pub fn get_name(&self) -> &str {
+		self.fields.get_str(meta_field::NAME).unwrap_or_default()
+	}
+
+	pub fn get_value(&self) -> &str {
+		self.fields.get_str(meta_field::VALUE).unwrap_or_default()
+	}
+
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		self.fields.serialize()
+	}
+}
+
+fn now_seconds() -> u64 {
+	SystemTime::now()
+		.duration_since(SystemTime::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or_default()
+}
+
+/// Which fields of a password entry are secrets, sealed separately.
+const SECRET_FIELDS: [u8; 3] = [field::PASSWORD, field::PIN, field::NOTE];
+
+/// One password entry. Name, username, URL, tags and timestamps are held in
+/// the clear for display and indexing; password, PIN and note are sealed
+/// under a key of this entry's own and opened only on request.
+pub struct PasswordEntry<K: KeyStore> {
+	fields: FieldAtlas,
+	secrets: BTreeMap<u8, ProtectedBytes<K>>,
+	key: Arc<K>,
+}
+
+impl<K: KeyStore> Clone for PasswordEntry<K> {
+	fn clone(&self) -> Self {
+		Self {
+			fields: self.fields.clone(),
+			secrets: self.secrets.clone(),
+			key: Arc::clone(&self.key),
+		}
+	}
+}
+
+impl<K: KeyStore> From<FieldAtlas> for PasswordEntry<K> {
+	fn from(fields: FieldAtlas) -> Self {
+		Self::try_from_fields(fields).expect("Secret memory unavailable")
+	}
+}
+
+impl<K: KeyStore> Default for PasswordEntry<K> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<K: KeyStore> PasswordEntry<K> {
+	/// Seals the secret fields of a parsed record under a key of its own.
+	pub fn try_from_fields(mut fields: FieldAtlas) -> Result<Self, K::Error> {
+		let key = try_fresh_key()?;
+		let mut secrets = BTreeMap::new();
+		for id in SECRET_FIELDS {
+			if let Some(value) = fields.take(id) {
+				secrets.insert(id, ProtectedBytes::seal(&key, &value, &[id]));
+			}
+		}
+		Ok(Self {
+			fields,
+			secrets,
+			key,
+		})
+	}
+
+	pub fn new() -> Self {
+		Self::try_new().expect("Secret memory unavailable")
+	}
+
+	/// A blank entry stamped now, or the head's error when no key page can
+	/// be had for it.
+	pub fn try_new() -> Result<Self, K::Error> {
+		let now = now_seconds().to_string();
+		let mut fields = FieldAtlas::default();
+		fields.set(field::CREATED_TS, now.as_bytes());
+		fields.set(field::MODIFIED_TS, now.as_bytes());
+		Self::try_from_fields(fields)
+	}
+
+	fn touch(&mut self) {
+		self.fields
+			.set(field::MODIFIED_TS, now_seconds().to_string().as_bytes());
+	}
+
+	fn set_plain(&mut self, id: u8, value: &str) {
+		self.touch();
+		self.fields.set(id, value.as_bytes());
+	}
+
+	fn set_secret(&mut self, id: u8, value: &str) {
+		self.touch();
+		self.secrets
+			.insert(id, ProtectedBytes::seal(&self.key, value.as_bytes(), &[id]));
+	}
+
+	pub fn set_name(&mut self, name: &str) {
+		self.set_plain(field::NAME, name);
+	}
+	pub fn set_username(&mut self, username: &str) {
+		self.set_plain(field::USERNAME, username);
+	}
+	pub fn set_url(&mut self, url: &str) {
+		self.set_plain(field::URL, url);
+	}
+	pub fn set_tags(&mut self, tags: &str) {
+		self.set_plain(field::TAGS, tags);
+	}
+	pub fn set_password(&mut self, password: &str) {
+		self.set_secret(field::PASSWORD, password);
+	}
+	pub fn set_pin(&mut self, pin: &str) {
+		self.set_secret(field::PIN, pin);
+	}
+	pub fn set_note(&mut self, note: &str) {
+		self.set_secret(field::NOTE, note);
+	}
+
+	fn plain(&self, id: u8) -> &str {
+		self.fields.get_str(id).unwrap_or_default()
+	}
+
+	pub fn get_name(&self) -> &str {
+		self.plain(field::NAME)
+	}
+	pub fn get_username(&self) -> &str {
+		self.plain(field::USERNAME)
+	}
+	pub fn get_url(&self) -> &str {
+		self.plain(field::URL)
+	}
+	pub fn get_tags(&self) -> &str {
+		self.plain(field::TAGS)
+	}
+	pub fn get_password(&self) -> Zeroizing<String> {
+		self.open_secret(field::PASSWORD)
+	}
+	pub fn get_pin(&self) -> Zeroizing<String> {
+		self.open_secret(field::PIN)
+	}
+	pub fn get_note(&self) -> Zeroizing<String> {
+		self.open_secret(field::NOTE)
+	}
+
+	/// Seconds since the epoch, as stored; `None` when absent or malformed.
+	pub fn created(&self) -> Option<i64> {
+		self.fields.get_str(field::CREATED_TS)?.parse().ok()
+	}
+	pub fn modified(&self) -> Option<i64> {
+		self.fields.get_str(field::MODIFIED_TS)?.parse().ok()
+	}
+
+	/// Any field by id, secret or not, as text; for callers that address
+	/// fields by number, such as the Android bridge.
+	pub fn get_field(&self, id: u8) -> Zeroizing<String> {
+		if SECRET_FIELDS.contains(&id) {
+			self.open_secret(id)
+		} else {
+			Zeroizing::new(self.plain(id).to_owned())
+		}
+	}
+
+	/// Sets any editable field by id; timestamps are not editable.
+	pub fn set_field(&mut self, id: u8, value: &str) -> bool {
+		if !(field::NAME..=field::TAGS).contains(&id) {
+			return false;
+		}
+		if SECRET_FIELDS.contains(&id) {
+			self.set_secret(id, value);
+		} else {
+			self.set_plain(id, value);
+		}
+		true
+	}
+
+	fn open_secret(&self, id: u8) -> Zeroizing<String> {
+		let Some(value) = self.secrets.get(&id) else {
+			return Zeroizing::new(String::new());
+		};
+		let mut bytes = value.open(&[id]);
+		// Validate before transferring ownership to the wiping String.
+		std::str::from_utf8(&bytes).expect("Invalid secret text");
+		Zeroizing::new(String::from_utf8(mem::take(&mut *bytes)).unwrap())
+	}
+
+	/// The entry's field record with every secret in the clear, as stored.
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		let mut fields = self.fields.clone();
+		for (id, value) in &self.secrets {
+			let plaintext = value.open(&[*id]);
+			fields.set(*id, &plaintext);
+		}
+		fields.serialize()
+	}
+}
+
+/// The entries of one vault with their indexes. Record ids are positions in
+/// the file, so an edited entry keeps its place and a deleted one simply
+/// leaves the next save one record shorter.
+pub struct Store<K: KeyStore> {
+	next_id: u32,
+	entries: EntryAtlas<K>,
+	index_by_name: BTreeMap<String, u32>,
+	index_by_tag: BTreeMap<String, Vec<u32>>,
+}
+
+impl<K: KeyStore> Default for Store<K> {
+	fn default() -> Self {
+		Self::try_new().expect("Secret memory unavailable")
+	}
+}
+
+fn password_key(name: &str) -> String {
+	format!("password\x00{name}")
+}
+
+fn meta_key(name: &str) -> String {
+	format!("meta\x00{name}")
+}
+
+fn tag_key(tag: &str) -> String {
+	format!("tag\x00{tag}")
+}
+
+impl<K: KeyStore> Store<K> {
+	pub fn try_new() -> Result<Self, K::Error> {
+		Ok(Self {
+			next_id: 0,
+			entries: EntryAtlas::try_new()?,
+			index_by_name: BTreeMap::new(),
+			index_by_tag: BTreeMap::new(),
+		})
+	}
+
+	/// Parses an authenticated database, sealing every record. An unknown
+	/// record tag is refused rather than dropped: it is something a newer
+	/// version wrote. A head that cannot provide a key page for every entry
+	/// reports that instead of stopping the process.
+	pub fn deserialize(data: &[u8]) -> Result<Self, OpenError> {
+		let memory = |err: K::Error| OpenError::Memory(err.to_string());
+		let mut store = Self::try_new().map_err(memory)?;
+		for (tag, fields) in format::deserialize_entries(data).map_err(OpenError::Format)? {
+			match tag {
+				TAG_META => store.set_meta_entry(MetaEntry::from(fields)),
+				TAG_PASSWORD => {
+					// Every known field is text; a record that is not would
+					// panic later in open_secret, so it is refused here.
+					for id in field::NAME..=field::MODIFIED_TS {
+						if fields.get(id).is_some() && fields.get_str(id).is_none() {
+							return Err(OpenError::Format(FormatError::Damaged));
+						}
+					}
+					let name = fields.get_str(field::NAME).unwrap_or_default().to_owned();
+					let tags = fields.get_str(field::TAGS).unwrap_or_default().to_owned();
+					// Sealed as parsed: no per-entry key page is touched until
+					// an entry is actually opened.
+					store.store_password_record(&name, &tags, &fields.serialize());
+				}
+				_ => return Err(OpenError::Format(FormatError::Damaged)),
+			}
+		}
+		Ok(store)
+	}
+
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		self.entries.serialize()
+	}
+
+	fn allocate(&mut self, key: String) -> (u32, bool) {
+		match self.index_by_name.get(&key) {
+			Some(id) => (*id, false),
+			None => {
+				let id = self.next_id;
+				self.next_id += 1;
+				self.index_by_name.insert(key, id);
+				(id, true)
+			}
+		}
+	}
+
+	fn unindex_tags(&mut self, id: u32) {
+		self.index_by_tag.retain(|_, ids| {
+			ids.retain(|other| *other != id);
+			!ids.is_empty()
+		});
+	}
+
+	/// Stores an entry under its name, replacing one of the same name. Tags
+	/// are reindexed on every store, so an edited tag list is found at once.
+	pub fn set_password_entry(&mut self, entry: PasswordEntry<K>) {
+		let name = entry.get_name().to_owned();
+		let tags = entry.get_tags().to_owned();
+		self.store_password_record(&name, &tags, &entry.serialize());
+	}
+
+	/// Indexes a password record by name and tags and seals its bytes.
+	fn store_password_record(&mut self, name: &str, tags: &str, record: &[u8]) {
+		let (id, is_new) = self.allocate(password_key(name));
+		if !is_new {
+			self.unindex_tags(id);
+		}
+		for tag in tags.split(',').map(str::trim) {
+			if tag.is_empty() {
+				continue;
+			}
+			let ids = self.index_by_tag.entry(tag_key(tag)).or_default();
+			ids.push(id);
+			ids.sort_unstable();
+		}
+		self.entries.set(id, TAG_PASSWORD, record);
+	}
+
+	fn password(&self, id: u32) -> Option<PasswordEntry<K>> {
+		let (tag, data) = self.entries.get(id)?;
+		if tag != TAG_PASSWORD {
+			return None;
+		}
+		Some(PasswordEntry::from(
+			FieldAtlas::deserialize(&data).expect("Invalid field record"),
+		))
+	}
+
+	pub fn get_password_entry_by_name(&self, name: &str) -> Option<PasswordEntry<K>> {
+		self.password(*self.index_by_name.get(&password_key(name))?)
+	}
+
+	/// Removes an entry and every index reference to it.
+	pub fn delete_password_entry(&mut self, name: &str) -> bool {
+		let Some(id) = self.index_by_name.remove(&password_key(name)) else {
+			return false;
+		};
+		self.entries.remove(id);
+		self.unindex_tags(id);
+		true
+	}
+
+	pub fn get_password_entries_by_tag(&self, tag: &str) -> Option<Vec<PasswordEntry<K>>> {
+		let ids = self.index_by_tag.get(&tag_key(tag))?;
+		Some(ids.iter().filter_map(|id| self.password(*id)).collect())
+	}
+
+	/// The entry by name, else the first entry carrying `query` as a tag,
+	/// else the N-th such entry for `tag.N`.
+	pub fn query(&self, query: &str) -> Option<PasswordEntry<K>> {
+		if let Some(entry) = self.get_password_entry_by_name(query) {
+			return Some(entry);
+		}
+		let (tag, index) = match query.split_once('.') {
+			Some((tag, index)) => match index.parse::<usize>() {
+				Ok(index) => (tag, index.saturating_sub(1)),
+				Err(_) => (query, 0),
+			},
+			None => (query, 0),
+		};
+		self.password(*self.index_by_tag.get(&tag_key(tag))?.get(index)?)
+	}
+
+	/// The names of every password entry, in navigation order.
+	pub fn names(&self) -> Vec<String> {
+		let prefix = password_key("");
+		self.index_by_name
+			.range(prefix.clone()..format!("password\x01"))
+			.map(|(key, _)| key[prefix.len()..].to_owned())
+			.collect()
+	}
+
+	pub fn previous(&self, name: &str) -> Option<PasswordEntry<K>> {
+		let id = *self
+			.index_by_name
+			.range(password_key("")..password_key(name))
+			.next_back()?
+			.1;
+		self.password(id)
+	}
+
+	pub fn next(&self, name: &str) -> Option<PasswordEntry<K>> {
+		let key = password_key(name);
+		let offset = usize::from(self.index_by_name.contains_key(&key));
+		let id = *self
+			.index_by_name
+			.range(key..format!("password\x01"))
+			.nth(offset)?
+			.1;
+		self.password(id)
+	}
+
+	pub fn set_meta_entry(&mut self, entry: MetaEntry) {
+		let (id, _) = self.allocate(meta_key(entry.get_name()));
+		self.entries.set(id, TAG_META, &entry.serialize());
+	}
+
+	pub fn get_meta_entry(&self, name: &str) -> Option<MetaEntry> {
+		let (tag, data) = self
+			.entries
+			.get(*self.index_by_name.get(&meta_key(name))?)?;
+		(tag == TAG_META)
+			.then(|| MetaEntry::from(FieldAtlas::deserialize(&data).expect("Invalid field record")))
+	}
+
+	pub fn remove_meta_entry(&mut self, name: &str) -> bool {
+		let Some(id) = self.index_by_name.remove(&meta_key(name)) else {
+			return false;
+		};
+		self.entries.remove(id)
+	}
+
+	/// Every meta entry as (name, value), in storage order.
+	pub fn meta_pairs(&self) -> Vec<(String, String)> {
+		self.entries
+			.ids()
+			.filter_map(|id| {
+				let (tag, data) = self.entries.get(id)?;
+				if tag != TAG_META {
+					return None;
+				}
+				let meta = MetaEntry::from(FieldAtlas::deserialize(&data).ok()?);
+				Some((meta.get_name().to_owned(), meta.get_value().to_owned()))
+			})
+			.collect()
+	}
+
+	pub fn zeroize(&mut self) {
+		self.entries.clear();
+		for (mut key, _) in mem::take(&mut self.index_by_name) {
+			key.zeroize();
+		}
+		for (mut key, _) in mem::take(&mut self.index_by_tag) {
+			key.zeroize();
+		}
+	}
+}
+
+impl<K: KeyStore> Drop for Store<K> {
+	fn drop(&mut self) {
+		self.zeroize();
+	}
+}
+
+/// A vault open in memory: its store and its master key, shared between the
+/// user interface and the save path.
+pub struct Database<K: KeyStore> {
+	store: Arc<RwLock<Store<K>>>,
+	master_key: Arc<K>,
+}
+
+impl<K: KeyStore> Clone for Database<K> {
+	fn clone(&self) -> Self {
+		Self {
+			store: Arc::clone(&self.store),
+			master_key: Arc::clone(&self.master_key),
+		}
+	}
+}
+
+impl<K: KeyStore> Database<K> {
+	/// An empty database under `master_key`, with the meta entries every
+	/// vault starts with.
+	pub fn new(master_key: K, db_name: &str, salt: &[u8; crypto::SALT_SIZE]) -> Self {
+		Self::try_new(master_key, db_name, salt).expect("Secret memory unavailable")
+	}
+
+	/// As `new`, reporting the head's error when no key page can be had for
+	/// the records.
+	pub fn try_new(
+		master_key: K,
+		db_name: &str,
+		salt: &[u8; crypto::SALT_SIZE],
+	) -> Result<Self, K::Error> {
+		use base64ct::{Base64, Encoding};
+		let db = Self::with_store(master_key, Store::try_new()?);
+		let created = now_seconds().to_string();
+		db.set_meta_entry(MetaEntry::new("db_name", db_name));
+		db.set_meta_entry(MetaEntry::new("nonce", "0"));
+		db.set_meta_entry(MetaEntry::new("salt", &Base64::encode_string(salt)));
+		db.set_meta_entry(MetaEntry::new("created_ts", &created));
+		db.set_meta_entry(MetaEntry::new("modified_ts", &created));
+		Ok(db)
+	}
+
+	pub fn with_store(master_key: K, store: Store<K>) -> Self {
+		Self {
+			store: Arc::new(RwLock::new(store)),
+			master_key: Arc::new(master_key),
+		}
+	}
+
+	/// Decrypts `envelope` under `key` and parses the database. On failure
+	/// the key is handed back with the reason, so a second candidate can be
+	/// tried under the same key.
+	pub fn open(envelope: &Envelope, key: K) -> Result<Self, (K, OpenError)> {
+		let Some(database) = key.with_key(|bytes| envelope.open(bytes)) else {
+			return Err((key, OpenError::Decryption));
+		};
+		match Store::deserialize(&database) {
+			Ok(store) => Ok(Self::with_store(key, store)),
+			Err(err) => Err((key, err)),
+		}
+	}
+
+	fn read(&self) -> std::sync::RwLockReadGuard<'_, Store<K>> {
+		self.store.read().unwrap_or_else(|e| e.into_inner())
+	}
+
+	fn write(&self) -> std::sync::RwLockWriteGuard<'_, Store<K>> {
+		self.store.write().unwrap_or_else(|e| e.into_inner())
+	}
+
+	pub fn set_password_entry(&self, entry: PasswordEntry<K>) {
+		self.write().set_password_entry(entry);
+	}
+	pub fn get_password_entry_by_name(&self, name: &str) -> Option<PasswordEntry<K>> {
+		self.read().get_password_entry_by_name(name)
+	}
+	pub fn delete_password_entry(&self, name: &str) -> bool {
+		self.write().delete_password_entry(name)
+	}
+	pub fn get_password_entries_by_tag(&self, tag: &str) -> Option<Vec<PasswordEntry<K>>> {
+		self.read().get_password_entries_by_tag(tag)
+	}
+	pub fn query(&self, query: &str) -> Option<PasswordEntry<K>> {
+		self.read().query(query)
+	}
+	pub fn names(&self) -> Vec<String> {
+		self.read().names()
+	}
+	pub fn previous(&self, name: &str) -> Option<PasswordEntry<K>> {
+		self.read().previous(name)
+	}
+	pub fn next(&self, name: &str) -> Option<PasswordEntry<K>> {
+		self.read().next(name)
+	}
+	pub fn set_meta_entry(&self, entry: MetaEntry) {
+		self.write().set_meta_entry(entry);
+	}
+	pub fn get_meta_entry(&self, name: &str) -> Option<MetaEntry> {
+		self.read().get_meta_entry(name)
+	}
+	pub fn meta(&self, name: &str) -> Option<String> {
+		Some(self.get_meta_entry(name)?.get_value().to_owned())
+	}
+	pub fn remove_meta_entry(&self, name: &str) -> bool {
+		self.write().remove_meta_entry(name)
+	}
+	pub fn meta_pairs(&self) -> Vec<(String, String)> {
+		self.read().meta_pairs()
+	}
+	pub fn serialize(&self) -> Zeroizing<Vec<u8>> {
+		self.read().serialize()
+	}
+
+	pub fn revision(&self) -> Option<u64> {
+		self.meta("revision")?.parse().ok()
+	}
+
+	pub fn modified_ts(&self) -> u64 {
+		self.meta("modified_ts")
+			.and_then(|ts| ts.parse().ok())
+			.unwrap_or_default()
+	}
+
+	/// Encrypts the database into the bytes of a vault file, advancing its
+	/// bookkeeping: a modification time that never goes backwards, a fresh
+	/// nonce, the next revision, the derivation cost recorded if it never
+	/// was, and the AAD marker only in the marked form. `default_kdf` is the
+	/// cost the database was opened with when none is recorded.
+	pub fn encode(&self, aad_form: bool, default_kdf: KdfParams) -> Vec<u8> {
+		// Never go backwards: a reader keeps its local copy unless the remote
+		// one is strictly newer, so a slow clock must not hide a save.
+		let modified = now_seconds().max(self.modified_ts().saturating_add(1));
+		self.set_meta_entry(MetaEntry::new("modified_ts", &modified.to_string()));
+		// Older readers increment this counter after loading; fifteen random
+		// bytes leave room for that in the decimal u128 field.
+		let mut random = [0u8; 16];
+		getrandom::fill(&mut random[..15]).expect("Nonce generation failed");
+		let counter = u128::from_le_bytes(random).max(1);
+		self.set_meta_entry(MetaEntry::new("nonce", &counter.to_string()));
+		let mut nonce = [0u8; NONCE_SIZE];
+		nonce[..16].copy_from_slice(&counter.to_le_bytes());
+		let revision = self
+			.revision()
+			.unwrap_or(0)
+			.checked_add(1)
+			.expect("Revision counter exhausted");
+		self.set_meta_entry(MetaEntry::new("revision", &revision.to_string()));
+		if self.get_meta_entry("kdf_m").is_none() {
+			for (name, value) in default_kdf.meta_pairs() {
+				self.set_meta_entry(MetaEntry::new(&name, &value));
+			}
+		}
+		if aad_form {
+			self.set_meta_entry(MetaEntry::new("format", &AAD_FORMAT.to_string()));
+		} else {
+			self.remove_meta_entry("format");
+		}
+		let compressed = crypto::compress(&self.serialize());
+		let meta = self.meta_pairs();
+		let aad = if aad_form {
+			envelope_aad(&meta)
+		} else {
+			Vec::new()
+		};
+		let ciphertext = self
+			.master_key
+			.with_key(|key| crypto::encrypt(&compressed, key, &nonce, &aad));
+		encode_envelope(&meta, &ciphertext)
+	}
+
+	/// Wipes the master key and every record; the database is empty after.
+	pub fn zeroize(&self) {
+		self.master_key.zeroize();
+		self.write().zeroize();
+	}
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+	use super::*;
+	use std::sync::Mutex;
+
+	/// A heap key for tests: a wiping array behind a mutex.
+	pub struct HeapKey(Mutex<Zeroizing<[u8; KEY_SIZE]>>);
+
+	#[derive(Debug)]
+	pub struct Never;
+	impl std::fmt::Display for Never {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			f.write_str("never")
+		}
+	}
+	impl std::error::Error for Never {}
+
+	impl KeyStore for HeapKey {
+		type Error = Never;
+		fn from_bytes(key: &[u8; KEY_SIZE]) -> Result<Self, Never> {
+			Ok(Self(Mutex::new(Zeroizing::new(*key))))
+		}
+		fn with_key<T>(&self, f: impl FnOnce(&[u8; KEY_SIZE]) -> T) -> T {
+			f(&self.0.lock().unwrap())
+		}
+		fn zeroize(&self) {
+			self.0.lock().unwrap().zeroize();
+		}
+	}
+
+	type Entry = PasswordEntry<HeapKey>;
+
+	#[test]
+	fn protected_bytes_clone_ciphertext_only_and_authenticate_context() {
+		let key = try_fresh_key::<HeapKey>().unwrap();
+		let plaintext = b"distinctive-password-123456789";
+		let first = ProtectedBytes::seal(&key, plaintext, b"password");
+		let second = ProtectedBytes::seal(&key, plaintext, b"password");
+		assert_ne!(first.nonce, second.nonce);
+		assert_ne!(first.ciphertext, second.ciphertext);
+		assert!(
+			!first
+				.ciphertext
+				.windows(plaintext.len())
+				.any(|w| w == plaintext)
+		);
+		let cloned = first.clone();
+		drop(first);
+		assert_eq!(&*cloned.open(b"password"), plaintext);
+		assert!(
+			std::panic::catch_unwind(|| cloned.open(b"pin")).is_err(),
+			"wrong context"
+		);
+		let mut altered = second.clone();
+		altered.ciphertext[0] ^= 1;
+		assert!(std::panic::catch_unwind(|| altered.open(b"password")).is_err());
+	}
+
+	#[test]
+	fn secret_fields_are_absent_from_the_plaintext_atlas() {
+		let mut entry = Entry::new();
+		entry.set_password("secret");
+		entry.set_pin("4567");
+		entry.set_note("sensitive note");
+		for id in SECRET_FIELDS {
+			assert!(entry.fields.get(id).is_none());
+		}
+		let cloned = entry.clone();
+		drop(entry);
+		assert_eq!(cloned.get_password().as_str(), "secret");
+		assert_eq!(cloned.get_field(field::PIN).as_str(), "4567");
+		let restored = Entry::from(FieldAtlas::deserialize(&cloned.serialize()).unwrap());
+		assert_eq!(restored.get_note().as_str(), "sensitive note");
+		assert_eq!(restored.get_pin().as_str(), "4567");
+		assert!(restored.created().is_some());
+		let mut edited = restored;
+		assert!(edited.set_field(field::URL, "https://x"));
+		assert!(
+			!edited.set_field(field::CREATED_TS, "1"),
+			"timestamps are not editable"
+		);
+		assert_eq!(edited.get_url(), "https://x");
+	}
+
+	fn original_format_fixture() -> Vec<u8> {
+		// The on-disk record of one entry, as every version has written it.
+		let mut fields = Vec::new();
+		for (id, text) in [
+			(1u8, "example"),
+			(2, "alice"),
+			(3, "password 🔑"),
+			(4, "1234"),
+			(5, "private note"),
+			(7, "test"),
+		] {
+			fields.push(id);
+			fields.extend_from_slice(&(text.len() as u32).to_le_bytes());
+			fields.extend_from_slice(text.as_bytes());
+		}
+		let mut bytes = vec![TAG_PASSWORD];
+		bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+		bytes.extend_from_slice(&fields);
+		bytes
+	}
+
+	#[test]
+	fn the_store_roundtrips_edits_deletes_and_reindexes_tags() {
+		let fixture = original_format_fixture();
+		let mut store = Store::<HeapKey>::deserialize(&fixture).unwrap();
+		assert_eq!(&*store.serialize(), &fixture);
+		let mut entry = store.get_password_entry_by_name("example").unwrap();
+		assert_eq!(entry.get_password().as_str(), "password 🔑");
+		assert_eq!(store.get_password_entries_by_tag("test").unwrap().len(), 1);
+		entry.set_password("replacement");
+		entry.set_tags("other");
+		store.set_password_entry(entry);
+		assert!(
+			store.get_password_entries_by_tag("test").is_none(),
+			"tags are reindexed on edit"
+		);
+		assert_eq!(store.query("other").unwrap().get_name(), "example");
+		let reloaded = Store::<HeapKey>::deserialize(&store.serialize()).unwrap();
+		assert_eq!(
+			reloaded
+				.get_password_entry_by_name("example")
+				.unwrap()
+				.get_password()
+				.as_str(),
+			"replacement"
+		);
+		assert_eq!(
+			reloaded
+				.get_password_entry_by_name("example")
+				.unwrap()
+				.get_note()
+				.as_str(),
+			"private note"
+		);
+		let mut second = Entry::new();
+		second.set_name("other");
+		second.set_tags("other, x");
+		store.set_password_entry(second);
+		assert_eq!(store.names(), ["example", "other"]);
+		assert_eq!(store.next("example").unwrap().get_name(), "other");
+		assert_eq!(store.previous("other").unwrap().get_name(), "example");
+		assert!(store.next("other").is_none());
+		assert_eq!(store.query("other.2").unwrap().get_name(), "other");
+		assert!(store.delete_password_entry("example"));
+		assert!(!store.delete_password_entry("example"));
+		assert_eq!(store.get_password_entries_by_tag("other").unwrap().len(), 1);
+		assert!(
+			Store::<HeapKey>::deserialize(&[9, 0, 0, 0, 0]).is_err(),
+			"unknown tags are refused"
+		);
+		let mut binary = FieldAtlas::default();
+		binary.set(field::NAME, b"x");
+		binary.set(field::PASSWORD, &[0xff, 0xfe]);
+		let record = format::serialize_entries(std::iter::once((
+			TAG_PASSWORD,
+			binary.serialize().as_slice(),
+		)));
+		assert_eq!(
+			Store::<HeapKey>::deserialize(&record).err(),
+			Some(OpenError::Format(FormatError::Damaged)),
+			"non-text secrets are refused at open"
+		);
+		store.zeroize();
+		assert!(store.entries.is_empty());
+		assert!(store.index_by_name.is_empty());
+	}
+
+	/// K7: an opened vault holds no entry plaintext. Every record sits in the
+	/// atlas as ciphertext, and an entry's secret is in the clear only inside
+	/// the Zeroizing buffer a getter returns.
+	#[test]
+	fn an_opened_store_holds_only_ciphertext() {
+		let fixture = original_format_fixture();
+		let store = Store::<HeapKey>::deserialize(&fixture).unwrap();
+		for needle in [
+			"password 🔑".as_bytes(),
+			b"private note",
+			b"example",
+			b"alice",
+		] {
+			for (_, sealed) in store.entries.entries.values() {
+				assert!(
+					!sealed.ciphertext.windows(needle.len()).any(|w| w == needle),
+					"record plaintext in the atlas"
+				);
+			}
+		}
+		assert_eq!(store.entries.len(), 1);
+		let entry = store.get_password_entry_by_name("example").unwrap();
+		assert!(entry.fields.get(field::PASSWORD).is_none());
+		assert_eq!(entry.get_password().as_str(), "password 🔑");
+	}
+
+	#[test]
+	fn a_database_encodes_and_reopens_through_the_envelope() {
+		let key = HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap();
+		let db = Database::new(key, "example", &[7; crypto::SALT_SIZE]);
+		let mut entry = Entry::new();
+		entry.set_name("bank");
+		entry.set_password("hunter2");
+		db.set_password_entry(entry);
+		let file = db.encode(false, KdfParams::DEBUG);
+		let envelope = Envelope::parse(&file, KdfParams::RELEASE).unwrap();
+		assert_eq!(envelope.revision, Some(1));
+		assert_eq!(
+			envelope.kdf,
+			KdfParams::DEBUG,
+			"the opening cost was recorded"
+		);
+		assert!(envelope.aad.is_empty());
+		let before = db.modified_ts();
+		let second =
+			Envelope::parse(&db.encode(false, KdfParams::DEBUG), KdfParams::DEBUG).unwrap();
+		assert_eq!(second.revision, Some(2));
+		assert!(second.modified > before - 1, "time never goes backwards");
+		assert_ne!(second.nonce, envelope.nonce);
+		let reopened = Database::open(&envelope, HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap())
+			.unwrap_or_else(|_| panic!("reopens"));
+		assert_eq!(reopened.meta("db_name").as_deref(), Some("example"));
+		assert_eq!(
+			reopened
+				.get_password_entry_by_name("bank")
+				.unwrap()
+				.get_password()
+				.as_str(),
+			"hunter2"
+		);
+		assert!(
+			Database::open(&envelope, HeapKey::from_bytes(&[1; KEY_SIZE]).unwrap()).is_err(),
+			"the key comes back on failure"
+		);
+		let marked = Envelope::parse(&db.encode(true, KdfParams::DEBUG), KdfParams::DEBUG).unwrap();
+		assert!(!marked.aad.is_empty());
+		assert!(Database::open(&marked, HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap()).is_ok());
+		db.zeroize();
+		assert!(db.names().is_empty());
+	}
+}

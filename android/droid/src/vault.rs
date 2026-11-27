@@ -5,18 +5,13 @@ use crate::{
 	error::{Error, Result},
 	security::{LockedKey, derive_master_key},
 };
-use base64ct::{Base64, Encoding};
 use keptino_core::{
-	crypto::{self, NONCE_SIZE, PEPPER_SIZE, SALT_SIZE},
-	format::{
-		self, Envelope, FieldAtlas, KdfParams, TAG_META, TAG_PASSWORD, deserialize_entries, field,
-		meta_field, serialize_entries,
-	},
+	crypto::{PEPPER_SIZE, SALT_SIZE},
+	format::{Envelope, KdfParams, field},
 	policy,
+	vault::{Database, OpenError, PasswordEntry},
 };
-use std::{collections::BTreeMap, ops::Bound, time::SystemTime};
-use zeroize::{Zeroize, Zeroizing};
-
+use zeroize::Zeroizing;
 /// Where an opened database came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -35,192 +30,9 @@ pub enum Commit {
 	Created = 2,
 }
 
-fn now() -> u64 {
-	SystemTime::now()
-		.duration_since(SystemTime::UNIX_EPOCH)
-		.map(|d| d.as_secs())
-		.unwrap_or_default()
-}
-
-fn blank_entry() -> FieldAtlas {
-	let ts = now().to_string();
-	let mut entry = FieldAtlas::default();
-	entry.set(field::CREATED_TS, ts.as_bytes());
-	entry.set(field::MODIFIED_TS, ts.as_bytes());
-	entry
-}
-
-fn entry_name(entry: &FieldAtlas) -> &str {
-	entry.get_str(field::NAME).unwrap_or_default()
-}
-
-/// Entries in file order with name and tag indexes. Ids are positions, as
-/// in the Linux application: an entry keeps its place when rewritten.
-#[derive(Default)]
-struct Store {
-	next_id: u32,
-	entries: BTreeMap<u32, (u8, Zeroizing<Vec<u8>>)>,
-	metas: BTreeMap<String, u32>,
-	passwords: BTreeMap<String, u32>,
-	tags: BTreeMap<String, Vec<u32>>,
-}
-
-impl Store {
-	fn deserialize(data: &[u8]) -> Result<Self> {
-		let mut store = Self::default();
-		for (tag, entry) in deserialize_entries(data)? {
-			match tag {
-				TAG_META => {
-					let name = entry
-						.get_str(meta_field::NAME)
-						.ok_or(Error::Corrupt("unnamed meta entry"))?
-						.to_owned();
-					if store.metas.contains_key(&name) || entry.get_str(meta_field::VALUE).is_none()
-					{
-						return Err(Error::Corrupt("invalid or duplicate inner metadata"));
-					}
-					store.set_raw(TAG_META, &name, &entry);
-				}
-				TAG_PASSWORD => store.set_password(&entry),
-				// Refuse rather than drop what a newer version wrote.
-				_ => return Err(Error::Corrupt("unknown entry type")),
-			}
-		}
-		Ok(store)
-	}
-
-	fn serialize(&self) -> Zeroizing<Vec<u8>> {
-		serialize_entries(
-			self.entries
-				.values()
-				.map(|(tag, value)| (*tag, value.as_slice())),
-		)
-	}
-
-	fn set_raw(&mut self, tag: u8, name: &str, entry: &FieldAtlas) -> (u32, bool) {
-		let index = if tag == TAG_META {
-			&mut self.metas
-		} else {
-			&mut self.passwords
-		};
-		let (id, is_new) = match index.get(name) {
-			Some(id) => (*id, false),
-			None => {
-				let id = self.next_id;
-				self.next_id += 1;
-				index.insert(name.to_owned(), id);
-				(id, true)
-			}
-		};
-		self.entries.insert(id, (tag, entry.serialize()));
-		(id, is_new)
-	}
-
-	fn set_meta(&mut self, name: &str, value: &str) {
-		let mut entry = FieldAtlas::default();
-		entry.set(meta_field::NAME, name.as_bytes());
-		entry.set(meta_field::VALUE, value.as_bytes());
-		self.set_raw(TAG_META, name, &entry);
-	}
-
-	fn remove_meta(&mut self, name: &str) {
-		if let Some(id) = self.metas.remove(name) {
-			self.entries.remove(&id);
-		}
-	}
-
-	fn meta(&self, name: &str) -> Option<String> {
-		let (_, data) = self.entries.get(self.metas.get(name)?)?;
-		let entry = FieldAtlas::deserialize(data).ok()?;
-		entry.get_str(meta_field::VALUE).map(str::to_owned)
-	}
-
-	fn set_password(&mut self, entry: &FieldAtlas) {
-		let (id, is_new) = self.set_raw(TAG_PASSWORD, entry_name(entry), entry);
-		if !is_new {
-			// Linux indexes tags only when an entry first appears, so edited
-			// tags are found there after a reload. Reindex at once instead.
-			self.tags.retain(|_, ids| {
-				ids.retain(|other| *other != id);
-				!ids.is_empty()
-			});
-		}
-		let tags = entry.get_str(field::TAGS).unwrap_or_default();
-		for tag in tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()) {
-			let ids = self.tags.entry(tag.to_owned()).or_default();
-			ids.push(id);
-			ids.sort_unstable();
-		}
-	}
-
-	fn password(&self, id: u32) -> Option<FieldAtlas> {
-		let (tag, data) = self.entries.get(&id)?;
-		if *tag != TAG_PASSWORD {
-			return None;
-		}
-		FieldAtlas::deserialize(data).ok()
-	}
-
-	fn password_by_name(&self, name: &str) -> Option<FieldAtlas> {
-		self.password(*self.passwords.get(name)?)
-	}
-
-	fn query(&self, query: &str) -> Option<FieldAtlas> {
-		if let Some(entry) = self.password_by_name(query) {
-			return Some(entry);
-		}
-		// "tag" is the first entry with that tag, "tag.N" the Nth.
-		let (tag, index) = match query.split_once('.') {
-			Some((tag, index)) => match index.parse::<usize>() {
-				Ok(index) => (tag, index.saturating_sub(1)),
-				Err(_) => (query, 0),
-			},
-			None => (query, 0),
-		};
-		self.password(*self.tags.get(tag)?.get(index)?)
-	}
-
-	fn previous(&self, name: &str) -> Option<FieldAtlas> {
-		let (_, id) = self
-			.passwords
-			.range::<str, _>((Bound::Unbounded, Bound::Excluded(name)))
-			.next_back()?;
-		self.password(*id)
-	}
-
-	fn next(&self, name: &str) -> Option<FieldAtlas> {
-		let offset = usize::from(self.passwords.contains_key(name));
-		let (_, id) = self
-			.passwords
-			.range::<str, _>((Bound::Included(name), Bound::Unbounded))
-			.nth(offset)?;
-		self.password(*id)
-	}
-}
-
-impl Drop for Store {
-	fn drop(&mut self) {
-		for index in [&mut self.metas, &mut self.passwords] {
-			for (mut name, _) in std::mem::take(index) {
-				name.zeroize();
-			}
-		}
-		for (mut tag, _) in std::mem::take(&mut self.tags) {
-			tag.zeroize();
-		}
-	}
-}
-
-fn nonce_bytes(counter: u128) -> [u8; NONCE_SIZE] {
-	let mut nonce = [0u8; NONCE_SIZE];
-	nonce[..16].copy_from_slice(&counter.to_le_bytes());
-	nonce
-}
-
 pub struct Vault {
-	key: LockedKey,
-	store: Store,
-	working: FieldAtlas,
+	database: Database<LockedKey>,
+	working: PasswordEntry<LockedKey>,
 	source: Source,
 	pub uploads_paused: bool,
 	cost: KdfParams,
@@ -237,14 +49,13 @@ impl Vault {
 		remote: Option<&[u8]>,
 		mem_kib: u32,
 	) -> Result<Self> {
-		let parse = |file: &[u8]| {
-			Envelope::parse(file, KdfParams::memory_only(mem_kib)).map_err(Error::from)
-		};
+		let default_cost = KdfParams::memory_only(mem_kib);
+		let parse = |file: &[u8]| Envelope::parse(file, default_cost).map_err(Error::from);
 		let local = local.map(parse);
 		let remote = remote.map(parse);
 		let mut uploads_paused = false;
 		let (first, second) = match (local, remote) {
-			(None, None) => return Self::create(db_name, password, pepper, mem_kib),
+			(None, None) => return Self::create(db_name, password, pepper, default_cost),
 			(Some(Ok(local)), Some(Ok(remote))) => {
 				if local.salt != remote.salt {
 					return Err(Error::Invalid(
@@ -277,38 +88,37 @@ impl Vault {
 		};
 		let (candidate, source) = first;
 		let mut cached = None;
-		let mut unlock = |envelope: Envelope| {
+		let mut unlock = |envelope: Envelope| -> Result<_> {
 			let cost = envelope.kdf;
-			if cached
-				.as_ref()
-				.is_none_or(|(previous, _)| *previous != cost)
-			{
-				let key = derive_master_key(password, pepper, &envelope.salt, cost)?;
-				cached = Some((cost, key));
+			let key = match cached.take() {
+				Some((previous, key)) if previous == cost => key,
+				_ => derive_master_key(password, pepper, &envelope.salt, cost)?,
+			};
+			match Database::open(&envelope, key) {
+				Ok(database) if database.meta("db_name").is_some() => Ok((database, cost)),
+				Ok(_) => Err(Error::Corrupt("incomplete database")),
+				Err((key, error)) => {
+					cached = Some((cost, key));
+					Err(match error {
+						OpenError::Decryption => Error::Decryption,
+						OpenError::Format(error) => error.into(),
+						OpenError::Memory(_) => Error::Memory("cannot allocate vault key memory"),
+					})
+				}
 			}
-			let database = envelope
-				.open(&cached.as_ref().expect("key derived above").1)
-				.ok_or(Error::Decryption)?;
-			let store = Store::deserialize(&database)?;
-			if !store.metas.contains_key("db_name") {
-				return Err(Error::Corrupt("incomplete database"));
-			}
-			Ok(store)
 		};
-		let (store, source) = match unlock(candidate) {
-			Ok(store) => (store, source),
+		let ((database, cost), source) = match unlock(candidate) {
+			Ok(opened) => (opened, source),
 			Err(err) => {
 				let (alternate, source) = second.ok_or(err)?;
 				uploads_paused = true;
 				(unlock(alternate)?, source)
 			}
 		};
-		let (cost, key) = cached.expect("successfully opened vault has a key");
 		Ok(Self {
-			key,
-			store,
+			database,
 			source,
-			working: blank_entry(),
+			working: PasswordEntry::try_new()?,
 			uploads_paused,
 			cost,
 		})
@@ -318,25 +128,17 @@ impl Vault {
 		db_name: &str,
 		password: &[u8],
 		pepper: &[u8; PEPPER_SIZE],
-		mem_kib: u32,
+		cost: KdfParams,
 	) -> Result<Self> {
 		let mut salt = [0u8; SALT_SIZE];
 		getrandom::fill(&mut salt).map_err(|_| Error::Kdf("no system randomness".into()))?;
-		let key = derive_master_key(password, pepper, &salt, KdfParams::memory_only(mem_kib))?;
-		let created_ts = now().to_string();
-		let mut store = Store::default();
-		store.set_meta("db_name", db_name);
-		store.set_meta("nonce", "0");
-		store.set_meta("salt", &Base64::encode_string(&salt));
-		store.set_meta("created_ts", &created_ts);
-		store.set_meta("modified_ts", &created_ts);
+		let key = derive_master_key(password, pepper, &salt, cost)?;
 		Ok(Self {
-			key,
-			store,
-			working: blank_entry(),
+			database: Database::try_new(key, db_name, &salt)?,
+			working: PasswordEntry::try_new()?,
 			source: Source::New,
 			uploads_paused: false,
-			cost: KdfParams::memory_only(mem_kib),
+			cost,
 		})
 	}
 
@@ -345,55 +147,52 @@ impl Vault {
 	}
 
 	pub fn meta(&self, name: &str) -> Option<String> {
-		self.store.meta(name)
+		self.database.meta(name)
 	}
 
 	pub fn modified_ts(&self) -> u64 {
-		self.meta("modified_ts")
-			.and_then(|ts| ts.parse().ok())
-			.unwrap_or_default()
+		self.database.modified_ts()
 	}
 
 	/// The names of all password entries, in navigation order.
 	pub fn names(&self) -> Vec<String> {
-		self.store.passwords.keys().cloned().collect()
+		self.database.names()
 	}
 
-	fn show(&mut self, found: Option<FieldAtlas>) -> bool {
+	fn show(&mut self, found: Option<PasswordEntry<LockedKey>>) -> bool {
 		let is_found = found.is_some();
-		self.working = found.unwrap_or_else(blank_entry);
+		self.working = found.unwrap_or_default();
 		is_found
 	}
 
 	/// Shows the entry with this name, else the entry `tag` or `tag.N`
 	/// selects. The working entry becomes blank when nothing matches.
 	pub fn query(&mut self, query: &str) -> bool {
-		let found = self.store.query(query);
+		let found = self.database.query(query);
 		self.show(found)
 	}
 
 	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> bool {
-		let found = self.store.next(entry_name(&self.working));
+		let found = self.database.next(self.working.get_name());
 		self.show(found)
 	}
 
 	pub fn previous(&mut self) -> bool {
-		let found = self.store.previous(entry_name(&self.working));
+		let found = self.database.previous(self.working.get_name());
 		self.show(found)
 	}
 
 	pub fn clear(&mut self) {
-		self.working = blank_entry();
+		self.working = PasswordEntry::new();
 	}
 
 	pub fn get_field(&self, id: u8) -> Result<Zeroizing<Vec<u8>>> {
 		if !(field::NAME..=field::MODIFIED_TS).contains(&id) {
 			return Err(Error::Invalid("unknown field"));
 		}
-		Ok(Zeroizing::new(
-			self.working.get(id).unwrap_or_default().to_vec(),
-		))
+		let mut text = self.working.get_field(id);
+		Ok(Zeroizing::new(std::mem::take(&mut *text).into_bytes()))
 	}
 
 	/// Edits the working entry. Nothing reaches the database before `commit`.
@@ -401,27 +200,23 @@ impl Vault {
 		if !(field::NAME..=field::TAGS).contains(&id) {
 			return Err(Error::Invalid("field is not editable"));
 		}
-		if std::str::from_utf8(value).is_err() {
-			return Err(Error::Invalid("text is not UTF-8"));
-		}
-		self.working
-			.set(field::MODIFIED_TS, now().to_string().as_bytes());
-		self.working.set(id, value);
+		let text = std::str::from_utf8(value).map_err(|_| Error::Invalid("text is not UTF-8"))?;
+		self.working.set_field(id, text);
 		Ok(())
 	}
 
 	/// Stores the working entry under its name: an existing entry of that
 	/// name keeps its creation time and takes every other field.
 	pub fn commit(&mut self) -> Commit {
-		let name = entry_name(&self.working).to_owned();
+		let name = self.working.get_name();
 		if name.is_empty() {
 			return Commit::EmptyName;
 		}
-		let (mut entry, outcome) = match self.store.password_by_name(&name) {
+		let (mut entry, outcome) = match self.database.get_password_entry_by_name(name) {
 			Some(entry) => (entry, Commit::Updated),
 			None => {
-				let mut entry = blank_entry();
-				entry.set(field::NAME, name.as_bytes());
+				let mut entry = PasswordEntry::new();
+				entry.set_name(name);
 				(entry, Commit::Created)
 			}
 		};
@@ -433,57 +228,24 @@ impl Vault {
 			field::URL,
 			field::TAGS,
 		] {
-			entry.set(id, self.working.get(id).unwrap_or_default());
+			entry.set_field(id, &self.working.get_field(id));
 		}
-		entry.set(field::MODIFIED_TS, now().to_string().as_bytes());
-		self.store.set_password(&entry);
 		if outcome == Commit::Created {
-			self.working = entry;
+			self.working = entry.clone();
 		}
+		self.database.set_password_entry(entry);
 		outcome
 	}
 
-	/// Encrypts the database into the bytes of a vault file. The Backblaze
-	/// object is the base64 text of the same bytes.
 	pub fn revision(&self) -> u64 {
-		self.store
-			.meta("revision")
-			.and_then(|s| s.parse().ok())
-			.unwrap_or(0)
+		self.database.revision().unwrap_or(0)
 	}
 
 	pub fn save(&mut self) -> Result<Vec<u8>> {
-		let next = self
-			.revision()
-			.checked_add(1)
-			.ok_or(Error::Invalid("revision exhausted"))?;
-		self.store.set_meta("revision", &next.to_string());
-		if self.store.meta("kdf_m").is_none() {
-			for (name, value) in self.cost.meta_pairs() {
-				self.store.set_meta(&name, &value);
-			}
+		if self.revision() == u64::MAX {
+			return Err(Error::Invalid("revision exhausted"));
 		}
-		self.store.remove_meta("format");
-		// Never go backwards: Linux keeps its local copy unless the remote
-		// one is strictly newer, so a slow clock here must not hide a save.
-		let modified_ts = now().max(self.modified_ts().saturating_add(1));
-		self.store.set_meta("modified_ts", &modified_ts.to_string());
-		// Older Linux versions increment this field after loading the vault.
-		// Leave room for that increment when choosing a fresh nonce.
-		let mut random = [0u8; 16];
-		getrandom::fill(&mut random[..15])
-			.map_err(|_| Error::Kdf("no system randomness".into()))?;
-		let counter = u128::from_le_bytes(random).max(1);
-		self.store.set_meta("nonce", &counter.to_string());
-		let database = self.store.serialize();
-		let meta = format::meta_pairs(&database)?;
-		let ciphertext = crypto::encrypt(
-			&crypto::compress(&database),
-			&self.key,
-			&nonce_bytes(counter),
-			&[],
-		);
-		Ok(format::encode_envelope(&meta, &ciphertext))
+		Ok(self.database.encode(false, self.cost))
 	}
 }
 
@@ -491,6 +253,7 @@ impl Vault {
 mod tests {
 	use super::*;
 	use keptino_core::format::{FormatError, decode_shards, encode_shards};
+	use keptino_core::vault::{MetaEntry, Store};
 	const DEBUG_MEM_KIB: u32 = KdfParams::DEBUG.m_cost;
 
 	const PEPPER: [u8; PEPPER_SIZE] = [9; PEPPER_SIZE];
@@ -553,14 +316,14 @@ mod tests {
 		);
 		assert!(!preferred.uploads_paused);
 
-		let mut envelope = Store::deserialize(&decode_shards(&next).unwrap()).unwrap();
-		envelope.set_meta("revision", "3");
+		let mut envelope = Store::<LockedKey>::deserialize(&decode_shards(&next).unwrap()).unwrap();
+		envelope.set_meta_entry(MetaEntry::new("revision", "3"));
 		let damaged = encode_shards(&envelope.serialize());
 		let recovered = load(Some(first), Some(&damaged)).unwrap();
 		assert_eq!(recovered.source(), Source::Local);
 		assert!(recovered.uploads_paused);
 		assert!(load(Some(&damaged), None).is_err());
-		envelope.set_meta("format", "3");
+		envelope.set_meta_entry(MetaEntry::new("format", "3"));
 		assert!(matches!(
 			load(Some(first), Some(&encode_shards(&envelope.serialize()))),
 			Err(Error::Invalid(_))
@@ -588,18 +351,20 @@ mod tests {
 			("note", Some("extra")),
 			("created_ts", None),
 		] {
-			let mut outer = Store::deserialize(&original).unwrap();
+			let mut outer = Store::<LockedKey>::deserialize(&original).unwrap();
 			match value {
-				Some(value) => outer.set_meta(name, value),
-				None => outer.remove_meta(name),
+				Some(value) => outer.set_meta_entry(MetaEntry::new(name, value)),
+				None => {
+					outer.remove_meta_entry(name);
+				}
 			}
 			assert!(matches!(
 				load(&encode_shards(&outer.serialize())),
 				Err(Error::Decryption)
 			));
 		}
-		let mut duplicate = Store::default();
-		duplicate.set_meta("db_name", "vaultdebug");
+		let mut duplicate = Store::<LockedKey>::default();
+		duplicate.set_meta_entry(MetaEntry::new("db_name", "vaultdebug"));
 		let mut repeated = original;
 		repeated.extend_from_slice(&duplicate.serialize());
 		assert!(matches!(
@@ -610,17 +375,12 @@ mod tests {
 
 	#[test]
 	fn honors_nondefault_argon2_costs_and_rejects_partial_or_out_of_range_costs() {
-		let mut vault = open(None, None).unwrap();
-		let salt = Base64::decode_vec(&vault.meta("salt").unwrap())
-			.unwrap()
-			.try_into()
-			.unwrap();
-		vault.cost = KdfParams {
+		let cost = KdfParams {
 			m_cost: DEBUG_MEM_KIB,
 			t_cost: 2,
 			p_cost: 2,
 		};
-		vault.key = derive_master_key(b"master", &PEPPER, &salt, vault.cost).unwrap();
+		let mut vault = Vault::create("test", b"master", &PEPPER, cost).unwrap();
 		let file = vault.save().unwrap();
 		let mut reopened = open(Some(&file), None).unwrap();
 		let saved = reopened.save().unwrap();
@@ -630,15 +390,14 @@ mod tests {
 			(DEBUG_MEM_KIB, 2, 2)
 		);
 
-		let mut header = Store::deserialize(&decode_shards(&file).unwrap()).unwrap();
-		header.set_meta("kdf_t", "65");
+		let mut header = Store::<LockedKey>::deserialize(&decode_shards(&file).unwrap()).unwrap();
+		header.set_meta_entry(MetaEntry::new("kdf_t", "65"));
 		assert!(matches!(
 			Envelope::parse(&encode_shards(&header.serialize()), KdfParams::DEBUG),
 			Err(FormatError::Damaged)
 		));
-		let id = header.metas.remove("kdf_p").unwrap();
-		header.entries.remove(&id);
-		header.set_meta("kdf_t", "2");
+		header.remove_meta_entry("kdf_p");
+		header.set_meta_entry(MetaEntry::new("kdf_t", "2"));
 		assert!(matches!(
 			Envelope::parse(&encode_shards(&header.serialize()), KdfParams::DEBUG),
 			Err(FormatError::Damaged)

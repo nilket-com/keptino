@@ -1,5 +1,5 @@
 use crate::gui::messages::Message;
-use crate::{gui::colors, storage::entry::PasswordEntry};
+use crate::{gui::colors, storage::PasswordEntry};
 use iced::{
 	Alignment, Background, Center, Color, Element, Fill, Font, Padding,
 	advanced::text::highlighter::PlainText,
@@ -291,7 +291,7 @@ pub fn password_screen<'a>(
 			text("> ").color(colors::NAUTILUS_CYAN),
 			text(status).color(colors::TEXT_STATUS),
 			space::horizontal(),
-			text(password_entry.get_timestamps()).color(colors::TEXT_STATUS),
+			text(timestamps(password_entry)).color(colors::TEXT_STATUS),
 			text(" <").color(colors::NAUTILUS_CYAN)
 		]
 		.spacing(1),
@@ -510,4 +510,24 @@ pub fn styled_text_editor<'a>(
 				selection: colors::SELECTION,
 			},
 		})
+}
+
+/// "Modified: … | Created: …" in the local time zone, for the status bar.
+fn timestamps(entry: &PasswordEntry) -> String {
+	let local = |seconds: Option<i64>| {
+		seconds
+			.and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+			.map(|instant| {
+				instant
+					.to_zoned_datetime(jiff::tz::TimeZone::system())
+					.strftime("%Y-%m-%d %H:%M")
+					.to_string()
+			})
+			.unwrap_or_else(|| "unknown".to_string())
+	};
+	format!(
+		"Modified: {} | Created: {} ",
+		local(entry.modified()),
+		local(entry.created())
+	)
 }
