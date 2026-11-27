@@ -4,6 +4,7 @@
 //! The file format, the cryptography, the database model and the selection
 //! rules are `keptino_core`'s; this module supplies the I/O around them.
 
+use crate::storage::keys::{self, RekeyMarker};
 use crate::{
 	logger::{error, info, warn},
 	storage::{Database, MetaEntry, SYSTEMD_CREDS, SecretMemory, remote::Remote},
@@ -111,6 +112,9 @@ pub struct OpenedVault {
 	/// that object, so a copy written elsewhere in the meantime is never
 	/// overwritten, and a refused upload stays refused on retry.
 	synced: Arc<Mutex<Option<blake3::Hash>>>,
+	/// A rekey committed in this session and not yet uploaded. The next save
+	/// writes the marker before it uploads and removes it after.
+	rekey: Arc<Mutex<Option<RekeyMarker>>>,
 }
 
 impl OpenedVault {
@@ -121,6 +125,19 @@ impl OpenedVault {
 		}
 	}
 
+	/// The database was rekeyed: the next save carries the marker naming
+	/// the remote object this session opened as the predecessor.
+	pub fn note_rekey(&self) {
+		let predecessor = *self.synced.lock().unwrap_or_else(|e| e.into_inner());
+		let marker = RekeyMarker {
+			predecessor,
+			salt: self.database.salt().unwrap_or_default(),
+			// The save about to happen writes this revision.
+			revision: self.database.revision().unwrap_or(0) + 1,
+		};
+		*self.rekey.lock().unwrap_or_else(|e| e.into_inner()) = Some(marker);
+	}
+
 	pub fn save(&self) -> impl Future<Output = String> + use<> {
 		let db = &self.database;
 		let db_name = db.meta("db_name").unwrap_or_default();
@@ -129,11 +146,26 @@ impl OpenedVault {
 		let saved = db.revision();
 		let remote = self.remote.clone();
 		let synced = Arc::clone(&self.synced);
+		let rekey = Arc::clone(&self.rekey);
 		async move {
 			let bytes = match encoded {
 				Ok(bytes) => bytes,
 				Err(err) => return format!("Not saved: {err}"),
 			};
+			// The marker goes down before the file: a crash between the two
+			// leaves a marker naming a successor that is not here, which
+			// reconcile_marker drops; the other order could leave a rekeyed
+			// local with no record of what it may replace.
+			let pending = rekey.lock().unwrap_or_else(|e| e.into_inner()).clone();
+			if let Some(marker) = &pending {
+				let marker = RekeyMarker {
+					revision: saved.unwrap_or(marker.revision),
+					..marker.clone()
+				};
+				if marker.write(&db_name).is_err() {
+					return "Local save failed: cannot record the rekey.".into();
+				}
+			}
 			if to_file(&bytes, &db_name).is_err() {
 				return "Local save failed. Check disk space and file permissions.".into();
 			}
@@ -151,6 +183,10 @@ impl OpenedVault {
 							if uploaded.is_ok() {
 								*synced.lock().unwrap_or_else(|e| e.into_inner()) =
 									Some(blake3::hash(&bytes));
+								if pending.is_some() {
+									*rekey.lock().unwrap_or_else(|e| e.into_inner()) = None;
+									RekeyMarker::remove(&db_name);
+								}
 							}
 							uploaded
 						}
@@ -179,27 +215,58 @@ impl OpenedVault {
 			database,
 			remote: Err("Test session".into()),
 			synced: Arc::default(),
+			rekey: Arc::default(),
 		}
 	}
+}
+
+/// What the unlock screen asks for: the master password and, when a slot
+/// needs user verification, the security key's PIN.
+pub struct UnlockInput {
+	pub password: Zeroizing<String>,
+	pub pin: Option<Zeroizing<String>>,
+}
+
+/// Whether the local copy of `db_name` carries key slots, so the unlock
+/// screen can show the PIN field before the user presses Unlock.
+pub fn local_has_slots(db_name: &str) -> bool {
+	read_bounded(&db_path(db_name))
+		.ok()
+		.and_then(|bytes| Envelope::parse(&bytes, KdfParams::BUILD_DEFAULT).ok())
+		.is_some_and(|envelope| !envelope.slots.is_empty())
 }
 
 fn parse_envelope(bytes: &[u8], what: &str) -> Result<Envelope, String> {
 	Envelope::parse(bytes, KdfParams::BUILD_DEFAULT).map_err(|err| format!("{what} vault: {err}"))
 }
 
-pub async fn load(
-	db_name: &str,
-	master_password: Zeroizing<String>,
-) -> Result<OpenedVault, String> {
+/// The message for two copies with different salts, naming the way out.
+pub const DIFFERENT_VAULT_HELP: &str = "The copy in the bucket has a different salt: it was rekeyed on another device, or another vault uses this name. To take the bucket copy and keep this one as a generation, use Adopt bucket copy.";
+
+pub async fn load(db_name: &str, input: UnlockInput) -> Result<OpenedVault, String> {
+	open(db_name, input, false).await
+}
+
+/// Opens the bucket copy alone, after keeping the local file as a
+/// generation: the explicit way across a rekey done elsewhere.
+pub async fn adopt_remote(db_name: &str, input: UnlockInput) -> Result<OpenedVault, String> {
+	open(db_name, input, true).await
+}
+
+async fn open(db_name: &str, input: UnlockInput, adopt: bool) -> Result<OpenedVault, String> {
 	if db_name.contains(['/', '\0']) {
 		return Err("Use a database name without path separators or NUL bytes.".into());
 	}
 	let dir = base_path();
-	let local = match read_bounded(&db_path(db_name)) {
-		Ok(bytes) => Some(parse_envelope(&bytes, "Local")?),
+	let local_bytes = match read_bounded(&db_path(db_name)) {
+		Ok(bytes) => Some(bytes),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
 		Err(_) => return Err("Cannot read local vault.".into()),
 	};
+	let local = local_bytes
+		.as_deref()
+		.map(|bytes| parse_envelope(bytes, "Local"))
+		.transpose()?;
 	let download = async {
 		let (remote, bytes) = Remote::download(&dir, db_name).await?;
 		let fingerprint = bytes.as_deref().map(blake3::hash);
@@ -207,35 +274,72 @@ pub async fn load(
 			.as_deref()
 			.map(|b| parse_envelope(b, "Remote"))
 			.transpose()?;
-		Ok::<_, String>((remote, envelope, fingerprint))
+		Ok::<_, String>((remote, envelope, fingerprint, bytes))
 	}
 	.await;
-	let (mut provider, remote, synced) = match download {
-		Ok((provider, envelope, fingerprint)) => (Ok(provider), envelope, fingerprint),
-		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None, None),
+	let (mut provider, mut remote, synced, remote_bytes) = match download {
+		Ok((provider, envelope, fingerprint, bytes)) => {
+			(Ok(provider), envelope, fingerprint, bytes)
+		}
+		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None, None, None),
 		Err(err) => return Err(err),
+	};
+	// A rekey this device committed and has not uploaded: the remote is the
+	// predecessor it names, so it is withheld and the local copy opens
+	// alone, with uploads enabled to finish the rekey.
+	let pending_rekey = keys::reconcile_marker(db_name, local.as_ref(), synced);
+	if pending_rekey.is_some() {
+		info("Finishing a rekey: the bucket still holds the copy from before it.");
+		remote = None;
+	}
+	// Adopting opens the bucket copy alone; the local file is touched only
+	// after that copy opened and passed the revision floor.
+	let local = if adopt {
+		if local.is_none() || remote.is_none() {
+			return Err("Adopting needs both a local and a bucket copy.".into());
+		}
+		None
+	} else {
+		local
 	};
 	// One derivation serves both copies, which share a salt and, except
 	// across a rekey, a cost; the password is wiped when the closure drops.
-	let password = master_password;
+	let UnlockInput { password, pin } = input;
 	let pepper = load_pepper()?;
-	// Security keys arrive with ADR 0012; until then every copy derives
-	// from the password and pepper alone.
-	let derive = |candidate: &Candidate<'_>| match master_key_derivation(
-		&password,
-		&pepper,
-		candidate.salt,
-		None,
-		candidate.cost,
-	) {
-		Ok(key) => Derived::Key(key),
-		Err(err) => Derived::Failed(err),
+	let cancel = std::sync::atomic::AtomicBool::new(false);
+	let derive = |candidate: &Candidate<'_>| {
+		let roaming = if candidate.slots.is_empty() {
+			None
+		} else {
+			match keys::roaming_from_keys(candidate.slots, pin.clone(), &cancel) {
+				Ok(roaming) => Some(roaming),
+				Err(keptino_fido::ceremony::Failure::Canceled) => return Derived::Canceled,
+				Err(failure) => {
+					warn(&format!("Security key: {failure}"));
+					return Derived::Unavailable;
+				}
+			}
+		};
+		match master_key_derivation(
+			&password,
+			&pepper,
+			candidate.salt,
+			roaming.as_deref(),
+			candidate.cost,
+		) {
+			Ok(key) => Derived::Key(key),
+			Err(err) => Derived::Failed(err),
+		}
 	};
 	let unlocked = unlock(db_name, local, remote, KdfParams::BUILD_DEFAULT, derive).map_err(
 		|err| match err {
 			UnlockError::Open(_) => {
 				"Cannot decrypt vault. Check the master password and pepper.".to_owned()
 			}
+			UnlockError::Unavailable => {
+				"No enrolled security key answered. Plug in a key enrolled for this vault and unlock again.".to_owned()
+			}
+			UnlockError::DifferentVault => DIFFERENT_VAULT_HELP.to_owned(),
 			other => other.to_string(),
 		},
 	)?;
@@ -271,10 +375,22 @@ pub async fn load(
 	// Imported files may have been renamed. Keep subsequent saves at the
 	// validated name the user opened, including for Android exports.
 	database.set_meta_entry(MetaEntry::new("db_name", db_name));
+	if adopt {
+		// The exact bucket bytes become the local file, rotating the copy
+		// from before into a generation once; nothing is re-encoded.
+		match &remote_bytes {
+			Some(bytes) if to_file(bytes, db_name).is_ok() => {}
+			_ => {
+				warn("The adopted copy could not be written locally; it will be on the next save.")
+			}
+		}
+		RekeyMarker::remove(db_name);
+	}
 	Ok(OpenedVault {
 		database,
 		remote: provider,
 		synced: Arc::new(Mutex::new(synced)),
+		rekey: Arc::new(Mutex::new(pending_rekey)),
 	})
 }
 
@@ -308,6 +424,25 @@ fn load_pepper() -> Result<Zeroizing<[u8; PEPPER_SIZE]>, String> {
 	let text = std::str::from_utf8(&pepper_hex).map_err(|_| "Invalid pepper credential.")?;
 	hex::decode_to_slice(text.trim(), &mut *pepper).map_err(|_| "Invalid pepper credential.")?;
 	Ok(pepper)
+}
+
+/// The cost a database was derived with, from its meta entries, or the
+/// build default for a vault that records none.
+pub fn vault_cost(db: &Database) -> KdfParams {
+	let meta: std::collections::HashMap<String, String> = db.meta_pairs().into_iter().collect();
+	KdfParams::from_meta(&meta, KdfParams::BUILD_DEFAULT).unwrap_or(KdfParams::BUILD_DEFAULT)
+}
+
+/// A master key for `salt` under the vault's cost and this machine's
+/// pepper, with or without a roaming secret: what a rekey derives.
+pub fn derive_master(
+	db: &Database,
+	password: &str,
+	salt: &[u8; SALT_SIZE],
+	roaming: Option<&[u8; crypto::ROAMING_SIZE]>,
+) -> Result<SecretMemory, String> {
+	let pepper = load_pepper()?;
+	master_key_derivation(password, &pepper, salt, roaming, vault_cost(db))
 }
 
 /// Derives the master key and moves it into secret memory.

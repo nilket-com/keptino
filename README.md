@@ -55,6 +55,19 @@ for the pepper seed and credentials for your selected storage provider. The
 pepper is derived by the installed binary itself, `keptino --derive-pepper`,
 in locked memory; no external `argon2` tool is involved.
 
+### Security keys on Linux
+
+A FIDO2 security key with the `hmac-secret` extension, such as a YubiKey 5,
+can protect a vault as a second factor beside the master password and the
+pepper. Open the vault, press Keys, and choose Protect with a security key:
+the vault is rekeyed so that every device then needs an enrolled key to open
+it. Up to four keys can be enrolled; keep a backup key enrolled, because a
+vault whose every key is lost while locked cannot be opened. Removing a key
+rekeys again and asks for a touch of each remaining key. Keys speak CTAPHID
+over USB through `/dev/hidrawN`; systemd's udev rules grant the logged-in
+user access, and setup warns when they are missing. Android support for
+protected vaults arrives with ADR 0013.
+
 Package installation grants `/usr/bin/keptino` the `CAP_IPC_LOCK` capability
 so it can lock its memory, including the 4 GiB password derivation, without
 being constrained by the desktop session's memlock limit. This is reapplied

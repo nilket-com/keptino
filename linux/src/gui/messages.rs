@@ -1,3 +1,4 @@
+use crate::storage::keys::KeysOutcome;
 use crate::storage::persistence::OpenedVault;
 use iced::widget::text_editor;
 use zeroize::Zeroizing;
@@ -5,12 +6,14 @@ use zeroize::Zeroizing;
 #[derive(Clone)]
 pub enum Message {
 	AttemptUnlock,
+	AdoptRemote,
 	CloseWindow,
 	CopyUsername,
 	CopyPassword,
 	CopyPin,
 	DbNameChanged(String),
 	DbPasswordChanged(Zeroizing<String>),
+	DbPinChanged(Zeroizing<String>),
 	DragWindow,
 	FocusNext,
 	FocusPrevious,
@@ -19,6 +22,7 @@ pub enum Message {
 	GeneratorCountInput(String),
 	GeneratorKindToggled,
 	HideHealth,
+	HideKeys,
 	Lock,
 	NavigateNext,
 	NavigatePrevious,
@@ -38,6 +42,16 @@ pub enum Message {
 	Save,
 	ShowHealth,
 	SaveResult(String),
+	ShowKeys,
+	KeysPasswordInput(Zeroizing<String>),
+	KeysPinInput(Zeroizing<String>),
+	KeysToggleTouchOnly,
+	ProtectVault,
+	AddKey,
+	RemoveKey(usize),
+	ConfirmRemoveKey,
+	CancelRemoveKey,
+	KeysResult(Result<KeysOutcome, String>),
 	Tick,
 	TogglePasswordVisibility,
 	TogglePinVisibility,

@@ -20,8 +20,45 @@ use zeroize::Zeroizing;
 struct LockedState {
 	db_name: String,
 	db_password: Zeroizing<String>,
+	/// The security key's PIN, asked for when the local copy has slots.
+	db_pin: Zeroizing<String>,
+	has_slots: bool,
+	/// The last unlock saw two salts; the adopt action is on screen.
+	offer_adopt: bool,
 	is_processing: bool,
 	status: String,
+}
+
+/// The keys screen: the vault's slots and the inputs its ceremonies need.
+pub struct KeysScreen {
+	pub slots: Vec<keptino_core::roaming::KeySlot>,
+	/// The master password, needed to derive the new key for a rekey.
+	pub password: Zeroizing<String>,
+	pub pin: Zeroizing<String>,
+	pub touch_only: bool,
+	/// Remove was pressed on this slot; the next press rekeys without it.
+	pub confirm_remove: Option<usize>,
+	/// Slots the user chose to drop after their key did not answer.
+	pub dropped: Vec<usize>,
+	pub busy: bool,
+}
+
+impl KeysScreen {
+	fn new(db: &crate::storage::Database) -> Self {
+		Self {
+			slots: crate::storage::keys::slots_of(db),
+			password: Zeroizing::new(String::new()),
+			pin: Zeroizing::new(String::new()),
+			touch_only: false,
+			confirm_remove: None,
+			dropped: Vec::new(),
+			busy: false,
+		}
+	}
+
+	fn pin(&self) -> Option<Zeroizing<String>> {
+		(!self.pin.is_empty()).then(|| self.pin.clone())
+	}
 }
 
 /// What the die makes: characters from the chosen classes, or EFF words.
@@ -72,6 +109,8 @@ struct UnlockedState {
 	confirm_delete: bool,
 	/// The health report on screen in place of the editor, if any.
 	health: Option<Box<health::Report>>,
+	/// The keys screen in place of the editor, if any.
+	keys: Option<Box<KeysScreen>>,
 }
 
 enum AppState {
@@ -113,6 +152,9 @@ fn new() -> AppState {
 	AppState::Locked(LockedState {
 		db_name: "".into(),
 		db_password: Zeroizing::new(String::new()),
+		db_pin: Zeroizing::new(String::new()),
+		has_slots: false,
+		offer_adopt: false,
 		is_processing: false,
 		status: String::new(),
 	})
@@ -176,9 +218,22 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 		AppState::Locked(LockedState {
 			db_name,
 			db_password,
+			db_pin,
+			has_slots,
+			offer_adopt,
 			is_processing,
 			status,
-		}) => components::unlock_screen(db_name, db_password, is_processing, status),
+		}) => components::unlock_screen(
+			db_name,
+			db_password,
+			db_pin,
+			components::UnlockExtras {
+				has_slots: *has_slots,
+				offer_adopt: *offer_adopt,
+			},
+			is_processing,
+			status,
+		),
 		AppState::Unlocked(UnlockedState {
 			query,
 			password_entry,
@@ -191,10 +246,12 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			note,
 			status,
 			health,
+			keys,
 			..
-		}) => match health {
-			Some(report) => components::health_screen(report, status),
-			None => components::password_screen(
+		}) => match (health, keys) {
+			(Some(report), _) => components::health_screen(report, status),
+			(None, Some(keys)) => components::keys_screen(keys, status),
+			(None, None) => components::password_screen(
 				query,
 				password_entry,
 				generator,
@@ -214,6 +271,9 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 	let AppState::Locked(LockedState {
 		db_name,
 		db_password,
+		db_pin,
+		has_slots,
+		offer_adopt,
 		is_processing,
 		status,
 	}) = app_state
@@ -221,21 +281,38 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 		unreachable!("update_locked called with non-Locked state")
 	};
 	match message {
-		Message::AttemptUnlock => {
+		Message::AttemptUnlock | Message::AdoptRemote => {
 			if *is_processing {
 				return Task::none();
 			}
 			*is_processing = true;
-			status.clear();
+			*status = if *has_slots {
+				"Touch your security key when it blinks.".to_string()
+			} else {
+				String::new()
+			};
+			let adopt = matches!(message, Message::AdoptRemote);
+			*offer_adopt = false;
 			let db_name_clone = db_name.clone();
-			let unlock_password = std::mem::replace(db_password, Zeroizing::new(String::new()));
+			let input = persistence::UnlockInput {
+				password: std::mem::replace(db_password, Zeroizing::new(String::new())),
+				pin: (!db_pin.is_empty())
+					.then(|| std::mem::replace(db_pin, Zeroizing::new(String::new()))),
+			};
 			return Task::perform(
-				async move { persistence::load(&db_name_clone, unlock_password).await },
+				async move {
+					if adopt {
+						persistence::adopt_remote(&db_name_clone, input).await
+					} else {
+						persistence::load(&db_name_clone, input).await
+					}
+				},
 				Message::UnlockResult,
 			);
 		}
 		Message::UnlockResult(Err(err)) => {
 			*is_processing = false;
+			*offer_adopt = err == persistence::DIFFERENT_VAULT_HELP;
 			*status = err;
 		}
 		Message::UnlockResult(Ok(vault)) => {
@@ -254,10 +331,15 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				saving: false,
 				confirm_delete: false,
 				health: None,
+				keys: None,
 			});
 		}
 		Message::DbNameChanged(new_db_name) => {
+			*has_slots = persistence::local_has_slots(&new_db_name);
 			*db_name = new_db_name;
+		}
+		Message::DbPinChanged(new_pin) => {
+			*db_pin = new_pin;
 		}
 		Message::DbPasswordChanged(new_password) => {
 			*db_password = new_password;
@@ -279,6 +361,15 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 	Task::none()
 }
 
+/// The key number in a "Key N did not answer" message from a removal.
+fn missing_key_number(err: &str) -> Option<usize> {
+	err.strip_prefix("Key ")?
+		.split_whitespace()
+		.next()?
+		.parse()
+		.ok()
+}
+
 fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> {
 	let AppState::Unlocked(UnlockedState {
 		query,
@@ -295,6 +386,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 		saving,
 		confirm_delete,
 		health,
+		keys,
 	}) = app_state
 	else {
 		unreachable!("update_unlocked called with locked state")
@@ -512,6 +604,141 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			*health = None;
 			*status = String::new();
 		}
+		Message::ShowKeys => {
+			*keys = Some(Box::new(KeysScreen::new(db)));
+			*status = String::new();
+		}
+		Message::HideKeys => {
+			if keys.as_ref().is_some_and(|k| k.busy) {
+				return Task::none();
+			}
+			*keys = None;
+			*status = String::new();
+		}
+		Message::KeysPasswordInput(text) => {
+			if let Some(keys) = keys {
+				keys.password = text;
+			}
+		}
+		Message::KeysPinInput(text) => {
+			if let Some(keys) = keys {
+				keys.pin = text;
+			}
+		}
+		Message::KeysToggleTouchOnly => {
+			if let Some(keys) = keys {
+				keys.touch_only = !keys.touch_only;
+			}
+		}
+		Message::RemoveKey(index) => {
+			if let Some(keys) = keys {
+				keys.confirm_remove = Some(index);
+				keys.dropped.clear();
+				*status = format!(
+					"Removing key {} rekeys the vault: touch every other key when it blinks, then Save.",
+					index + 1
+				);
+			}
+		}
+		Message::CancelRemoveKey => {
+			if let Some(keys) = keys {
+				keys.confirm_remove = None;
+				keys.dropped.clear();
+				*status = String::new();
+			}
+		}
+		Message::ProtectVault | Message::AddKey | Message::ConfirmRemoveKey => {
+			let Some(screen) = keys else {
+				return Task::none();
+			};
+			if screen.busy {
+				return Task::none();
+			}
+			let needs_password = !matches!(message, Message::AddKey);
+			if needs_password && screen.password.is_empty() {
+				*status = "Enter the master password to rekey.".to_string();
+				return Task::none();
+			}
+			screen.busy = true;
+			*status = "Touch your security key when it blinks.".to_string();
+			let database = db.clone();
+			let slots = screen.slots.clone();
+			let password = screen.password.clone();
+			let derive = move |salt: &[u8; 32], roaming: Option<&[u8; 32]>| {
+				persistence::derive_master(&database, &password, salt, roaming)
+			};
+			let pin = screen.pin();
+			let touch_only = screen.touch_only;
+			let remove = screen.confirm_remove;
+			let dropped = screen.dropped.clone();
+			let action = match message {
+				Message::ProtectVault => 0u8,
+				Message::AddKey => 1,
+				_ => 2,
+			};
+			// Blocking work on the executor thread, as the unlock's key
+			// derivation already is; the GUI thread is not this one.
+			return Task::perform(
+				async move {
+					match action {
+						0 => crate::storage::keys::protect(&derive, pin, touch_only),
+						1 => crate::storage::keys::add_key(&slots, pin, touch_only),
+						_ => match remove {
+							Some(index) => crate::storage::keys::remove_key(
+								&derive, &slots, index, &dropped, pin,
+							),
+							None => Err("No key selected.".into()),
+						},
+					}
+				},
+				Message::KeysResult,
+			);
+		}
+		Message::KeysResult(result) => {
+			let Some(screen) = keys else {
+				return Task::none();
+			};
+			screen.busy = false;
+			match result {
+				Ok(crate::storage::keys::KeysOutcome::Added(slot)) => {
+					let mut slots = screen.slots.clone();
+					slots.push(slot);
+					crate::storage::keys::set_slots(db, &slots);
+					screen.slots = slots;
+					screen.password = Zeroizing::new(String::new());
+					*status = "Key added. Save to keep it.".to_string();
+				}
+				Ok(crate::storage::keys::KeysOutcome::Rekeyed { key, salt, slots }) => {
+					let key = std::sync::Arc::try_unwrap(key)
+						.unwrap_or_else(|_| unreachable!("the ceremony owns its key"));
+					db.rekey(key, &salt);
+					crate::storage::keys::set_slots(db, &slots);
+					vault.note_rekey();
+					screen.slots = slots;
+					screen.confirm_remove = None;
+					screen.dropped.clear();
+					screen.password = Zeroizing::new(String::new());
+					*status = if screen.slots.is_empty() {
+						"Protection removed and the vault rekeyed. Save to keep it.".to_string()
+					} else {
+						"Vault rekeyed. Save to keep it; other devices then adopt the bucket copy."
+							.to_string()
+					};
+				}
+				Err(err) => {
+					// A key that did not answer during a removal may be dropped
+					// by confirming again; the message names it.
+					if let (Some(_), Some(number)) =
+						(screen.confirm_remove, missing_key_number(&err))
+					{
+						screen.dropped.push(number - 1);
+						*status = format!("{err} Press Remove again to drop key {number} as well.");
+					} else {
+						*status = err;
+					}
+				}
+			}
+		}
 		Message::Save => {
 			if *saving {
 				return Task::none();
@@ -589,11 +816,18 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 		}
 		Message::Lock => {
+			if keys.as_ref().is_some_and(|k| k.busy) {
+				*status = "A key ceremony is running; wait for it to finish.".to_string();
+				return Task::none();
+			}
 			clipboard::clear_pending();
 			db.zeroize();
 			*app_state = AppState::Locked(LockedState {
 				db_name: "".into(),
 				db_password: Zeroizing::new(String::new()),
+				db_pin: Zeroizing::new(String::new()),
+				has_slots: false,
+				offer_adopt: false,
 				is_processing: false,
 				status: String::new(),
 			});
@@ -769,6 +1003,146 @@ mod tests {
 		assert!(state.health.is_none());
 		assert!(state.status.is_empty());
 		let _ = view(&app);
+	}
+
+	#[test]
+	fn the_unlock_screen_asks_for_a_pin_and_offers_to_adopt() {
+		let mut app = new();
+		let _ = update(&mut app, Message::DbNameChanged("no-such-vault".into()));
+		let AppState::Locked(state) = &app else {
+			panic!()
+		};
+		assert!(!state.has_slots && !state.offer_adopt);
+		let _ = update(
+			&mut app,
+			Message::DbPinChanged(Zeroizing::new("1234".into())),
+		);
+		let _ = update(
+			&mut app,
+			Message::UnlockResult(Err(persistence::DIFFERENT_VAULT_HELP.to_string())),
+		);
+		let AppState::Locked(state) = &app else {
+			panic!()
+		};
+		assert!(state.offer_adopt);
+		assert_eq!(state.status, persistence::DIFFERENT_VAULT_HELP);
+		assert_eq!(state.db_pin.as_str(), "1234");
+		let _ = view(&app);
+		let _ = update(&mut app, Message::UnlockResult(Err("other".into())));
+		let AppState::Locked(state) = &app else {
+			panic!()
+		};
+		assert!(!state.offer_adopt);
+	}
+
+	#[test]
+	fn the_keys_screen_applies_a_rekey_and_leaves_the_vault_alone_on_failure() {
+		use crate::storage::keys::{KeysOutcome, slots_of};
+		use keptino_core::roaming::{KeySlot, UvMode};
+		let mut app = unlocked();
+		let _ = update(&mut app, Message::ShowKeys);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.keys.as_deref().expect("keys screen").slots.is_empty());
+		let before_salt = state.vault.database.salt();
+		let _ = view(&app);
+
+		// Protect without a password is refused before any ceremony.
+		let _ = update(&mut app, Message::ProtectVault);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.status.starts_with("Enter the master password"));
+		assert!(!state.keys.as_deref().unwrap().busy);
+
+		// A ceremony that failed changes nothing.
+		let _ = update(
+			&mut app,
+			Message::KeysPasswordInput(Zeroizing::new("pw".into())),
+		);
+		let _ = update(&mut app, Message::ProtectVault);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.keys.as_deref().unwrap().busy);
+		let _ = update(&mut app, Message::KeysResult(Err("Canceled.".into())));
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.status, "Canceled.");
+		assert_eq!(state.vault.database.salt(), before_salt);
+		assert!(slots_of(&state.vault.database).is_empty());
+
+		// A rekey outcome is applied: new salt, slots in the meta set.
+		let new_salt = [9u8; 32];
+		let slot = KeySlot::wrap(UvMode::TouchOnly, b"cred", [1; 32], &[2; 32], &[3; 32]).unwrap();
+		use keptino_core::vault::KeyStore;
+		let key = crate::storage::SecretMemory::from_bytes(&[7; 32]).unwrap();
+		let _ = update(&mut app, Message::ProtectVault);
+		let _ = update(
+			&mut app,
+			Message::KeysResult(Ok(KeysOutcome::Rekeyed {
+				key: std::sync::Arc::new(key),
+				salt: new_salt,
+				slots: vec![slot.clone()],
+			})),
+		);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.vault.database.salt(), Some(new_salt));
+		assert_eq!(slots_of(&state.vault.database), vec![slot.clone()]);
+		assert_eq!(state.keys.as_deref().unwrap().slots.len(), 1);
+		assert!(state.status.starts_with("Vault rekeyed."));
+		let _ = view(&app);
+
+		// Adding a key does not rekey.
+		let second =
+			KeySlot::wrap(UvMode::Verified, b"cred2", [4; 32], &[5; 32], &[3; 32]).unwrap();
+		let _ = update(&mut app, Message::AddKey);
+		let _ = update(
+			&mut app,
+			Message::KeysResult(Ok(KeysOutcome::Added(second.clone()))),
+		);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.vault.database.salt(), Some(new_salt));
+		assert_eq!(slots_of(&state.vault.database), vec![slot, second]);
+
+		// Remove asks for confirmation; a missing key is named and can be dropped.
+		let _ = update(&mut app, Message::RemoveKey(0));
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.keys.as_deref().unwrap().confirm_remove, Some(0));
+		let _ = update(
+			&mut app,
+			Message::KeysPasswordInput(Zeroizing::new("pw".into())),
+		);
+		let _ = update(&mut app, Message::ConfirmRemoveKey);
+		let _ = update(
+			&mut app,
+			Message::KeysResult(Err(
+				"Key 2 did not answer (x). Plug it in and try again, or remove it too.".into(),
+			)),
+		);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert_eq!(state.keys.as_deref().unwrap().dropped, vec![1]);
+		assert!(state.status.contains("drop key 2 as well"));
+		let _ = update(&mut app, Message::CancelRemoveKey);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.keys.as_deref().unwrap().dropped.is_empty());
+		let _ = update(&mut app, Message::HideKeys);
+		let AppState::Unlocked(state) = &app else {
+			panic!()
+		};
+		assert!(state.keys.is_none());
 	}
 
 	#[test]

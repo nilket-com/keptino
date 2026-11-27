@@ -1,4 +1,7 @@
-use crate::gui::{messages::Message, state::GeneratorChoice};
+use crate::gui::{
+	messages::Message,
+	state::{GeneratorChoice, KeysScreen},
+};
 use crate::{gui::colors, storage::PasswordEntry};
 use iced::{
 	Alignment, Background, Center, Color, Element, Fill, Font, Padding,
@@ -10,6 +13,7 @@ use iced::{
 		scrollable, space, svg, text, text_editor, text_input, tooltip,
 	},
 };
+use keptino_core::roaming::UvMode;
 use keptino_core::{generator, health};
 use zeroize::Zeroizing;
 
@@ -95,39 +99,68 @@ pub fn title_bar<'a>() -> Element<'a, Message> {
 	.into()
 }
 
+/// What the unlock screen shows besides the name and password.
+#[derive(Clone, Copy)]
+pub struct UnlockExtras {
+	/// The local copy carries key slots: ask for the key's PIN too.
+	pub has_slots: bool,
+	/// The bucket copy has another salt: offer to adopt it.
+	pub offer_adopt: bool,
+}
+
 pub fn unlock_screen<'a>(
 	db_name: &str,
 	db_password: &str,
+	db_pin: &str,
+	extras: UnlockExtras,
 	is_processing: &bool,
 	status: &'a str,
 ) -> Element<'a, Message> {
-	let unlock_panel = container(center(
-		column![
-			center(text("Unlock Database").color(colors::BRAND_GREEN).size(18)).height(30),
-			styled_text_input("db_name...", db_name)
-				.on_input(Message::DbNameChanged)
-				.on_submit(Message::FocusNext),
-			styled_text_input("db_password...", db_password)
+	let mut fields = column![
+		center(text("Unlock Database").color(colors::BRAND_GREEN).size(18)).height(30),
+		styled_text_input("db_name...", db_name)
+			.on_input(Message::DbNameChanged)
+			.on_submit(Message::FocusNext),
+		styled_text_input("db_password...", db_password)
+			.secure(true)
+			.on_input(|value| Message::DbPasswordChanged(Zeroizing::new(value)))
+			.on_submit(if extras.has_slots {
+				Message::FocusNext
+			} else {
+				Message::AttemptUnlock
+			}),
+	]
+	.spacing(20)
+	.width(600);
+	if extras.has_slots {
+		fields = fields.push(
+			styled_text_input("security key PIN (if the key has one)...", db_pin)
 				.secure(true)
-				.on_input(|value| Message::DbPasswordChanged(Zeroizing::new(value)))
+				.on_input(|value| Message::DbPinChanged(Zeroizing::new(value)))
 				.on_submit(Message::AttemptUnlock),
-			center(styled_button(
-				if *is_processing {
-					"Unlocking"
-				} else {
-					"Unlock"
-				},
-				Message::AttemptUnlock,
-				DEFAULT_BUTTON_SIZE,
-			))
-			.height(40),
-			center(text(status).color(colors::TEXT_STATUS)).height(100),
-		]
-		.spacing(20)
-		.width(600),
-	))
-	.width(Fill)
-	.height(Fill);
+		);
+	}
+	let mut buttons = row![styled_button(
+		if *is_processing {
+			"Unlocking"
+		} else {
+			"Unlock"
+		},
+		Message::AttemptUnlock,
+		DEFAULT_BUTTON_SIZE,
+	)]
+	.spacing(20);
+	if extras.offer_adopt {
+		buttons = buttons.push(styled_button(
+			"Adopt bucket copy",
+			Message::AdoptRemote,
+			(220, 40),
+		));
+	}
+	fields = fields
+		.push(center(buttons).height(40))
+		.push(center(text(status).color(colors::TEXT_STATUS)).height(100));
+	let unlock_panel = container(center(fields)).width(Fill).height(Fill);
 
 	column![title_bar(), unlock_panel].into()
 }
@@ -295,6 +328,8 @@ pub fn password_screen<'a>(
 		space::horizontal().width(20),
 		styled_button("Health", Message::ShowHealth, DEFAULT_BUTTON_SIZE),
 		space::horizontal().width(20),
+		styled_button("Keys", Message::ShowKeys, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
 		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
 		space::horizontal(),
 	]
@@ -315,6 +350,122 @@ pub fn password_screen<'a>(
 	.width(Fill);
 
 	column![title_bar(), header, main_content, button_bar, status_bar].into()
+}
+
+/// The keys screen in place of the editor: the enrolled security keys,
+/// the actions on them, and the way back.
+pub fn keys_screen<'a>(keys: &'a KeysScreen, status: &'a str) -> Element<'a, Message> {
+	let mut body = column![].spacing(8);
+	if keys.slots.is_empty() {
+		body = body.push(
+			text("This vault is protected by its master password and this machine's pepper alone.")
+				.size(16)
+				.color(colors::TEXT_STATUS),
+		);
+		body = body.push(
+			text("Protecting it with a security key rekeys the vault: every device then needs the password, the pepper and an enrolled key. If every enrolled key is lost while the vault is locked, the vault cannot be opened.")
+				.size(14)
+				.color(colors::TEXT_STATUS),
+		);
+	} else {
+		body = body.push(
+			text(
+				"Security keys enrolled for this vault. Android opens a protected vault only after ADR 0013.",
+			)
+			.size(14)
+			.color(colors::TEXT_STATUS),
+		);
+	}
+	for (index, slot) in keys.slots.iter().enumerate() {
+		let mode = match slot.uv_mode {
+			UvMode::Verified => "PIN or fingerprint",
+			UvMode::TouchOnly => "touch only",
+		};
+		let id: String = slot
+			.cred_id
+			.iter()
+			.take(4)
+			.map(|b| format!("{b:02x}"))
+			.collect();
+		let line = format!("Key {}: {mode}, credential {id}…", index + 1);
+		let remove = if keys.confirm_remove == Some(index) {
+			row![
+				styled_button("Remove, rekeying", Message::ConfirmRemoveKey, (200, 32)),
+				styled_button("Keep", Message::CancelRemoveKey, (100, 32)),
+			]
+			.spacing(8)
+		} else {
+			row![styled_button(
+				"Remove",
+				Message::RemoveKey(index),
+				(120, 32)
+			)]
+		};
+		body = body.push(
+			row![
+				text(line).size(16).color(colors::TEXT_STATUS),
+				space::horizontal(),
+				remove
+			]
+			.align_y(Center)
+			.spacing(12),
+		);
+	}
+	let needs_password = keys.slots.is_empty() || keys.confirm_remove.is_some();
+	if needs_password {
+		body = body.push(
+			styled_text_input("master password, to rekey...", &keys.password)
+				.secure(true)
+				.on_input(|value| Message::KeysPasswordInput(Zeroizing::new(value))),
+		);
+	}
+	body = body.push(
+		styled_text_input("security key PIN (if the key has one)...", &keys.pin)
+			.secure(true)
+			.on_input(|value| Message::KeysPinInput(Zeroizing::new(value))),
+	);
+	body = body.push(
+		checkbox(keys.touch_only)
+			.label("Enroll touch-only (no PIN asked at unlock)")
+			.text_size(14)
+			.on_toggle(|_| Message::KeysToggleTouchOnly),
+	);
+	let action = if keys.slots.is_empty() {
+		styled_button(
+			"Protect with a security key",
+			Message::ProtectVault,
+			(300, 40),
+		)
+	} else {
+		styled_button("Add a key", Message::AddKey, (160, 40))
+	};
+	let button_bar = row![
+		space::horizontal(),
+		action,
+		space::horizontal().width(20),
+		styled_button("Back", Message::HideKeys, DEFAULT_BUTTON_SIZE),
+		space::horizontal().width(20),
+		styled_button("Lock", Message::Lock, DEFAULT_BUTTON_SIZE),
+		space::horizontal(),
+	]
+	.padding(16)
+	.align_y(Center);
+	let status_bar = container(center(
+		row![
+			text("> ").color(colors::NAUTILUS_CYAN),
+			text(status).color(colors::TEXT_STATUS),
+			text(" <").color(colors::NAUTILUS_CYAN)
+		]
+		.spacing(1),
+	))
+	.height(30)
+	.padding(1)
+	.width(Fill);
+	let body = container(scrollable(body).height(Fill))
+		.padding(12)
+		.width(Fill)
+		.height(Fill);
+	column![title_bar(), body, button_bar, status_bar].into()
 }
 
 /// The health report in place of the editor: four lists, names and figures

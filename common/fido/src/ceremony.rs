@@ -194,6 +194,12 @@ pub struct Ceremony {
 	client_point: Option<Point>,
 	shared: Option<SharedSecret>,
 	pin_token: Option<Zeroizing<Vec<u8>>>,
+	/// The PIN hash, kept while a ceremony may need a second token: a key
+	/// clears a token's permissions once a command has used it.
+	pin_hash: Option<Zeroizing<[u8; 16]>>,
+	/// The assertion that wraps the secret, waiting for a fresh token after
+	/// the credential was made.
+	pending_wrap: Option<(Vec<u8>, [u8; SLOT_SALT_SIZE], UvMode)>,
 	/// The credential made by `MakeCredential`, for the enroll assertion.
 	new_credential: Option<Vec<u8>>,
 	/// Inbound reassembly for the message in flight.
@@ -242,6 +248,8 @@ impl Ceremony {
 			client_point: None,
 			shared: None,
 			pin_token: None,
+			pin_hash: None,
+			pending_wrap: None,
 			new_credential: None,
 			hid_in: None,
 			nfc_in: None,
@@ -260,6 +268,7 @@ impl Ceremony {
 		self.nfc_out.clear();
 		// Session secrets go now, not when the ceremony is dropped.
 		self.pin_token = None;
+		self.pin_hash = None;
 		self.shared = None;
 		self.agreement = None;
 		match self.transport {
@@ -299,6 +308,7 @@ impl Ceremony {
 		self.nfc_in = None;
 		self.nfc_out.clear();
 		self.pin_token = None;
+		self.pin_hash = None;
 		self.shared = None;
 		Step::Failed(failure)
 	}
@@ -306,6 +316,7 @@ impl Ceremony {
 	fn finish(&mut self, outcome: Outcome) -> Step {
 		self.phase = Phase::Finished;
 		self.pin_token = None;
+		self.pin_hash = None;
 		self.shared = None;
 		Step::Done(outcome)
 	}
@@ -503,17 +514,34 @@ impl Ceremony {
 		else {
 			return self.fail(Failure::Ctap(ctap::Error::Shape("a key agreement")));
 		};
-		let hash = pin::pin_hash(pin.as_bytes());
-		let enc = match shared.encrypt(&*hash, random_iv()) {
+		let _ = (shared, protocol, client, info);
+		self.pin_hash = Some(pin::pin_hash(pin.as_bytes()));
+		let permission = match self.goal {
+			Goal::Enroll { .. } => ctap::PERMISSION_MAKE_CREDENTIAL,
+			Goal::Assert { .. } => ctap::PERMISSION_GET_ASSERTION,
+		};
+		self.request_token(permission)
+	}
+
+	/// Asks the key for a PIN/UV auth token with `permission`, from the PIN
+	/// hash kept since the prompt. A CTAP 2.1 key scopes the token to that
+	/// permission and clears it after one use, so each command that needs
+	/// one asks again.
+	fn request_token(&mut self, permission: u64) -> Step {
+		let (Some(shared), Some(protocol), Some(client), Some(info), Some(hash)) = (
+			&self.shared,
+			self.protocol,
+			self.client_point,
+			&self.info,
+			&self.pin_hash,
+		) else {
+			return self.fail(Failure::Ctap(ctap::Error::Shape("a key agreement")));
+		};
+		let enc = match shared.encrypt(&**hash, random_iv()) {
 			Ok(enc) => enc,
 			Err(err) => return self.fail(err.into()),
 		};
-		let permissions = info.pin_uv_auth_token.then_some(match self.goal {
-			Goal::Enroll { .. } => {
-				ctap::PERMISSION_MAKE_CREDENTIAL | ctap::PERMISSION_GET_ASSERTION
-			}
-			Goal::Assert { .. } => ctap::PERMISSION_GET_ASSERTION,
-		});
+		let permissions = info.pin_uv_auth_token.then_some(permission);
 		let message = ctap::get_pin_token(protocol, &client, &enc, permissions);
 		self.phase = Phase::PinToken;
 		self.send(message)
@@ -531,7 +559,10 @@ impl Ceremony {
 			Err(err) => return self.fail(err),
 		};
 		self.pin_token = Some(token);
-		self.proceed()
+		match self.pending_wrap.take() {
+			Some((cred_id, salt, uv_mode)) => self.send_assertion(0, cred_id, salt, uv_mode),
+			None => self.proceed(),
+		}
 	}
 
 	/// With the key agreement and any token in hand: make the credential, or
@@ -587,6 +618,12 @@ impl Ceremony {
 		self.new_credential = Some(cred_id.clone());
 		let mut salt = [0u8; SLOT_SALT_SIZE];
 		getrandom::fill(&mut salt).expect("Random generation failed");
+		// The token that made the credential is spent; the assertion that
+		// wraps the secret under PIN verification needs a fresh one.
+		if uv_mode == UvMode::Verified && self.verification == Verification::PinToken {
+			self.pending_wrap = Some((cred_id, salt, uv_mode));
+			return self.request_token(ctap::PERMISSION_GET_ASSERTION);
+		}
 		self.send_assertion(0, cred_id, salt, uv_mode)
 	}
 

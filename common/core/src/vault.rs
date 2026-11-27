@@ -689,7 +689,8 @@ impl<K: KeyStore> Drop for Store<K> {
 /// user interface and the save path.
 pub struct Database<K: KeyStore> {
 	store: Arc<RwLock<Store<K>>>,
-	master_key: Arc<K>,
+	/// Replaced only by `rekey`; read for every save.
+	master_key: Arc<RwLock<K>>,
 }
 
 impl<K: KeyStore> Clone for Database<K> {
@@ -729,8 +730,30 @@ impl<K: KeyStore> Database<K> {
 	pub fn with_store(master_key: K, store: Store<K>) -> Self {
 		Self {
 			store: Arc::new(RwLock::new(store)),
-			master_key: Arc::new(master_key),
+			master_key: Arc::new(RwLock::new(master_key)),
 		}
+	}
+
+	/// The salt the master key was derived with, from the meta entry.
+	pub fn salt(&self) -> Option<[u8; crypto::SALT_SIZE]> {
+		use base64ct::{Base64, Encoding};
+		Base64::decode_vec(&self.meta("salt")?)
+			.ok()?
+			.try_into()
+			.ok()
+	}
+
+	/// Puts the database under a new master key derived with `salt`: the old
+	/// key is wiped, the salt meta entry is replaced, and the next save
+	/// writes a file only the new key opens. The records are untouched;
+	/// they are sealed under their own keys.
+	pub fn rekey(&self, master_key: K, salt: &[u8; crypto::SALT_SIZE]) {
+		use base64ct::{Base64, Encoding};
+		let mut slot = self.master_key.write().unwrap_or_else(|e| e.into_inner());
+		slot.zeroize();
+		*slot = master_key;
+		drop(slot);
+		self.set_meta_entry(MetaEntry::new("salt", &Base64::encode_string(salt)));
 	}
 
 	/// Decrypts `envelope` under `key` and parses the database. On failure
@@ -903,6 +926,8 @@ impl<K: KeyStore> Database<K> {
 		};
 		let ciphertext = self
 			.master_key
+			.read()
+			.unwrap_or_else(|e| e.into_inner())
 			.with_key(|key| crypto::encrypt(&compressed, key, &nonce, &aad));
 		let file = encode_envelope(&meta, &ciphertext);
 		if file.len() > format::MAX_FILE_BYTES {
@@ -914,7 +939,10 @@ impl<K: KeyStore> Database<K> {
 
 	/// Wipes the master key and every record; the database is empty after.
 	pub fn zeroize(&self) {
-		self.master_key.zeroize();
+		self.master_key
+			.read()
+			.unwrap_or_else(|e| e.into_inner())
+			.zeroize();
 		self.write().zeroize();
 	}
 }
@@ -1385,6 +1413,8 @@ pub(crate) mod tests {
 		let compressed = crypto::compress(&db.serialize());
 		let ciphertext = db
 			.master_key
+			.read()
+			.unwrap()
 			.with_key(|key| crypto::encrypt(&compressed, key, &nonce, &[]));
 		let mut meta = db.meta_pairs();
 		if let Some(revision) = outer_revision {
@@ -1483,6 +1513,41 @@ pub(crate) mod tests {
 			Some(FormatError::TooLarge)
 		);
 		db.write().entries.entries.remove(&(id + 1));
+	}
+
+	#[test]
+	fn a_rekeyed_database_opens_only_under_the_new_key_and_names_the_new_salt() {
+		let old_salt = [1u8; crypto::SALT_SIZE];
+		let new_salt = [2u8; crypto::SALT_SIZE];
+		let db = Database::new(test_key(&old_salt, KdfParams::DEBUG), "example", &old_salt);
+		let mut entry = Entry::new();
+		entry.set_name("kept");
+		entry.set_password("through the rekey");
+		db.set_password_entry(entry);
+		assert_eq!(db.salt(), Some(old_salt));
+		let before = db.encode(false, KdfParams::DEBUG).unwrap();
+		db.rekey(test_key(&new_salt, KdfParams::DEBUG), &new_salt);
+		assert_eq!(db.salt(), Some(new_salt));
+		let after = db.encode(false, KdfParams::DEBUG).unwrap();
+		let parse = |file: &[u8]| Envelope::parse(file, KdfParams::DEBUG).unwrap();
+		assert_eq!(parse(&before).salt, old_salt);
+		assert_eq!(parse(&after).salt, new_salt);
+		assert!(parse(&after).revision > parse(&before).revision);
+		assert!(Database::open(&parse(&after), test_key(&old_salt, KdfParams::DEBUG)).is_err());
+		let reopened = Database::open(&parse(&after), test_key(&new_salt, KdfParams::DEBUG))
+			.map_err(|(_, e)| e)
+			.unwrap();
+		assert_eq!(
+			reopened
+				.get_password_entry_by_name("kept")
+				.unwrap()
+				.get_password()
+				.as_str(),
+			"through the rekey"
+		);
+		// The old file still opens under the old key: a copy from before the
+		// rekey is a copy, not a corruption.
+		assert!(Database::open(&parse(&before), test_key(&old_salt, KdfParams::DEBUG)).is_ok());
 	}
 
 	/// A deterministic test key from the salt and cost, as a head's

@@ -64,7 +64,13 @@ fn main() {
 		.build()
 		.unwrap();
 	let vault = runtime
-		.block_on(persistence::load(db_name, Zeroizing::new(password.clone())))
+		.block_on(persistence::load(
+			db_name,
+			persistence::UnlockInput {
+				password: Zeroizing::new(password.clone()),
+				pin: None,
+			},
+		))
 		.expect("open Linux vault");
 	match command.as_str() {
 		"read" => println!("{}", read(&vault.database)),

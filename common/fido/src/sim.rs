@@ -262,25 +262,25 @@ impl Authenticator {
 		protocol_key: u64,
 		cdh: &[u8],
 		permission: u64,
-	) -> Result<bool, u8> {
+	) -> Result<Option<usize>, u8> {
 		let Some(param) = params
 			.get(&Value::from(param_key))
 			.and_then(Value::as_bytes)
 		else {
-			return Ok(false);
+			return Ok(None);
 		};
 		let protocol = params
 			.get(&Value::from(protocol_key))
 			.and_then(Value::as_u64)
 			.and_then(Protocol::from_number)
 			.ok_or(STATUS_MISSING_PARAMETER)?;
-		let valid = self.tokens.iter().any(|t| {
+		let valid = self.tokens.iter().position(|t| {
 			t.protocol == protocol
 				&& t.permissions & permission != 0
 				&& pin::authenticate(protocol, &t.bytes, cdh) == param
 		});
-		if valid {
-			Ok(true)
+		if let Some(index) = valid {
+			Ok(Some(index))
 		} else {
 			Err(STATUS_PIN_AUTH_INVALID)
 		}
@@ -302,7 +302,8 @@ impl Authenticator {
 			.and_then(|e| e.get(&Value::from(HMAC_SECRET)))
 			.and_then(Value::as_bool)
 			== Some(true);
-		let verified = self.verify_pin_auth(params, 8, 9, cdh, ctap::PERMISSION_MAKE_CREDENTIAL)?;
+		let token = self.verify_pin_auth(params, 8, 9, cdh, ctap::PERMISSION_MAKE_CREDENTIAL)?;
+		let verified = token.is_some();
 		if self.pin.is_some() && !verified {
 			return Err(ctap::STATUS_PIN_REQUIRED);
 		}
@@ -316,6 +317,11 @@ impl Authenticator {
 		}
 		if !self.touch {
 			return Err(ctap::STATUS_OPERATION_DENIED);
+		}
+		// CTAP 2.1 6.1.2: a completed makeCredential clears the token's
+		// permissions and its user flags; the token must be fetched again.
+		if let Some(index) = token {
+			self.tokens[index].permissions = 0;
 		}
 		let uv = verified || (builtin && self.builtin_uv);
 		let cred_id = self.make_cred_id();
@@ -363,7 +369,8 @@ impl Authenticator {
 			.find(|id| self.owns(id))
 			.map(<[u8]>::to_vec)
 			.ok_or(ctap::STATUS_NO_CREDENTIALS)?;
-		let verified = self.verify_pin_auth(params, 6, 7, cdh, ctap::PERMISSION_GET_ASSERTION)?;
+		let token = self.verify_pin_auth(params, 6, 7, cdh, ctap::PERMISSION_GET_ASSERTION)?;
+		let verified = token.is_some();
 		let options = params.get(&Value::from(5u64));
 		let builtin = options
 			.and_then(|o| o.get(&Value::from("uv")))
@@ -374,6 +381,11 @@ impl Authenticator {
 		}
 		if !self.touch {
 			return Err(ctap::STATUS_OPERATION_DENIED);
+		}
+		// CTAP 2.1 6.2.2: a completed getAssertion clears the token's
+		// permissions and user flags too.
+		if let Some(index) = token {
+			self.tokens[index].permissions = 0;
 		}
 		let uv = verified || (builtin && self.builtin_uv);
 		let mut extensions = None;

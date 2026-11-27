@@ -211,6 +211,16 @@ choose_provider() {
     esac
 }
 
+# A security key is a hidraw device; systemd's udev rules tag it for the
+# logged-in user. Without them Keptino cannot open the key, so say so now.
+check_security_key_access() {
+    local rules
+    for rules in /usr/lib/udev/rules.d/60-fido-id.rules /lib/udev/rules.d/60-fido-id.rules /etc/udev/rules.d/60-fido-id.rules; do
+        [[ -r "$rules" ]] && return 0
+    done
+    printf 'No FIDO udev rules found (60-fido-id.rules). Security keys will not be usable until the udev package provides them.\n' >&2
+}
+
 # The pepper is derived by the installed keptino binary, which locks its
 # memory for the 4 GiB derivation; --restore-pepper runs before the build, so
 # it needs a package that already has --derive-pepper.
@@ -405,6 +415,7 @@ if ! cargo deb --version >/dev/null 2>&1; then
 fi
 require_credential_tools systemd-creds systemd-ask-password
 pkg-config --exists wayland-client xkbcommon
+check_security_key_access
 
 prepare_config_dir
 check_credential_encryption

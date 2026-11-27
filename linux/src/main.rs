@@ -1,4 +1,5 @@
 mod cli;
+mod fido;
 mod gui;
 mod logger;
 mod security;

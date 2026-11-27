@@ -40,6 +40,7 @@ getrandom = "0.4.1"
 hex = "0.4.3"
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "svg", "tiny-skia", "tokio", "wayland"] }
 keptino-core = { path = "../common/core" }
+keptino-fido = { path = "../common/fido" }
 jiff = "1.0.1"
 landlock = "0.4"
 libc = "0.2.180"
