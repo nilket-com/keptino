@@ -1,3 +1,4 @@
+mod drill;
 pub mod keys;
 pub mod persistence;
 mod remote;
