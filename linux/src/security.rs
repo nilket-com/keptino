@@ -185,13 +185,29 @@ fn sandbox_filesystem() {
 	}
 }
 
+/// Installs the system call filter (ADR 0028) on every thread. Last in
+/// preflight: Landlock and the other steps make calls it would not refuse,
+/// but nothing after it needs to change the process again. Best effort, as
+/// the filesystem sandbox is.
+fn filter_system_calls() {
+	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+	match crate::seccomp::install(&crate::seccomp::program(), true) {
+		Ok(()) => info("System call filter enforced."),
+		Err(err) => warn(&format!("System call filter unavailable: {err}")),
+	}
+	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+	warn("System call filter unavailable on this architecture.");
+}
+
 /// The hardening a command line form needs before it touches a secret:
-/// locked memory, no core dump, no preloaded library. The display, TME,
+/// locked memory, no core dump, no preloaded library, the system call
+/// filter. The display, TME,
 /// LUKS and filesystem steps belong to the GUI.
 pub fn preflight_command_line() {
 	lock_memory_pages();
 	set_not_dumpable();
 	enforce_no_preload();
+	filter_system_calls();
 }
 
 pub fn preflight() {
@@ -203,6 +219,7 @@ pub fn preflight() {
 	check_tme();
 	sniff_luks();
 	sandbox_filesystem();
+	filter_system_calls();
 	info("Preflight security checks passed.");
 }
 

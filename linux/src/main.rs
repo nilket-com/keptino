@@ -2,6 +2,8 @@ mod cli;
 mod fido;
 mod gui;
 mod logger;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod seccomp;
 mod security;
 mod storage;
 
