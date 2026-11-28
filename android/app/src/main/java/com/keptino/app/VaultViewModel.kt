@@ -239,8 +239,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO + NonCancellable) {
                 val active = { check(started == generation) { "Creation canceled." } }
                 active()
-                pending = createVault(storage, name, secret, authorized.pepper, remote, PRODUCTION_MEMORY_KIB,
-                    key, active)
+                pending = createVault(storage, name, secret, authorized.pepper, remote, key, checkActive = active)
             }
             if (started != generation) return@task
             val result = checkNotNull(pending)

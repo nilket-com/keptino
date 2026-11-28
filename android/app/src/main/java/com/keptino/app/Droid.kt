@@ -20,6 +20,7 @@ object Core {
         id: String, secret: String, body: ByteArray, seconds: Long): Array<String>
     @JvmStatic external fun preflight(): Array<String>
     @JvmStatic external fun derivePepper(seed: ByteArray, memKib: Int): ByteArray
+    @JvmStatic external fun create(dbName: String, password: ByteArray, pepper: ByteArray): Long
     fun open(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo? = null): Long =
         openWithKey(dbName, password, pepper, local, remote, kdfMemKib, io)
     @JvmStatic private external fun openWithKey(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo?): Long

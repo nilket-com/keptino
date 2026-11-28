@@ -68,10 +68,8 @@ impl Vault {
 		)
 	}
 
-	/// A new vault derived at `cost`, for tests of costs other than the
-	/// default.
-	#[cfg(test)]
-	fn create(
+	/// A new vault derived at the full creation cost, including passes and lanes.
+	pub fn create(
 		db_name: &str,
 		password: &[u8],
 		pepper: &[u8; PEPPER_SIZE],

@@ -17,9 +17,9 @@ original pepper seed and master password still open the vault.
 Connect your phone, authorize USB debugging, and run `./android/setup.sh` to
 build and install Keptino or update it in place. The Android app opens and edits
 Linux `.keptino` vaults. See
-[Android setup, builds, and interoperability tests](android/README.md). Existing
-vaults require the original pepper and a device with enough available memory for
-the Linux 4 GiB password derivation. The platform protections below describe Linux;
+[Android setup, builds, and interoperability tests](android/README.md). New vaults use
+256 MiB for password derivation. Existing vaults require their original pepper
+and derivation cost, which can be 4 GiB. The platform protections below describe Linux;
 Android uses Android Keystore and the lifecycle protections documented separately.
 
 #### Android screenshots

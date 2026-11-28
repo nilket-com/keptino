@@ -145,9 +145,10 @@ checks the downloaded vault and preserves the previous local bytes as
 `<name>.keptino.1`. After an offline rekey, uploads stay paused until the
 bucket copy is reconciled.
 
-The default production vault requires **4 GiB of available memory** for password
-derivation. Deriving the pepper from its seed also needs 4 GiB. Importing the
-original pepper skips the seed calculation.
+Create derives a new vault key with Argon2id at **256 MiB, three passes, one lane**.
+Unlock and Save honor the cost in the vault. A legacy production vault without
+recorded costs still needs 4 GiB at one pass. Deriving the pepper from its seed
+also needs 4 GiB, at four passes. Importing the original pepper skips that step.
 
 On every open, Android compares the plaintext metadata against the copy inside
 the authenticated ciphertext, including on older vaults without a revision.
@@ -189,7 +190,7 @@ also allowed. [Android Keystore authentication](https://developer.android.com/re
 The native startup check disables process dumps where the kernel permits and
 refuses vault access when it detects tracing or known injected libraries. The
 native master key and derived pepper use dedicated, wiped pages with best-effort
-memory locking. The 4 GiB key-derivation buffer uses dump exclusion where
+memory locking. The key-derivation buffer uses dump exclusion where
 supported and may be swapped. The locked screen shows available bootloader,
 Verified Boot, debug-image, developer-options, ADB and native memory warnings.
 These are local observations. OEMs can withhold boot properties.

@@ -1,5 +1,7 @@
 package com.keptino.app
 
+import android.os.Bundle
+import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.ByteArrayOutputStream
@@ -18,8 +20,8 @@ class CreateVaultTest {
     private val password = "correct horse battery staple".toByteArray()
     private val pepper = "3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1".hexToByteArray()
     private fun name() = "phone-" + UUID.randomUUID()
-    private fun create(name: String, remote: R2? = null, cost: Int = 4096) =
-        createVault(storage, name, password, pepper, remote, cost, null) {}
+    private fun create(name: String, remote: R2? = null) =
+        createVault(storage, name, password, pepper, remote, null) {}
 
     private class Reply(url: URL, val status: Int, val data: ByteArray) : HttpURLConnection(url) {
         val written = ByteArrayOutputStream()
@@ -44,9 +46,9 @@ class CreateVaultTest {
 
     @Test fun localCreationIsDurableAndLinuxCanOpenTheExport() {
         val name = name() + " café"
-        val production = InstrumentationRegistry.getArguments().getString("productionCreation") == "true"
-        val cost = if (production) PRODUCTION_MEMORY_KIB else 4096
-        val result = create(name, cost = cost)
+        val start = SystemClock.elapsedRealtime()
+        val result = create(name)
+        val createMs = SystemClock.elapsedRealtime() - start
         try {
             assertEquals(1L, Core.revision(result.handle))
             assertArrayEquals(result.file, storage.read(name))
@@ -57,15 +59,29 @@ class CreateVaultTest {
             Core.commit(result.handle)
             val second = Core.save(result.handle)
             storage.acceptRevision(name, 2uL, 1uL) { storage.write(name, second) }
-            val reopened = Core.open(name, password, pepper, storage.read(name), null, 4096)
+            val reopenStart = SystemClock.elapsedRealtime()
+            val reopened = Core.open(name, password, pepper, storage.read(name), null, PRODUCTION_MEMORY_KIB)
+            val reopenMs = SystemClock.elapsedRealtime() - reopenStart
             try { assertTrue(Core.query(reopened, "from-phone")) } finally { Core.close(reopened) }
+            val metrics = Bundle().apply {
+                putString("vaultName", name)
+                putLong("createMs", createMs)
+                putLong("reopenMs", reopenMs)
+                putString("processPeakRss", File("/proc/self/status").useLines { lines ->
+                    lines.first { it.startsWith("VmHWM:") }.substringAfter(':').trim()
+                })
+            }
+            InstrumentationRegistry.getInstrumentation().sendStatus(2, metrics)
             File(context.cacheDir, "phone-created.keptino").writeBytes(second)
         } finally { Core.close(result.handle) }
     }
 
     @Test fun insufficientMemoryLeavesNameFree() {
         val unused = name()
-        val error = assertThrows(RuntimeException::class.java) { create(unused, cost = Int.MAX_VALUE) }
+        val error = assertThrows(RuntimeException::class.java) {
+            createVault(storage, unused, password, pepper, null, null,
+                newHandle = { Core.open(unused, password, pepper, null, null, Int.MAX_VALUE) }) {}
+        }
         assertTrue(error.message.orEmpty().contains("available memory"))
         storage.requireUnusedName(unused)
     }

@@ -4,12 +4,14 @@ package com.keptino.app
 internal data class CreatedVault(val handle: Long, val file: ByteArray)
 
 internal fun createVault(storage: VaultStorage, name: String, password: ByteArray, pepper: ByteArray,
-                         r2: R2?, cost: Int, key: AndroidSecurityKey?, checkActive: () -> Unit): CreatedVault {
+                         r2: R2?, key: AndroidSecurityKey?,
+                         newHandle: () -> Long = { Core.create(name, password, pepper) },
+                         checkActive: () -> Unit): CreatedVault {
     require(password.isNotEmpty()) { "Enter a master password." }
     storage.requireUnusedName(name)
     if (r2 != null) check(r2.fetch(name).bytes == null) { "This vault already exists in R2. Use Unlock." }
     checkActive()
-    var handle = Core.open(name, password, pepper, null, null, cost)
+    var handle = newHandle()
     try {
         val encoded = Core.save(handle)
         check(Core.revision(handle) == 1L) { "Unexpected initial vault revision." }
@@ -22,7 +24,7 @@ internal fun createVault(storage: VaultStorage, name: String, password: ByteArra
             handle = 0
             val winner = checkNotNull(r2.fetch(name).bytes) { "R2 creation conflicted. Reopen to check the bucket." }
             checkActive()
-            handle = Core.open(name, password, pepper, null, winner, cost, key)
+            handle = Core.open(name, password, pepper, null, winner, PRODUCTION_MEMORY_KIB, key)
             checkActive()
             storage.acceptNewName(name, Core.revision(handle).toULong())
             return CreatedVault(handle, winner).also { handle = 0 }

@@ -384,6 +384,31 @@ impl AndroidKey<'_, '_> {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_create(
+	mut env: JNIEnv,
+	_this: JObject,
+	db_name: JString,
+	password: JByteArray,
+	pepper: JByteArray,
+) -> jlong {
+	guard(&mut env, 0, |env| {
+		let name = string(env, &db_name)?;
+		let password = bytes(env, &password)?;
+		let pepper = bytes(env, &pepper)?;
+		let pepper = pepper
+			.as_slice()
+			.try_into()
+			.map_err(|_| Error::Invalid("pepper must be 32 bytes"))?;
+		Ok(register(Vault::create(
+			&name,
+			&password,
+			pepper,
+			KdfParams::CREATE,
+		)?))
+	})
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_keptino_app_Core_openWithKey<'local>(
 	mut env: JNIEnv<'local>,
 	_this: JObject<'local>,
