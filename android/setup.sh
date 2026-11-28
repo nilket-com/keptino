@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 [--serial ADB_SERIAL] [--rotate-from ORIGINAL_DEBUG_KEYSTORE | --debug [--r2]]"
+    echo "Usage: $0 [--serial ADB_SERIAL] [--user ID] [--rotate-from ORIGINAL_DEBUG_KEYSTORE | --debug [--r2]]"
     echo "Default: install a signed release. See android/README.md to set up the release key."
     echo "Connect a device with USB debugging enabled and authorize this computer."
 }
@@ -14,12 +14,16 @@ serial=${ANDROID_SERIAL:-}
 provision=false
 debug=false
 rotation=()
+profile=()
 while (( $# )); do
 case "$1" in
     -h|--help) usage; exit 0 ;;
     --serial|-s)
         [[ -n ${2:-} ]] || { usage >&2; exit 2; }
         serial=$2; shift 2 ;;
+    --user)
+        [[ ${2:-} =~ ^[0-9]{1,10}$ ]] && (( 10#$2 <= 2147483647 )) || fail "Expected a numeric Android user ID."
+        profile=(--user "$2"); shift 2 ;;
     --debug) debug=true; shift ;;
     --rotate-from)
         [[ -n ${2:-} ]] || { usage >&2; exit 2; }
@@ -48,6 +52,11 @@ if [[ -z ${JAVA_HOME:-} && -x $HOME/.cache/digisafe-jdk21/bin/java ]]; then
     export JAVA_HOME="$HOME/.cache/digisafe-jdk21"
 fi
 
+if [[ -n ${JAVA_HOME:-} ]]; then
+    [[ -x $JAVA_HOME/bin/java ]] || fail "JAVA_HOME must point to a JDK with bin/java."
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
+
 adb="$sdk/platform-tools/adb"
 packages=()
 [[ -x $adb ]] || packages+=(platform-tools)
@@ -71,13 +80,14 @@ if ! serial=$("$adb" "${target[@]}" get-serialno) || [[ -z $serial || $serial ==
 fi
 [[ $("$adb" -s "$serial" get-state) == device ]] || fail "Unlock $serial and authorize USB debugging, then rerun setup."
 
-printf 'Building Keptino for installation on %s\n' "$serial"
+user=$(python3 ./adb_user.py "$adb" "$serial" "${profile[@]}")
+printf 'Building Keptino for installation on %s (Android user %s)\n' "$serial" "$user"
 if ! $debug; then
     ./gradlew :app:assembleRelease
-    exec python3 ./install-release.py --sdk "$sdk" --serial "$serial" "${rotation[@]}"
+    exec python3 ./install-release.py --sdk "$sdk" --serial "$serial" --user "$user" "${rotation[@]}"
 fi
 ./gradlew :app:assembleDebug
-"$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
+"$adb" -s "$serial" install -r --user "$user" app/build/outputs/apk/debug/app-debug.apk
 printf 'Installed Keptino on %s.\n' "$serial"
 
-if $provision; then exec python3 ./provision-r2.py --adb "$adb" --serial "$serial"; fi
+if $provision; then exec python3 ./provision-r2.py --adb "$adb" --serial "$serial" --user "$user"; fi

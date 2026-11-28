@@ -7,21 +7,25 @@ import subprocess
 import sys
 import time
 
+from adb_user import selected_user, user_id
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", required=True)
     parser.add_argument("--adb", default="adb")
+    parser.add_argument("--user", type=user_id)
     args = parser.parse_args()
     adb = [args.adb, "-s", args.serial]
     app = "com.keptino.app"
+    user = selected_user(adb, args.user)
+    remote = ["run-as", app, "--user", user]
     directory = Path.home() / ".config/keptino"
     for key in ("pepper", "r2"):
         if not (directory / (key + ".cred")).is_file():
             sys.exit("Missing Linux credential: " + key + ".cred")
-    subprocess.run([*adb, "shell", "run-as", app, "true"], check=True)
-    subprocess.run([*adb, "shell", "am", "start", "--activity-single-top", "-a", app + ".IMPORT_R2", "-n", app + "/.MainActivity"], check=True)
+    subprocess.run([*adb, "shell", *remote, "true"], check=True)
+    subprocess.run([*adb, "shell", "am", "start", "--user", user, "--activity-single-top", "-a", app + ".IMPORT_R2", "-n", app + "/.MainActivity"], check=True)
     print("Unlock your phone and tap Receive setup in Keptino. If a vault is open, save your edits and lock it first.", flush=True)
-    remote = ["run-as", app]
     pipe = "cache/r2-setup.pipe"
     deadline = time.monotonic() + 900
     while subprocess.run([*adb, "shell", *remote, "test", "-p", pipe], stdout=subprocess.DEVNULL).returncode:

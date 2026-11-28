@@ -83,7 +83,11 @@ each descriptor supplies one line and must be inherited by the installer.
 
 With several devices or emulators connected, use `adb devices -l` to find the
 target and run `./android/setup.sh --serial SERIAL`. Setup also honors
-`ANDROID_SERIAL`.
+`ANDROID_SERIAL`. Setup installs for the foreground Android user by default.
+Use `--user ID` to select a different numeric Android user on that device.
+Package checks, installation, and debug R2 provisioning use that same ID.
+Android shares updated APK code with other users who already have the app.
+Setup puts the selected JDK's bin directory first on PATH for SDK tools.
 
 ### Build prerequisites
 

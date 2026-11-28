@@ -13,6 +13,8 @@ import sys
 import tempfile
 import warnings
 
+from adb_user import selected_user, user_id
+
 PACKAGE = "com.keptino.app"
 ANDROID = Path(__file__).resolve().parent
 DIGEST = r"[0-9a-f]{64}"
@@ -85,12 +87,15 @@ def history(signer, path, expected, optional=False):
     return signers[0], permission[1] == "true"
 
 
-def installed(adb, destination):
-    packages = output(*adb, "shell", "pm", "list", "packages", "-u", "--user", "all", PACKAGE).decode().splitlines()
+def installed(adb, user, destination):
+    result = subprocess.run([*adb, "shell", "pm", "list", "packages", "-u", "--user", user, PACKAGE],
+                            text=True, capture_output=True, check=True)
+    require(not result.stderr.strip(), f"Could not enumerate packages for Android user {user}: {result.stderr.strip()}")
+    packages = result.stdout.splitlines()
     require(all(line.startswith("package:") for line in packages), "Could not enumerate installed packages.")
     if f"package:{PACKAGE}" not in packages:
         return False
-    paths = output(*adb, "shell", "pm", "path", "--user", "current", PACKAGE).decode().splitlines()
+    paths = output(*adb, "shell", "pm", "path", "--user", user, PACKAGE).decode().splitlines()
     bases = [line.removeprefix("package:") for line in paths if line.startswith("package:/") and line.endswith("/base.apk")]
     require(len(bases) == 1, "Could not verify the installed base APK for the current Android user.")
     output(*adb, "pull", bases[0], destination)
@@ -101,6 +106,7 @@ def install(args, signing, temp):
     tools = args.sdk / "build-tools/36.0.0"
     signer = tools / "apksigner"
     adb = [args.sdk / "platform-tools/adb", "-s", args.serial]
+    user = selected_user(adb, args.user)
     release = signing / "release.p12"
     require(release.is_file(), f"Set up and back up your release key first. See android/README.md ({release}).")
     pin = (signing / "release.sha256").read_text().strip().lower()
@@ -116,7 +122,7 @@ def install(args, signing, temp):
             and metadata["elements"][0]["versionCode"] == version, "Expected a non-debuggable release build.")
     base = temp / "base.apk"
     previous = None
-    if installed(adb, base):
+    if installed(adb, user, base):
         current, was_debug = manifest(base, tools)
         require(version >= current, f"Refusing to downgrade installed version {current} to {version}.")
         previous = certificate(base, signer, api)
@@ -186,19 +192,20 @@ def install(args, signing, temp):
             print(f"Back up the new signing lineage at {lineage}.", flush=True)
         print("Installing the release signer, then retiring the old signer's permission. "
               "If interrupted, rerun setup to finish.", flush=True)
-        subprocess.run([*adb, "install", "-r", first], check=True)
-    subprocess.run([*adb, "install", "-r", final], check=True)
-    require(installed(adb, base) and certificate(base, signer, api) == pin and manifest(base, tools) == (version, False),
+        subprocess.run([*adb, "install", "-r", "--user", user, first], check=True)
+    subprocess.run([*adb, "install", "-r", "--user", user, final], check=True)
+    require(installed(adb, user, base) and certificate(base, signer, api) == pin and manifest(base, tools) == (version, False),
             "Android accepted the install but installed APK verification failed.")
     if ancestor:
         require(history(signer, base, pin) == (ancestor, False), "The installed APK did not retire the old signer.")
-    print(f"Verified release version {version} on {args.serial} (API {api}).")
+    print(f"Verified release version {version} on {args.serial} (API {api}, Android user {user}).")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--serial", required=True)
+    parser.add_argument("--user", type=user_id)
     parser.add_argument("--rotate-from", type=Path)
     args = parser.parse_args()
     signing = Path(os.environ.get("KEPTINO_SIGNING_DIR", "~/.config/keptino-signing")).expanduser().resolve()
