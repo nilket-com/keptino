@@ -18,12 +18,14 @@ out=$(mkdir -p "${1:-$root/target/deb}" && cd "${1:-$root/target/deb}" && pwd)
 cargo_home=$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd)
 
 # Every timestamp in the package is the commit's. A tree with uncommitted
-# changes still builds, but its BUILDINFO says so: it is not the commit.
+# changes or untracked files still builds, but its BUILDINFO says so: it is
+# not the commit. An untracked file can be a build input (a module, an
+# included asset), so it counts; build output is ignored by .gitignore.
 commit=$(git -C "$root" rev-parse HEAD)
 export SOURCE_DATE_EPOCH
 SOURCE_DATE_EPOCH=$(git -C "$root" log -1 --format=%ct HEAD)
 dirty=no
-[[ -z $(git -C "$root" status --porcelain --untracked-files=no) ]] || dirty=yes
+[[ -z $(git -C "$root" status --porcelain) ]] || dirty=yes
 
 # The binary names its sources in panic and log locations; these prefixes
 # replace the builder's paths, so neither the user name nor the checkout
