@@ -26,7 +26,7 @@ const DENIED: &[c_long] = &[
 	libc::SYS_io_uring_enter,
 	libc::SYS_io_uring_register,
 	libc::SYS_kexec_load,
-	libc::SYS_kexec_file_load,
+	SYS_KEXEC_FILE_LOAD,
 	libc::SYS_init_module,
 	libc::SYS_finit_module,
 	libc::SYS_delete_module,
@@ -76,6 +76,13 @@ const DENIED: &[c_long] = &[
 	#[cfg(target_arch = "x86_64")]
 	libc::SYS__sysctl,
 ];
+
+/// libc names kexec_file_load on every target but aarch64 musl, which uses
+/// the same generic number as aarch64 glibc.
+#[cfg(not(all(target_arch = "aarch64", target_env = "musl")))]
+const SYS_KEXEC_FILE_LOAD: c_long = libc::SYS_kexec_file_load;
+#[cfg(all(target_arch = "aarch64", target_env = "musl"))]
+const SYS_KEXEC_FILE_LOAD: c_long = 294;
 
 /// The `clone` flags that make a namespace. Threads and helpers never ask
 /// for one; an unprivileged user namespace is the usual first step of a
@@ -201,8 +208,11 @@ pub fn install(program: &[sock_filter], all_threads: bool) -> Result<(), std::io
 mod tests {
 	use super::*;
 
-	fn errno_of(result: c_long) -> Option<i32> {
-		(result == -1).then(|| std::io::Error::last_os_error().raw_os_error().unwrap())
+	/// The errno of one call, read before any other call can change it.
+	fn errno_of(call: impl FnOnce() -> c_long) -> Option<i32> {
+		let result = call();
+		let errno = std::io::Error::last_os_error().raw_os_error();
+		(result == -1).then_some(errno).flatten()
 	}
 
 	/// The filter binds the calling thread here, so the rest of the suite
@@ -212,33 +222,36 @@ mod tests {
 		std::thread::spawn(|| {
 			install(&program(), false).unwrap();
 			// SAFETY: each call is made with arguments that are refused or
-			// harmless; none succeeds in changing the process.
+			// harmless; none succeeds in changing the process. Each errno is
+			// read right after its own call.
 			unsafe {
 				let pid = libc::getpid();
-				let refused = [
-					libc::syscall(libc::SYS_ptrace, libc::PTRACE_PEEKUSER, pid, 0, 0),
-					libc::syscall(libc::SYS_process_vm_readv, pid, 0, 0, 0, 0, 0),
-					libc::syscall(libc::SYS_keyctl, 0, -3, 0),
-					libc::syscall(libc::SYS_io_uring_setup, 0, 0),
-					libc::syscall(libc::SYS_bpf, 0, 0, 0),
-					// Without the filter both answer EINVAL: a user
-					// namespace cannot share a filesystem context, and a
-					// threaded process cannot unshare one.
-					libc::syscall(
-						libc::SYS_clone,
-						libc::CLONE_NEWUSER | libc::CLONE_FS,
-						0,
-						0,
-						0,
-						0,
-					),
-					libc::syscall(libc::SYS_unshare, libc::CLONE_NEWUSER),
-				];
-				for (index, result) in refused.into_iter().enumerate() {
-					assert_eq!(errno_of(result), Some(libc::EPERM), "call {index}");
-				}
+				let refused = |name: &str, call: &dyn Fn() -> c_long| {
+					assert_eq!(errno_of(call), Some(libc::EPERM), "{name}");
+				};
+				refused("ptrace", &|| {
+					libc::syscall(libc::SYS_ptrace, libc::PTRACE_PEEKUSER, pid, 0, 0)
+				});
+				refused("process_vm_readv", &|| {
+					libc::syscall(libc::SYS_process_vm_readv, pid, 0, 0, 0, 0, 0)
+				});
+				refused("keyctl", &|| libc::syscall(libc::SYS_keyctl, 0, -3, 0));
+				refused("io_uring_setup", &|| {
+					libc::syscall(libc::SYS_io_uring_setup, 0, 0)
+				});
+				refused("bpf", &|| libc::syscall(libc::SYS_bpf, 0, 0, 0));
+				// Without the filter both answer EINVAL: a user namespace
+				// cannot share a filesystem context, and a threaded process
+				// cannot unshare one.
+				refused("clone", &|| {
+					let flags = libc::CLONE_NEWUSER | libc::CLONE_FS;
+					libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0)
+				});
+				refused("unshare", &|| {
+					libc::syscall(libc::SYS_unshare, libc::CLONE_NEWUSER)
+				});
 				assert_eq!(
-					errno_of(libc::syscall(libc::SYS_clone3, 0, 0)),
+					errno_of(|| libc::syscall(libc::SYS_clone3, 0, 0)),
 					Some(libc::ENOSYS)
 				);
 			}

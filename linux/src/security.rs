@@ -107,8 +107,8 @@ fn sniff_luks() {
 /// vault directory. Everything else in the home directory is unreachable
 /// even if the process is compromised. Best effort: a kernel without
 /// Landlock runs unconfined with a warning, and a missing optional path is
-/// skipped.
-fn sandbox_filesystem() {
+/// skipped. Returns whether the sandbox is fully enforced.
+fn sandbox_filesystem() -> bool {
 	use landlock::{
 		ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
 		RulesetCreatedAttr, RulesetStatus,
@@ -155,7 +155,7 @@ fn sandbox_filesystem() {
 		Ok(ruleset) => ruleset,
 		Err(err) => {
 			warn(&format!("Filesystem sandbox unavailable: {err}"));
-			return;
+			return false;
 		}
 	};
 	for (path, access) in rules {
@@ -166,37 +166,81 @@ fn sandbox_filesystem() {
 				Ok(next) => ruleset = next,
 				Err(err) => {
 					warn(&format!("Filesystem sandbox unavailable: {err}"));
-					return;
+					return false;
 				}
 			}
 		}
 	}
 	match ruleset.restrict_self() {
 		Ok(status) => match status.ruleset {
-			RulesetStatus::FullyEnforced => info("Filesystem sandbox enforced."),
+			RulesetStatus::FullyEnforced => {
+				info("Filesystem sandbox enforced.");
+				true
+			}
 			RulesetStatus::PartiallyEnforced => {
-				warn("Filesystem sandbox partially enforced: the kernel is older than this build.")
+				warn("Filesystem sandbox partially enforced: the kernel is older than this build.");
+				false
 			}
 			RulesetStatus::NotEnforced => {
-				warn("Filesystem sandbox not enforced: Landlock is unavailable.")
+				warn("Filesystem sandbox not enforced: Landlock is unavailable.");
+				false
 			}
 		},
-		Err(err) => warn(&format!("Filesystem sandbox unavailable: {err}")),
+		Err(err) => {
+			warn(&format!("Filesystem sandbox unavailable: {err}"));
+			false
+		}
 	}
 }
 
 /// Installs the system call filter (ADR 0028) on every thread. Last in
 /// preflight: Landlock and the other steps make calls it would not refuse,
 /// but nothing after it needs to change the process again. Best effort, as
-/// the filesystem sandbox is.
-fn filter_system_calls() {
+/// the filesystem sandbox is. Returns whether the filter is enforced.
+fn filter_system_calls() -> bool {
 	#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 	match crate::seccomp::install(&crate::seccomp::program(), true) {
-		Ok(()) => info("System call filter enforced."),
-		Err(err) => warn(&format!("System call filter unavailable: {err}")),
+		Ok(()) => {
+			info("System call filter enforced.");
+			true
+		}
+		Err(err) => {
+			warn(&format!("System call filter unavailable: {err}"));
+			false
+		}
 	}
 	#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-	warn("System call filter unavailable on this architecture.");
+	{
+		warn("System call filter unavailable on this architecture.");
+		false
+	}
+}
+
+/// The closing preflight line: passed only when every confinement step
+/// took full effect, otherwise naming the ones that did not.
+fn preflight_status(missing: &[&str]) -> String {
+	if missing.is_empty() {
+		"Preflight security checks passed.".into()
+	} else {
+		format!(
+			"Preflight finished without full confinement: {} not enforced.",
+			missing.join(" and ")
+		)
+	}
+}
+
+fn report_preflight(steps: &[(&'static str, bool)]) {
+	let missing: Vec<&str> = steps
+		.iter()
+		.filter(|(_, enforced)| !enforced)
+		.map(|(name, _)| *name)
+		.collect();
+	let status = preflight_status(&missing);
+	if missing.is_empty() {
+		info(&status);
+	} else {
+		warn(&status);
+	}
 }
 
 /// The hardening a command line form needs before it touches a secret:
@@ -207,7 +251,7 @@ pub fn preflight_command_line() {
 	lock_memory_pages();
 	set_not_dumpable();
 	enforce_no_preload();
-	filter_system_calls();
+	report_preflight(&[("the system call filter", filter_system_calls())]);
 }
 
 pub fn preflight() {
@@ -218,14 +262,30 @@ pub fn preflight() {
 	verify_secure_display();
 	check_tme();
 	sniff_luks();
-	sandbox_filesystem();
-	filter_system_calls();
-	info("Preflight security checks passed.");
+	let sandboxed = sandbox_filesystem();
+	let filtered = filter_system_calls();
+	report_preflight(&[
+		("the filesystem sandbox", sandboxed),
+		("the system call filter", filtered),
+	]);
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn preflight_passes_only_when_every_confinement_holds() {
+		assert_eq!(preflight_status(&[]), "Preflight security checks passed.");
+		assert_eq!(
+			preflight_status(&["the system call filter"]),
+			"Preflight finished without full confinement: the system call filter not enforced."
+		);
+		assert_eq!(
+			preflight_status(&["the filesystem sandbox", "the system call filter"]),
+			"Preflight finished without full confinement: the filesystem sandbox and the system call filter not enforced."
+		);
+	}
 
 	/// Landlock binds the calling thread, so the sandbox is tried on a thread
 	/// of its own and the rest of the suite stays unconfined.
