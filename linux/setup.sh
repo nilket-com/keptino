@@ -516,7 +516,10 @@ else
 fi
 
 printf "Building and installing Keptino before requesting credentials...\n"
-cargo deb --install
+# The reproducible build (ADR 0031): the same bytes linux/repro-check.sh
+# verifies, with its SHA256SUMS and BUILDINFO beside it in target/deb.
+./build-deb.sh
+sudo dpkg -i ../target/deb/keptino_*.deb
 
 if [[ ! -e "$config_dir/pepper.cred" ]]; then
     provision_pepper
