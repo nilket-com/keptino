@@ -1,4 +1,4 @@
-//! Key derivation, compression and the cipher, byte-identical on both
+//! Key derivation, framing and the cipher, byte-identical on both
 //! platforms. The master key is derived into a destination the head owns,
 //! so it lands directly in secret memory, and from an Argon2 arena the head
 //! may allocate itself, so Android can keep it out of dumps.
@@ -11,10 +11,7 @@ use chacha20poly1305::{
 	aead::{AeadInPlace, KeyInit},
 };
 use sha3::{Digest, Sha3_256};
-use std::{
-	fmt,
-	io::{Read, Write},
-};
+use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const KEY_SIZE: usize = 32;
@@ -204,65 +201,17 @@ pub fn derive_master_key_in(
 	Ok(())
 }
 
-/// Grows by copying into a new wiping allocation, so a realloc never
-/// abandons plaintext in the allocator's old buffer.
-#[derive(Default)]
-struct WipingWriter(Zeroizing<Vec<u8>>);
-
-impl Write for WipingWriter {
-	fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-		let required = self
-			.0
-			.len()
-			.checked_add(bytes.len())
-			.ok_or_else(|| std::io::Error::other("Plaintext size overflow"))?;
-		if required > self.0.capacity() {
-			let capacity = required.max(self.0.capacity().saturating_mul(2));
-			let mut next = Zeroizing::new(Vec::with_capacity(capacity));
-			next.extend_from_slice(&self.0);
-			self.0 = next;
-		}
-		self.0.extend_from_slice(bytes);
-		Ok(bytes.len())
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
-	}
-}
-
-/// An LZ4 frame at level 9.
+/// An LZ4 frame of stored blocks (ADR 0038): the database is framed, not
+/// compressed, and every LZ4 reader accepts it.
 pub fn compress(msg: &[u8]) -> Zeroizing<Vec<u8>> {
-	let mut encoder = lz4::EncoderBuilder::new()
-		.level(9)
-		.build(WipingWriter::default())
-		.expect("LZ4 encoder");
-	encoder.write_all(msg).expect("LZ4 write to memory");
-	let (writer, result) = encoder.finish();
-	result.expect("LZ4 finish to memory");
-	writer.0
+	crate::lz4frame::write(msg)
 }
 
-/// Decompresses at most `budget` bytes; a stream that would go past the
-/// budget is refused, so a compressed payload cannot expand without bound
+/// Decodes one LZ4 frame into at most `budget` bytes; a frame that would go
+/// past the budget is refused, so a payload cannot expand without bound
 /// into locked memory.
 pub fn decompress(msg: &[u8], budget: usize) -> Result<Zeroizing<Vec<u8>>, CorruptPayload> {
-	let mut writer = WipingWriter::default();
-	let mut remaining = budget;
-	let mut decoder = lz4::Decoder::new(msg).map_err(|_| CorruptPayload)?;
-	// std::io::copy's ordinary scratch buffer would retain plaintext.
-	let mut scratch = Zeroizing::new([0u8; 8192]);
-	loop {
-		let size = decoder.read(&mut *scratch).map_err(|_| CorruptPayload)?;
-		if size == 0 {
-			break;
-		}
-		remaining = remaining.checked_sub(size).ok_or(CorruptPayload)?;
-		writer
-			.write_all(&scratch[..size])
-			.map_err(|_| CorruptPayload)?;
-	}
-	Ok(writer.0)
+	crate::lz4frame::read(msg, budget).map_err(|_| CorruptPayload)
 }
 
 /// XChaCha20-Poly1305; the tag is appended.
@@ -299,7 +248,6 @@ mod tests {
 	fn compression_and_cipher_roundtrip_and_reject_damage() {
 		let plaintext = b"synthetic vault record\n".repeat(10000);
 		let compressed = compress(&plaintext);
-		assert!(compressed.len() < plaintext.len() / 10);
 		assert_eq!(
 			&compressed[..4],
 			&[0x04, 0x22, 0x4d, 0x18],

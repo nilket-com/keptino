@@ -47,8 +47,9 @@ Both heads read and write the same `.keptino` format through `libkeptino`:
   - **Pepper derivation** from the recovery seed uses **4 GiB, 4 passes,
     1 lane** (`keptino --derive-pepper` on Linux, native `libkeptino` on
     Android).
-- **Encryption and compression**: XChaCha20-Poly1305 with a fresh nonce on
-  every save, LZ4 level 9 compression, and TLV serialization under shared
+- **Encryption and framing**: XChaCha20-Poly1305 with a fresh nonce on
+  every save, LZ4 framing in stored blocks with an in-tree reader that also
+  opens older compressed vaults, and TLV serialization under shared
   input budgets (64 MiB file, 30 MiB decompressed vault, 100,000 records,
   16 MiB field).
 - **Corruption repair**: Reed-Solomon 8+4 erasure coding with per-shard BLAKE3
@@ -237,9 +238,9 @@ secret leaves the process.
 
 ### Known limits
 
-- **Revealed UI and clipboard buffers**: revealing, editing, copying, or
-  compressing a secret involves `iced` / Compose, clipboard, and LZ4 buffers
-  whose internal copies are not guaranteed to be wiped. Clipboard history and
+- **Revealed UI and clipboard buffers**: revealing, editing, or copying a
+  secret involves `iced` / Compose and clipboard buffers whose internal
+  copies are not guaranteed to be wiped. Clipboard history and
   receiving apps can retain copied secrets.
 - **Host-level compromise**: an attacker controlling the running process or
   holding root on the host (for example, `bpftrace` uprobes or

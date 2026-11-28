@@ -17,6 +17,7 @@ pub mod format;
 pub mod fuzz;
 pub mod generator;
 pub mod health;
+pub mod lz4frame;
 pub mod policy;
 pub mod roaming;
 #[cfg(feature = "s3")]

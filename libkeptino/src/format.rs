@@ -78,9 +78,9 @@ impl std::error::Error for FormatError {}
 /// opens on the other.
 pub const MAX_FILE_BYTES: usize = 64 << 20;
 /// Sized so that a database within budget always yields a file within
-/// `MAX_FILE_BYTES`: LZ4 adds under one percent to incompressible data,
-/// base64 one third, and the 8+4 parity one half (30 x 1.01 x 4/3 x 1.5 is
-/// under 61 MiB).
+/// `MAX_FILE_BYTES`: LZ4 framing in stored blocks adds under 0.01 percent,
+/// base64 one third, and the 8+4 parity one half (30 x 1.0001 x 4/3 x 1.5
+/// is about 60 MiB).
 pub const MAX_DATABASE_BYTES: usize = 30 << 20;
 pub const MAX_RECORDS: usize = 100_000;
 pub const MAX_FIELD_BYTES: usize = 16 << 20;
