@@ -22,6 +22,18 @@ vaults require the original pepper and a device with enough available memory for
 the Linux 4 GiB password derivation. The platform protections below describe Linux;
 Android uses Android Keystore and the lifecycle protections documented separately.
 
+#### Android screenshots
+
+The four screens below use a sample vault. Select an image to view it at full size.
+
+| Unlock | Vault list |
+| --- | --- |
+| [<img src="doc/img/android/unlock.png" width="280" alt="Unlock screen with the vault name, master password, and local-only switch">](doc/img/android/unlock.png) | [<img src="doc/img/android/list.png" width="280" alt="Vault list with Find, tag filters, and one entry waiting to be saved">](doc/img/android/list.png) |
+
+| Entry editor | Password generator |
+| --- | --- |
+| [<img src="doc/img/android/entry.png" width="280" alt="Bank entry with masked secrets and inline copy, reveal, and generate buttons">](doc/img/android/entry.png) | [<img src="doc/img/android/generator.png" width="280" alt="Generator sheet with a masked preview, strength in bits, length slider, and character classes">](doc/img/android/generator.png) |
+
 ### Linux features
 
  - 4GiB Argon2id / Sha3 salted and peppered master password derivation.
