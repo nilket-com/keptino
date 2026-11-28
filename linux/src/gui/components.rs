@@ -4,7 +4,7 @@
 //! monospace face, and a status line whose parts are separated by pipes.
 
 use crate::gui::{
-	messages::Message,
+	messages::{ListFilter, Message},
 	state::{GeneratorChoice, KeysScreen},
 };
 use crate::{gui::colors, storage::PasswordEntry};
@@ -14,8 +14,8 @@ use iced::{
 	border, font,
 	theme::{Palette, Theme},
 	widget::{
-		TextEditor, TextInput, button, center, checkbox, column, container, mouse_area,
-		progress_bar, row, scrollable, space, svg, text, text_editor, text_input, tooltip,
+		TextEditor, TextInput, button, center, checkbox, column, container, mouse_area, opaque,
+		progress_bar, row, scrollable, space, stack, svg, text, text_editor, text_input, tooltip,
 	},
 };
 use libkeptino::roaming::UvMode;
@@ -27,6 +27,10 @@ const BUTTON_HEIGHT: u32 = 38;
 const WORKING_BUTTON_WIDTH: f32 = 124.0;
 const ICON_BUTTON_SIZE: u32 = 38;
 const LABEL_WIDTH: u32 = 84;
+/// A field's line, so an input is BUTTON_HEIGHT tall with its padding.
+const FIELD_LINE: text::LineHeight = text::LineHeight::Absolute(iced::Pixels(20.0));
+/// One height for every result row, so scrolling by fraction lands on a row.
+const ROW_HEIGHT: u32 = 40;
 const RADIUS: f32 = 8.0;
 const PILL_RADIUS: f32 = 14.0;
 /// A strength bar is full at this many bits; the generator's default
@@ -40,6 +44,7 @@ const EYE_CROSSED: &[u8] = include_bytes!("icons/hide.svg");
 const HEALTH: &[u8] = include_bytes!("icons/health.svg");
 const KEY: &[u8] = include_bytes!("icons/key.svg");
 const LOCK: &[u8] = include_bytes!("icons/lock.svg");
+const REFRESH: &[u8] = include_bytes!("icons/refresh.svg");
 
 const BOLD: Font = Font {
 	weight: font::Weight::Semibold,
@@ -363,57 +368,359 @@ pub struct Revealed {
 	pub note: bool,
 }
 
-/// What the editor marks around the entry: the vault's name, where the
-/// find stands, and what has not been set or saved.
-pub struct EditorMarks {
-	pub vault_name: String,
-	/// With find text: the entry's place among the matches, and their count.
-	pub find: Option<(Option<usize>, usize)>,
-	/// The entry on screen has edits that are not set.
-	pub draft: bool,
-	/// Entries were set or deleted since the last save.
-	pub unsaved: bool,
+/// A chip under find: All, a tag, or the weak passwords.
+pub struct Chip {
+	pub label: String,
+	pub filter: ListFilter,
+	pub on: bool,
+	pub amber: bool,
 }
 
-pub fn password_screen<'a>(
-	query: &str,
-	password_entry: &PasswordEntry,
-	generator: &'a GeneratorChoice,
-	revealed: Revealed,
-	marks: EditorMarks,
-	note: &'a text_editor::Content,
-	status: &'a str,
-) -> Element<'a, Message> {
-	let find_count = match marks.find {
-		None => String::new(),
-		Some((_, 0)) => "no match".to_string(),
-		Some((Some(at), total)) => format!("{at} of {total}"),
-		Some((None, 1)) => "1 match".to_string(),
-		Some((None, total)) => format!("{total} matches"),
-	};
+/// A row of the list pane as drawn.
+pub struct RowView<'a> {
+	pub name: &'a str,
+	pub username: &'a str,
+	/// `set` or `weak`, in amber, at the row's end.
+	pub flag: Option<&'static str>,
+}
+
+/// The generator panel under the password field, when it is open.
+pub struct GeneratorView<'a> {
+	pub choice: &'a GeneratorChoice,
+	/// None when the choice is out of range.
+	pub preview: Option<&'a str>,
+	pub revealed: bool,
+}
+
+/// The results under find, when they are open: the chips, then the rows.
+pub struct ListView<'a> {
+	pub chips: Vec<Chip>,
+	pub rows: Vec<RowView<'a>>,
+	/// The row the arrow keys and Enter act on.
+	pub cursor: Option<usize>,
+	/// The name the editor opened; its row is marked.
+	pub opened: Option<&'a str>,
+	/// Find text is in effect, so an empty list means no match.
+	pub finding: bool,
+}
+
+/// Everything the unlocked window draws (ADR 0022).
+pub struct EditorView<'a> {
+	pub vault_name: String,
+	pub query: &'a str,
+	/// Where the open entry stands among the rows shown, beside find.
+	pub find_count: String,
+	pub entry: &'a PasswordEntry,
+	/// The editor shows a stored entry rather than a new one.
+	pub is_stored: bool,
+	pub revealed: Revealed,
+	pub note: &'a text_editor::Content,
+	/// The entry on screen has edits that are not set.
+	pub draft: bool,
+	/// "N set, not saved", or "Not saved" after a delete or rekey.
+	pub unsaved: Option<String>,
+	pub list: Option<ListView<'a>>,
+	pub generator: Option<GeneratorView<'a>>,
+	pub status: &'a str,
+}
+
+/// Where the popovers sit within the editor body. Inputs and buttons are
+/// one height, so the rows above a popover have a fixed height too.
+const BODY_PADDING: f32 = 14.0;
+const BODY_SPACING: f32 = 12.0;
+const FIELD_SPACING: f32 = 8.0;
+const POPOVER_GAP: f32 = 4.0;
+/// The results open under the find row.
+const LIST_TOP: f32 = BODY_PADDING + BUTTON_HEIGHT as f32 + POPOVER_GAP;
+/// The generator opens under the password row, the third field.
+const GENERATOR_TOP: f32 = BODY_PADDING
+	+ BUTTON_HEIGHT as f32
+	+ BODY_SPACING
+	+ 3.0 * BUTTON_HEIGHT as f32
+	+ 2.0 * FIELD_SPACING
+	+ POPOVER_GAP;
+/// The results never reach the button row.
+const LIST_MAX_HEIGHT: f32 = 520.0;
+
+/// The unlocked window: find across the top, the entry under it, and the
+/// results or the generator floating over the entry when open, so nothing
+/// under them moves.
+pub fn editor_screen(view: EditorView<'_>) -> Element<'_, Message> {
+	let times = timestamps(view.entry);
 	let find_row = row![
 		container(
 			row![
-				styled_query_input("find by name or tag, Enter to open", query)
+				styled_query_input("find by name or tag, Enter to open", view.query)
+					.id("find")
 					.on_input(Message::QueryInput)
 					.on_submit(Message::QuerySubmit),
-				text(find_count)
+				text(view.find_count.clone())
 					.size(13)
 					.font(Font::MONOSPACE)
-					.color(colors::MUTED),
+					.color(colors::MUTED)
+					.wrapping(text::Wrapping::None),
 			]
 			.spacing(10)
 			.align_y(Center)
 		)
 		.width(Fill),
-		outline_icon_text("‹", "Previous match (Ctrl+Left)", Message::NavigatePrevious),
-		outline_icon_text("›", "Next match (Ctrl+Right)", Message::NavigateNext),
+		hint(
+			outline_glyph_button(
+				if view.list.is_some() { "▴" } else { "▾" },
+				view.list.is_some(),
+				Message::ToggleList
+			),
+			"All entries (Ctrl+F to find)"
+		),
+		hint(
+			outline_glyph_button("‹", false, Message::NavigatePrevious),
+			"Previous (Ctrl+Left)"
+		),
+		hint(
+			outline_glyph_button("›", false, Message::NavigateNext),
+			"Next (Ctrl+Right)"
+		),
 	]
 	.spacing(8)
 	.align_y(Center);
 
+	let body = column![
+		find_row,
+		entry_fields(&view),
+		container(action_row(&view)).padding(Padding::ZERO.top(8)),
+	]
+	.spacing(BODY_SPACING)
+	.padding([BODY_PADDING, 16.0]);
+
+	let mut layers = stack![container(body).width(Fill).height(Fill)];
+	if let Some(list) = &view.list {
+		layers = layers.push(popover(LIST_TOP, 16.0, results(list), Message::ToggleList));
+	} else if let Some(generator) = &view.generator {
+		layers = layers.push(popover(
+			GENERATOR_TOP,
+			16.0 + LABEL_WIDTH as f32 + 12.0,
+			generator_panel(generator),
+			Message::ToggleGenerator,
+		));
+	}
+	column![
+		title_bar(Some(&view.vault_name)),
+		layers.width(Fill).height(Fill),
+		status_line(view.status, &times),
+	]
+	.into()
+}
+
+/// A panel floating `top` pixels down the editor body. Clicks above it
+/// reach the editor; a click beside or below it closes it.
+fn popover<'a>(
+	top: f32,
+	left: f32,
+	panel: Element<'a, Message>,
+	close: Message,
+) -> Element<'a, Message> {
+	column![
+		space::vertical().height(top),
+		stack![
+			mouse_area(container(space::horizontal()).width(Fill).height(Fill)).on_press(close),
+			container(opaque(panel))
+				.padding(Padding {
+					top: 0.0,
+					right: 16.0,
+					bottom: 0.0,
+					left,
+				})
+				.width(Fill),
+		]
+		.width(Fill)
+		.height(Fill),
+	]
+	.width(Fill)
+	.height(Fill)
+	.into()
+}
+
+/// The results: chips for All, each tag and the weak passwords, then the
+/// rows in name order, scrolling when they outgrow the panel.
+fn results<'a>(list: &ListView<'a>) -> Element<'a, Message> {
+	let mut chip_row = row![].spacing(6);
+	for chip in &list.chips {
+		chip_row = chip_row.push(chip_button(chip));
+	}
+	let mut rows = column![].spacing(2);
+	if list.rows.is_empty() {
+		rows = rows.push(
+			container(
+				text(if list.finding {
+					"No entry matches."
+				} else {
+					"No entries here."
+				})
+				.size(14)
+				.color(colors::MUTED),
+			)
+			.padding([10, 10]),
+		);
+	}
+	for (index, row_view) in list.rows.iter().enumerate() {
+		rows = rows.push(list_row(
+			row_view,
+			list.cursor == Some(index),
+			list.opened == Some(row_view.name),
+		));
+	}
+	let help = text("↑ ↓ move  |  Enter opens  |  Esc closes")
+		.size(12)
+		.font(Font::MONOSPACE)
+		.color(colors::MUTED);
+	container(
+		column![
+			chip_row.wrap().vertical_spacing(6),
+			scrollable(rows.padding(Padding::ZERO.right(12)))
+				.id("list")
+				.height(Length::Shrink),
+			help,
+		]
+		.spacing(10),
+	)
+	.padding([10, 12])
+	.width(Fill)
+	.max_height(LIST_MAX_HEIGHT)
+	.style(|_| container::Style {
+		background: Some(colors::RAISED.into()),
+		border: border::Border {
+			color: colors::COBALT,
+			width: 1.0,
+			radius: RADIUS.into(),
+		},
+		..Default::default()
+	})
+	.into()
+}
+
+fn chip_button(chip: &Chip) -> Element<'static, Message> {
+	let on = chip.on;
+	let amber = chip.amber;
+	button(text(chip.label.clone()).size(13))
+		.padding([4, 10])
+		.style(move |_: &Theme, status: button::Status| button::Style {
+			background: Some(Background::Color(if on {
+				colors::SEGMENT_ON
+			} else if matches!(status, button::Status::Hovered) {
+				colors::FIELD_HOVER
+			} else {
+				Color::TRANSPARENT
+			})),
+			text_color: if amber {
+				colors::AMBER
+			} else if on {
+				colors::TEXT
+			} else {
+				colors::MUTED
+			},
+			border: border::Border {
+				color: if on { colors::CYAN } else { colors::COBALT },
+				width: 1.0,
+				radius: PILL_RADIUS.into(),
+			},
+			..button::Style::default()
+		})
+		.on_press(Message::FilterChosen(chip.filter.clone()))
+		.into()
+}
+
+fn list_row<'a>(row_view: &RowView<'a>, cursor: bool, open: bool) -> Element<'a, Message> {
+	let initial = row_view
+		.name
+		.chars()
+		.next()
+		.map(|c| c.to_uppercase().to_string())
+		.unwrap_or_default();
+	let tile = container(
+		text(initial)
+			.size(14)
+			.font(Font::MONOSPACE)
+			.color(colors::CYAN),
+	)
+	.width(30)
+	.height(30)
+	.align_x(Center)
+	.align_y(Center)
+	.style(|_| container::Style {
+		background: Some(colors::FIELD.into()),
+		border: border::Border {
+			color: colors::COBALT,
+			width: 1.0,
+			radius: 6.0.into(),
+		},
+		..Default::default()
+	});
+	let mut face = row![
+		tile,
+		container(
+			text(row_view.name)
+				.size(15)
+				.color(colors::TEXT)
+				.wrapping(text::Wrapping::None)
+		)
+		.width(Length::FillPortion(2))
+		.clip(true),
+		container(
+			text(row_view.username)
+				.size(14)
+				.color(colors::MUTED)
+				.wrapping(text::Wrapping::None)
+		)
+		.width(Length::FillPortion(3))
+		.clip(true),
+	]
+	.spacing(12)
+	.align_y(Center);
+	face = face.push(
+		container(
+			text(row_view.flag.unwrap_or_default())
+				.size(12)
+				.font(Font::MONOSPACE)
+				.color(colors::AMBER),
+		)
+		.width(40)
+		.align_x(Alignment::End),
+	);
+	button(face)
+		.width(Fill)
+		.height(ROW_HEIGHT)
+		.padding([0, 8])
+		.style(move |_: &Theme, status: button::Status| button::Style {
+			background: Some(Background::Color(
+				if cursor || matches!(status, button::Status::Hovered) {
+					colors::FIELD_HOVER
+				} else {
+					Color::TRANSPARENT
+				},
+			)),
+			text_color: colors::TEXT,
+			border: border::Border {
+				color: if cursor {
+					colors::CYAN
+				} else if open {
+					colors::COBALT
+				} else {
+					Color::TRANSPARENT
+				},
+				width: 1.0,
+				radius: 6.0.into(),
+			},
+			..button::Style::default()
+		})
+		.on_press(Message::OpenEntry(row_view.name.to_owned()))
+		.into()
+}
+
+fn entry_fields<'a>(view: &EditorView<'a>) -> Element<'a, Message> {
+	let entry = view.entry;
+	let revealed = view.revealed;
 	let password = if revealed.password {
-		password_entry.get_password()
+		entry.get_password()
 	} else {
 		Zeroizing::new(String::new())
 	};
@@ -433,7 +740,7 @@ pub fn password_screen<'a>(
 	)
 	.on_submit(Message::FocusNext);
 	let pin = if revealed.pin {
-		password_entry.get_pin()
+		entry.get_pin()
 	} else {
 		Zeroizing::new(String::new())
 	};
@@ -454,7 +761,7 @@ pub fn password_screen<'a>(
 	.on_submit(Message::FocusNext);
 	// The hidden state holds empty Content in the revealed editor's place.
 	// Only the revealed editor accepts input.
-	let note_editor = styled_text_editor("note".into(), note).placeholder(if revealed.note {
+	let note_editor = styled_text_editor("note".into(), view.note).placeholder(if revealed.note {
 		"note"
 	} else {
 		"hidden, reveal to edit"
@@ -465,17 +772,17 @@ pub fn password_screen<'a>(
 		note_editor
 	};
 
-	let fields = column![
+	column![
 		labeled(
 			"Name",
-			styled_text_input("name", password_entry.get_name())
+			styled_text_input("name", entry.get_name())
 				.on_input(Message::PasswordEntryNameInput)
 				.on_submit(Message::FocusNext)
 		),
 		labeled_row(
 			"Username",
 			row![
-				styled_text_input("username", password_entry.get_username())
+				styled_text_input("username", entry.get_username())
 					.on_input(Message::PasswordEntryUsernameInput)
 					.on_submit(Message::FocusNext),
 				icon_button(CLIPBOARD, Message::CopyUsername),
@@ -488,13 +795,13 @@ pub fn password_screen<'a>(
 				password_input,
 				icon_button(CLIPBOARD, Message::CopyPassword),
 				visibility_button(revealed.password, Message::TogglePasswordVisibility),
+				hint(
+					toggle_icon_button(DIE, view.generator.is_some(), Message::ToggleGenerator),
+					"Generate a password"
+				),
 			]
 			.spacing(6)
 		),
-		row![
-			space::horizontal().width(LABEL_WIDTH + 12),
-			generator_strip(generator)
-		],
 		labeled_row(
 			"PIN",
 			row![
@@ -506,13 +813,13 @@ pub fn password_screen<'a>(
 		),
 		labeled(
 			"URL",
-			styled_text_input("url", password_entry.get_url())
+			styled_text_input("url", entry.get_url())
 				.on_input(Message::PasswordEntryUrlInput)
 				.on_submit(Message::FocusNext)
 		),
 		labeled(
 			"Tags",
-			styled_text_input("tags, comma separated", password_entry.get_tags())
+			styled_text_input("tags, comma separated", entry.get_tags())
 				.on_input(Message::PasswordEntryTagsInput)
 				.on_submit(Message::FocusNext)
 		),
@@ -527,55 +834,69 @@ pub fn password_screen<'a>(
 		.spacing(12)
 		.height(Fill),
 	]
-	.spacing(8)
-	.height(Fill);
+	.spacing(FIELD_SPACING)
+	.height(Fill)
+	.into()
+}
 
-	let marker = if marks.draft {
-		"Entry edited, not set"
-	} else if marks.unsaved {
-		"Set, not saved"
+/// New and Delete on the left; on the right what is not set or saved,
+/// Revert, Set entry and Save. Every button in the row looks alike; the
+/// amber note carries the state.
+fn action_row<'a>(view: &EditorView<'a>) -> Element<'a, Message> {
+	let marker = if view.draft {
+		"Entry edited, not set".to_owned()
 	} else {
-		""
+		view.unsaved.clone().unwrap_or_default()
 	};
-	let action_row = row![
+	row![
 		outline_button(
 			"New",
 			Message::PasswordEntryNew,
 			colors::COBALT,
 			colors::TEXT
 		),
-		outline_button(
+		outline_button_maybe(
 			"Delete",
-			Message::PasswordEntryDelete,
-			colors::ROSE_LINE,
-			colors::ROSE
+			view.is_stored.then_some(Message::PasswordEntryDelete),
+			colors::COBALT,
+			colors::TEXT
 		),
 		space::horizontal(),
 		text(marker).size(13).color(colors::AMBER),
+		outline_button_maybe(
+			"Revert",
+			view.draft.then_some(Message::PasswordEntryRevert),
+			colors::COBALT,
+			colors::TEXT
+		),
 		outline_button(
 			"Set entry",
 			Message::PasswordEntrySet,
-			colors::CYAN,
+			colors::COBALT,
 			colors::TEXT
 		),
-		filled_button("Save", Message::Save),
+		outline_button("Save", Message::Save, colors::COBALT, colors::TEXT),
 	]
 	.spacing(10)
-	.align_y(Center);
-
-	let body = column![
-		find_row,
-		fields,
-		container(action_row).padding(Padding::ZERO.top(8)),
-	]
-	.spacing(12)
-	.padding([14, 16]);
-	column![
-		title_bar(Some(&marks.vault_name)),
-		container(body).width(Fill).height(Fill),
-		status_line(status, &timestamps(password_entry)),
-	]
+	.align_y(Center)
 	.into()
+}
+
+/// A one-glyph outlined button, lit while what it opens is open.
+fn outline_glyph_button<'a>(glyph: &'a str, on: bool, msg: Message) -> Element<'a, Message> {
+	button(text(glyph).size(18).align_x(Center).align_y(Center))
+		.width(ICON_BUTTON_SIZE)
+		.height(ICON_BUTTON_SIZE)
+		.style(move |theme: &Theme, status: button::Status| {
+			let mut style = outline_style(colors::COBALT, colors::TEXT)(theme, status);
+			if on {
+				style.background = Some(Background::Color(colors::TOGGLE_ON));
+				style.border.color = colors::CYAN;
+			}
+			style
+		})
+		.on_press(msg)
+		.into()
 }
 
 /// A field with its label to the left.
@@ -595,9 +916,74 @@ fn labeled_row<'a>(label: &'a str, field: iced::widget::Row<'a, Message>) -> Ele
 	.into()
 }
 
-/// The generator under the password field: characters or words, how many,
-/// which classes, how strong, and the button that makes one.
-fn generator_strip(choice: &GeneratorChoice) -> Element<'_, Message> {
+/// The generator panel under the password field: a masked preview with
+/// reveal and redraw, its strength, characters or words, how many, which
+/// classes, and the button that puts the preview into the field.
+fn generator_panel<'a>(view: &GeneratorView<'a>) -> Element<'a, Message> {
+	let choice = view.choice;
+	// The revealed preview is drawn from the borrowed secret, never copied
+	// into a plain String that outlives its wiped buffer.
+	let shown = match view.preview {
+		Some(secret) if view.revealed => text(secret),
+		Some(secret) => text("•".repeat(secret.chars().count())),
+		None => text("Choose a class and a length in range."),
+	};
+	let preview = row![
+		container(
+			shown
+				.size(15)
+				.font(Font::MONOSPACE)
+				.color(if view.preview.is_some() {
+					colors::TEXT
+				} else {
+					colors::MUTED
+				})
+				.wrapping(text::Wrapping::None)
+		)
+		.width(Fill)
+		.clip(true)
+		.padding([9, 12])
+		.style(|_| container::Style {
+			background: Some(colors::FIELD.into()),
+			border: border::Border {
+				color: colors::COBALT,
+				width: 1.0,
+				radius: RADIUS.into(),
+			},
+			..Default::default()
+		}),
+		visibility_button(view.revealed, Message::TogglePreviewVisibility),
+		hint(
+			icon_button(REFRESH, Message::GeneratePassword),
+			"Draw another"
+		),
+	]
+	.spacing(6)
+	.align_y(Center);
+
+	let bits = generator::whole_bits(&choice.kind());
+	let strong = bits >= health::WEAK_BITS;
+	let meter_color = if strong { colors::GREEN } else { colors::AMBER };
+	let meter = row![
+		progress_bar(0.0..=METER_FULL_BITS, bits as f32)
+			.length(Fill)
+			.girth(4)
+			.style(move |_| progress_bar::Style {
+				background: Background::Color(colors::METER_TRACK),
+				bar: Background::Color(meter_color),
+				border: border::Border {
+					radius: 2.0.into(),
+					..Default::default()
+				},
+			}),
+		text(format!("{bits} bits"))
+			.size(13)
+			.font(Font::MONOSPACE)
+			.color(meter_color),
+	]
+	.spacing(10)
+	.align_y(Center);
+
 	let kind = row![
 		segment("Characters", !choice.words),
 		segment("Words", choice.words),
@@ -630,7 +1016,7 @@ fn generator_strip(choice: &GeneratorChoice) -> Element<'_, Message> {
 		},
 		..Default::default()
 	});
-	let mut strip = row![kind, count].spacing(12).align_y(Center);
+	let mut settings = row![kind, count].spacing(12).align_y(Center);
 	if !choice.words {
 		let c = choice.classes;
 		let mut pills = row![].spacing(4);
@@ -642,50 +1028,28 @@ fn generator_strip(choice: &GeneratorChoice) -> Element<'_, Message> {
 		] {
 			pills = pills.push(pill(label, on, Message::GeneratorClassToggled(bit)));
 		}
-		strip = strip.push(pills);
+		settings = settings.push(pills);
 	}
-	let bits = generator::whole_bits(&choice.kind());
-	let strong = bits >= health::WEAK_BITS;
-	let meter_color = if strong { colors::GREEN } else { colors::AMBER };
-	strip = strip
-		.push(
-			progress_bar(0.0..=METER_FULL_BITS, bits as f32)
-				.length(Fill)
-				.girth(4)
-				.style(move |_| progress_bar::Style {
-					background: Background::Color(colors::METER_TRACK),
-					bar: Background::Color(meter_color),
-					border: border::Border {
-						radius: 2.0.into(),
-						..Default::default()
-					},
-				}),
-		)
-		.push(
-			text(format!("{bits} bits"))
-				.size(13)
-				.font(Font::MONOSPACE)
-				.color(meter_color),
-		)
-		.push(
-			button(
-				row![
-					svg(svg::Handle::from_memory(DIE))
-						.width(16)
-						.height(16)
-						.style(|_, _| svg::Style {
-							color: Some(colors::CYAN)
-						}),
-					text("Generate").size(13).font(BOLD),
-				]
-				.spacing(6)
-				.align_y(Center),
-			)
-			.padding([5, 10])
-			.style(outline_style(colors::CYAN, colors::TOGGLE_ON_TEXT))
-			.on_press(Message::GeneratePassword),
-		);
-	container(strip.padding([8, 10]))
+	let actions = row![
+		space::horizontal(),
+		outline_button(
+			"Close",
+			Message::ToggleGenerator,
+			colors::COBALT,
+			colors::TEXT
+		),
+		outline_button_maybe(
+			"Use this password",
+			view.preview.is_some().then_some(Message::UseGenerated),
+			colors::CYAN,
+			colors::TEXT
+		),
+	]
+	.spacing(10)
+	.align_y(Center);
+
+	container(column![preview, meter, settings, actions].spacing(10))
+		.padding([10, 12])
 		.width(Fill)
 		.style(|_| container::Style {
 			background: Some(colors::RAISED.into()),
@@ -982,24 +1346,33 @@ fn visibility_button(visible: bool, msg: Message) -> Element<'static, Message> {
 }
 
 fn icon_button(data: &'static [u8], msg: Message) -> Element<'static, Message> {
+	icon_button_with(data, colors::CYAN, false, msg)
+}
+
+fn icon_button_with(
+	data: &'static [u8],
+	ink: Color,
+	on: bool,
+	msg: Message,
+) -> Element<'static, Message> {
 	let icon = svg(svg::Handle::from_memory(data))
 		.width(20)
 		.height(20)
-		.style(|_, _| svg::Style {
-			color: Some(colors::CYAN),
-		});
+		.style(move |_, _| svg::Style { color: Some(ink) });
 	button(center(icon))
 		.width(ICON_BUTTON_SIZE)
 		.height(ICON_BUTTON_SIZE)
 		.padding(0)
-		.style(|_: &Theme, status: button::Status| button::Style {
+		.style(move |_: &Theme, status: button::Status| button::Style {
 			background: Some(Background::Color(match status {
 				button::Status::Hovered => colors::FIELD_HOVER,
+				_ if on => colors::TOGGLE_ON,
 				_ => Color::TRANSPARENT,
 			})),
 			border: border::Border {
 				color: match status {
 					button::Status::Hovered => colors::COBALT,
+					_ if on => colors::CYAN,
 					_ => Color::TRANSPARENT,
 				},
 				width: 1.0,
@@ -1011,15 +1384,11 @@ fn icon_button(data: &'static [u8], msg: Message) -> Element<'static, Message> {
 		.into()
 }
 
-/// A one-glyph outlined button with a tooltip, for the find arrows.
-fn outline_icon_text<'a>(glyph: &'a str, hint: &'a str, msg: Message) -> Element<'a, Message> {
+/// A tooltip below any control.
+fn hint<'a>(control: Element<'a, Message>, label: &'a str) -> Element<'a, Message> {
 	tooltip(
-		button(text(glyph).size(18).align_x(Center).align_y(Center))
-			.width(ICON_BUTTON_SIZE)
-			.height(ICON_BUTTON_SIZE)
-			.style(outline_style(colors::COBALT, colors::TEXT))
-			.on_press(msg),
-		container(text(hint).size(13).color(colors::TEXT))
+		control,
+		container(text(label).size(13).color(colors::TEXT))
 			.padding([4, 8])
 			.style(|_| container::Style {
 				background: Some(colors::RAISED.into()),
@@ -1032,6 +1401,48 @@ fn outline_icon_text<'a>(glyph: &'a str, hint: &'a str, msg: Message) -> Element
 			}),
 		tooltip::Position::Bottom,
 	)
+	.into()
+}
+
+/// An icon button that shows whether what it opens is open.
+fn toggle_icon_button(data: &'static [u8], on: bool, msg: Message) -> Element<'static, Message> {
+	icon_button_with(data, colors::CYAN, on, msg)
+}
+
+/// An outlined button that is greyed out without a message.
+fn outline_button_maybe<'a>(
+	label: &'a str,
+	msg: Option<Message>,
+	line: Color,
+	ink: Color,
+) -> Element<'a, Message> {
+	let enabled = msg.is_some();
+	button(
+		text(label)
+			.size(15)
+			.font(BOLD)
+			.align_x(Center)
+			.align_y(Center),
+	)
+	.height(BUTTON_HEIGHT)
+	.padding([0, 16])
+	.style(move |theme: &Theme, status: button::Status| {
+		if enabled {
+			outline_style(line, ink)(theme, status)
+		} else {
+			button::Style {
+				background: Some(Background::Color(Color::TRANSPARENT)),
+				text_color: colors::MUTED,
+				border: border::Border {
+					color: colors::TOGGLE_OFF,
+					width: 1.0,
+					radius: RADIUS.into(),
+				},
+				..button::Style::default()
+			}
+		}
+	})
+	.on_press_maybe(msg)
 	.into()
 }
 
@@ -1152,6 +1563,7 @@ pub fn styled_text_input<'a, Message: Clone + 'a>(
 	text_input(placeholder, value)
 		.padding([9, 12])
 		.size(16)
+		.line_height(FIELD_LINE)
 		.style(field_style(
 			colors::COBALT,
 			colors::COBALT_HOVER,
@@ -1166,6 +1578,7 @@ pub fn styled_query_input<'a, Message: Clone + 'a>(
 	text_input(placeholder, value)
 		.padding([9, 12])
 		.size(16)
+		.line_height(FIELD_LINE)
 		.width(Length::Fill)
 		.style(field_style(colors::GREEN, colors::GREEN, colors::GREEN))
 }

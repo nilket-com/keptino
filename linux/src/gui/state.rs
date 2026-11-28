@@ -1,4 +1,8 @@
-use crate::gui::{clipboard, components, messages::Message, session_lock};
+use crate::gui::{
+	clipboard, components,
+	messages::{ListFilter, Message},
+	session_lock,
+};
 use crate::storage::{
 	PasswordEntry,
 	persistence::{self, OpenedVault},
@@ -7,13 +11,14 @@ use iced::{
 	Element, Event, Size, Subscription, Task, application, keyboard,
 	widget::{
 		Id,
-		operation::{focus_next, focus_previous},
+		operation::{self, RelativeOffset, focus_next, focus_previous},
 		text_editor,
 	},
 	window,
 };
 use libkeptino::generator::{self, Classes, Kind};
 use libkeptino::health;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -112,6 +117,54 @@ impl GeneratorChoice {
 	}
 }
 
+/// A row of the list pane: the core's list projection of one entry,
+/// read without opening its sealed record (ADR 0022).
+pub struct Row {
+	pub name: String,
+	pub username: Zeroizing<String>,
+	/// Wiped with the rest of the unlocked state when the vault locks.
+	pub tags: Vec<Zeroizing<String>>,
+	pub weak: bool,
+}
+
+fn load_rows(db: &crate::storage::Database) -> Vec<Row> {
+	let mut rows = Vec::new();
+	db.visit_list_rows(|name, row| {
+		rows.push(Row {
+			name: name.to_owned(),
+			username: row.username.clone(),
+			tags: row
+				.tags
+				.split(',')
+				.map(str::trim)
+				.filter(|tag| !tag.is_empty())
+				.map(|tag| Zeroizing::new(tag.to_owned()))
+				.collect(),
+			weak: row.weak,
+		});
+	});
+	rows
+}
+
+/// The rows the list pane shows: those the find lands on, if there is find
+/// text, and that the chip lets through. Both lists are in name order.
+fn visible<'a>(
+	rows: &'a [Row],
+	query: &str,
+	matches: &[String],
+	filter: &ListFilter,
+) -> Vec<&'a Row> {
+	let finding = !query.trim().is_empty();
+	rows.iter()
+		.filter(|row| !finding || matches.binary_search(&row.name).is_ok())
+		.filter(|row| match filter {
+			ListFilter::All => true,
+			ListFilter::Tag(tag) => row.tags.iter().any(|own| **own == *tag),
+			ListFilter::Weak => row.weak,
+		})
+		.collect()
+}
+
 struct UnlockedState {
 	query: String,
 	password_entry: PasswordEntry,
@@ -137,11 +190,535 @@ struct UnlockedState {
 	draft: bool,
 	/// Entries were set, deleted or rekeyed since the last save.
 	unsaved: bool,
+	/// The list pane's rows, rebuilt when entries are set or deleted.
+	rows: Vec<Row>,
+	filter: ListFilter,
+	/// The name the editor opened, if it opened a stored entry.
+	opened: Option<String>,
+	/// Entries set since the last save, flagged in the list.
+	/// Entries set since the last save, each with the number of its latest
+	/// set, so a save clears only the sets it carried.
+	set_names: BTreeMap<String, u64>,
+	/// `set_names` as the save in flight snapshotted it.
+	saving_names: BTreeMap<String, u64>,
+	/// Numbers the sets.
+	set_count: u64,
+	generator_open: bool,
+	preview: Option<Zeroizing<String>>,
+	preview_revealed: bool,
+	/// The results float under find.
+	list_open: bool,
+	/// The result row the arrow keys and Enter act on.
+	list_cursor: Option<usize>,
+}
+
+impl UnlockedState {
+	fn new(vault: OpenedVault) -> Self {
+		let rows = load_rows(&vault.database);
+		Self {
+			query: String::new(),
+			password_entry: PasswordEntry::new(),
+			generator: GeneratorChoice::new(),
+			is_password_visible: false,
+			is_pin_visible: false,
+			is_note_visible: false,
+			last_copy_time: None,
+			last_interaction_time: Some(Instant::now()),
+			note: text_editor::Content::new(),
+			status: vault.status(),
+			vault,
+			saving: false,
+			confirm_delete: false,
+			health: None,
+			keys: None,
+			matches: Vec::new(),
+			draft: false,
+			unsaved: false,
+			rows,
+			filter: ListFilter::All,
+			opened: None,
+			set_names: BTreeMap::new(),
+			saving_names: BTreeMap::new(),
+			set_count: 0,
+			generator_open: false,
+			preview: None,
+			preview_revealed: false,
+			list_open: false,
+			list_cursor: None,
+		}
+	}
+
+	/// Opens the results with the cursor on the open entry's row, or the
+	/// first; one popover at a time.
+	fn open_list(&mut self) {
+		let names = self.visible_names();
+		self.list_cursor = self
+			.opened
+			.as_ref()
+			.and_then(|opened| names.iter().position(|name| name == opened))
+			.or((!names.is_empty()).then_some(0));
+		self.list_open = true;
+		self.close_generator();
+	}
+
+	/// Whether the chip in effect lets this entry's row through.
+	fn chip_allows(&self, name: &str) -> bool {
+		let row = self.rows.iter().find(|row| row.name == name);
+		match &self.filter {
+			ListFilter::All => true,
+			ListFilter::Tag(tag) => row.is_some_and(|row| row.tags.iter().any(|own| **own == *tag)),
+			ListFilter::Weak => row.is_some_and(|row| row.weak),
+		}
+	}
+
+	fn close_list(&mut self) {
+		self.list_open = false;
+		self.list_cursor = None;
+	}
+
+	/// Where the open entry stands among the rows shown, when find text or
+	/// a chip narrows them.
+	fn find_count(&self) -> String {
+		if self.query.trim().is_empty() && self.filter == ListFilter::All {
+			return String::new();
+		}
+		let names = self.visible_names();
+		let at = self
+			.opened
+			.as_ref()
+			.and_then(|opened| names.iter().position(|name| name == opened));
+		let count = match (at, names.len()) {
+			(_, 0) => "no match".to_owned(),
+			(Some(i), total) => format!("{} of {total}", i + 1),
+			(None, 1) => "1 match".to_owned(),
+			(None, total) => format!("{total} matches"),
+		};
+		match &self.filter {
+			ListFilter::All => count,
+			ListFilter::Tag(tag) => format!("{tag}: {count}"),
+			ListFilter::Weak => format!("weak: {count}"),
+		}
+	}
+
+	fn visible_names(&self) -> Vec<String> {
+		visible(&self.rows, &self.query, &self.matches, &self.filter)
+			.into_iter()
+			.map(|row| row.name.clone())
+			.collect()
+	}
+
+	/// Shows another entry, or none, in the editor. The reveals, the
+	/// generator's preview and any draft go; a dropped draft is named in the
+	/// returned notice, never saved.
+	fn show(&mut self, entry: Option<PasswordEntry>) -> &'static str {
+		self.is_password_visible = false;
+		self.is_pin_visible = false;
+		self.is_note_visible = false;
+		self.note = text_editor::Content::new();
+		self.opened = entry.as_ref().map(|entry| entry.get_name().to_owned());
+		self.password_entry = entry.unwrap_or_default();
+		self.close_generator();
+		if std::mem::take(&mut self.draft) {
+			" Unset edits were discarded."
+		} else {
+			""
+		}
+	}
+
+	fn close_generator(&mut self) {
+		self.generator_open = false;
+		self.preview = None;
+		self.preview_revealed = false;
+	}
+
+	/// A new preview from the current choice, or none if the choice is out
+	/// of range.
+	fn draw_preview(&mut self) {
+		self.preview = generator::generate(&self.generator.kind());
+	}
+
+	/// Rebuilds the rows and the find after entries changed. A chip whose
+	/// tag or weak entries are gone falls back to All.
+	fn refresh_list(&mut self) {
+		self.rows = load_rows(&self.vault.database);
+		self.matches = self.vault.database.find(&self.query);
+		let keep = match &self.filter {
+			ListFilter::All => true,
+			ListFilter::Tag(tag) => self
+				.rows
+				.iter()
+				.any(|row| row.tags.iter().any(|own| **own == *tag)),
+			ListFilter::Weak => self.rows.iter().any(|row| row.weak),
+		};
+		if !keep {
+			self.filter = ListFilter::All;
+		}
+	}
+
+	fn open(&mut self, name: &str) -> String {
+		let entry = self.vault.database.get_password_entry_by_name(name);
+		let found = entry.is_some();
+		let dropped = self.show(entry);
+		if found {
+			format!("Entry retrieved.{dropped}")
+		} else {
+			format!("No entry named '{name}'.{dropped}")
+		}
+	}
+
+	/// The editor and its popovers as the view draws them.
+	fn editor_view(&self) -> components::EditorView<'_> {
+		let set = self.set_names.len();
+		components::EditorView {
+			vault_name: self.vault.database.meta("db_name").unwrap_or_default(),
+			query: &self.query,
+			find_count: self.find_count(),
+			entry: &self.password_entry,
+			is_stored: self.opened.is_some(),
+			revealed: components::Revealed {
+				password: self.is_password_visible,
+				pin: self.is_pin_visible,
+				note: self.is_note_visible,
+			},
+			note: &self.note,
+			draft: self.draft,
+			unsaved: match (set, self.unsaved) {
+				(0, false) => None,
+				(0, true) => Some("Not saved".into()),
+				(n, _) => Some(format!("{n} set, not saved")),
+			},
+			list: self.list_open.then(|| components::ListView {
+				chips: self.chips(),
+				rows: self.row_views(),
+				cursor: self.list_cursor,
+				opened: self.opened.as_deref(),
+				finding: !self.query.trim().is_empty(),
+			}),
+			generator: self.generator_open.then_some(components::GeneratorView {
+				choice: &self.generator,
+				preview: self.preview.as_ref().map(|secret| secret.as_str()),
+				revealed: self.preview_revealed,
+			}),
+			status: &self.status,
+		}
+	}
+
+	/// All with the count, each tag, and the weak passwords if any.
+	fn chips(&self) -> Vec<components::Chip> {
+		let mut tags: BTreeMap<&str, usize> = BTreeMap::new();
+		for row in &self.rows {
+			for tag in &row.tags {
+				*tags.entry(tag).or_default() += 1;
+			}
+		}
+		let weak = self.rows.iter().filter(|row| row.weak).count();
+		let mut chips = vec![components::Chip {
+			label: format!("All {}", self.rows.len()),
+			on: self.filter == ListFilter::All,
+			amber: false,
+			filter: ListFilter::All,
+		}];
+		for tag in tags.keys() {
+			let filter = ListFilter::Tag((*tag).to_owned());
+			chips.push(components::Chip {
+				label: (*tag).to_owned(),
+				on: self.filter == filter,
+				amber: false,
+				filter,
+			});
+		}
+		if weak > 0 {
+			chips.push(components::Chip {
+				label: format!("{weak} weak"),
+				on: self.filter == ListFilter::Weak,
+				amber: true,
+				filter: ListFilter::Weak,
+			});
+		}
+		chips
+	}
+
+	/// The rows shown, flagged `set` or `weak`.
+	fn row_views(&self) -> Vec<components::RowView<'_>> {
+		visible(&self.rows, &self.query, &self.matches, &self.filter)
+			.into_iter()
+			.map(|row| components::RowView {
+				name: &row.name,
+				username: &row.username,
+				flag: if self.set_names.contains_key(&row.name) {
+					Some("set")
+				} else if row.weak {
+					Some("weak")
+				} else {
+					None
+				},
+			})
+			.collect()
+	}
+
+	/// The list, find, editor and generator messages (ADR 0022). Returns
+	/// None for a message this does not handle.
+	fn update_panes(&mut self, message: &Message) -> Option<Task<Message>> {
+		let db = self.vault.database.clone();
+		match message {
+			Message::QueryInput(text) => {
+				self.matches = db.find(text);
+				self.query = text.clone();
+				self.open_list();
+				// Typing puts the cursor on the first row shown.
+				self.list_cursor = (!self.visible_names().is_empty()).then_some(0);
+			}
+			Message::QuerySubmit => {
+				// The exact name if it is shown, else the first row shown,
+				// else the tag.N form the core still answers.
+				let names = self.visible_names();
+				let query = self.query.trim().to_owned();
+				let cursor = self
+					.list_cursor
+					.filter(|_| self.list_open)
+					.and_then(|index| names.get(index));
+				let pick = cursor
+					.or(names.iter().find(|name| **name == query))
+					.or(names.first())
+					.cloned();
+				self.close_list();
+				if let Some(name) = pick {
+					if self.opened.as_deref() != Some(&name) {
+						self.status = self.open(&name);
+					}
+				} else if let Some(entry) = (!query.is_empty())
+					.then(|| db.query(&query))
+					.flatten()
+					.filter(|entry| self.chip_allows(entry.get_name()))
+				{
+					// The open entry again keeps its edits, as a row press does.
+					if self.opened.as_deref() != Some(entry.get_name()) {
+						let dropped = self.show(Some(entry));
+						self.status = format!("Entry retrieved.{dropped}");
+					}
+				} else {
+					self.status = "No entry matches.".into();
+				}
+			}
+			Message::OpenEntry(name) => {
+				self.close_list();
+				// Pressing the open row again keeps its edits.
+				if self.opened.as_deref() != Some(name) {
+					self.status = self.open(name);
+				}
+			}
+			Message::FilterChosen(filter) => {
+				self.filter = filter.clone();
+				self.list_cursor = (!self.visible_names().is_empty()).then_some(0);
+			}
+			Message::FocusFind => {
+				self.open_list();
+				return Some(operation::focus("find"));
+			}
+			Message::ToggleList => {
+				if self.list_open {
+					self.close_list();
+				} else {
+					// Find takes the keys, so Enter and the arrows act on
+					// the results the toggle opened.
+					self.open_list();
+					return Some(operation::focus("find"));
+				}
+			}
+			Message::ListCursor(step) => {
+				let count = self.visible_names().len();
+				if !self.list_open || count == 0 {
+					return Some(Task::none());
+				}
+				let index = match (self.list_cursor, *step > 0) {
+					(Some(i), true) => (i + 1) % count,
+					(Some(i), false) => (i + count - 1) % count,
+					(None, true) => 0,
+					(None, false) => count - 1,
+				};
+				self.list_cursor = Some(index);
+				// Rows are one height, so this fraction keeps the row in view.
+				let y = if count > 1 {
+					index as f32 / (count - 1) as f32
+				} else {
+					0.0
+				};
+				return Some(operation::snap_to(
+					"list",
+					RelativeOffset {
+						x: None,
+						y: Some(y),
+					},
+				));
+			}
+			Message::Escape => {
+				self.close_list();
+				self.close_generator();
+			}
+			Message::NavigatePrevious | Message::NavigateNext => {
+				let forward = matches!(message, Message::NavigateNext);
+				let which = if forward { "Next" } else { "Previous" };
+				let names = self.visible_names();
+				// No row shown: leave the editor, and its draft, alone.
+				if names.is_empty() {
+					self.status = format!("{which}: no entry shown.");
+					return Some(Task::none());
+				}
+				let at = self
+					.opened
+					.as_ref()
+					.and_then(|opened| names.iter().position(|name| name == opened));
+				let index = match (at, forward) {
+					(Some(i), true) => (i + 1) % names.len(),
+					(Some(i), false) => (i + names.len() - 1) % names.len(),
+					(None, true) => 0,
+					(None, false) => names.len() - 1,
+				};
+				if at != Some(index) {
+					self.status = self.open(&names[index]);
+				}
+				self.close_list();
+			}
+			Message::PasswordEntryNew => {
+				let dropped = self.show(None);
+				self.status = format!("New entry: name it, fill it in, then Set entry.{dropped}");
+			}
+			Message::PasswordEntryRevert => {
+				if !self.draft {
+					self.status = "Nothing to revert.".into();
+				} else {
+					let entry = self
+						.opened
+						.as_ref()
+						.and_then(|name| db.get_password_entry_by_name(name));
+					self.show(entry);
+					self.status = "Unset edits reverted.".into();
+				}
+			}
+			Message::PasswordEntrySet => {
+				let name = self.password_entry.get_name().to_owned();
+				if name.is_empty() {
+					self.status = "Name cannot be empty.".into();
+					return Some(Task::none());
+				}
+				let entry = &self.password_entry;
+				let note = entry.get_note();
+				let (mut stored, is_new) = match db.get_password_entry_by_name(&name) {
+					Some(old) => (old, false),
+					None => {
+						let mut fresh = PasswordEntry::new();
+						fresh.set_name(&name);
+						(fresh, true)
+					}
+				};
+				stored.set_username(entry.get_username());
+				stored.set_password(&entry.get_password());
+				stored.set_pin(&entry.get_pin());
+				stored.set_url(entry.get_url());
+				stored.set_tags(entry.get_tags());
+				stored.set_note(&note);
+				db.set_password_entry(stored.clone());
+				if is_new {
+					self.password_entry = stored;
+				}
+				self.opened = Some(name.clone());
+				self.set_count += 1;
+				self.set_names.insert(name, self.set_count);
+				self.draft = false;
+				self.unsaved = true;
+				// A set can add or drop the tag or name the find matches.
+				self.refresh_list();
+				self.status = if is_new {
+					"New entry set. Save to keep it.".into()
+				} else {
+					"Entry set. Save to keep it.".into()
+				};
+			}
+			Message::PasswordEntryDelete => {
+				let name = self.password_entry.get_name().to_owned();
+				if name.is_empty() {
+					self.status = "Nothing to delete: the entry has no name.".into();
+				} else if !self.confirm_delete {
+					self.confirm_delete = true;
+					self.status = format!("Delete '{name}'? Press Delete again to confirm.");
+				} else {
+					self.confirm_delete = false;
+					if db.delete_password_entry(&name) {
+						self.show(None);
+						self.set_names.remove(&name);
+						self.unsaved = true;
+						self.refresh_list();
+						self.status = format!("Entry '{name}' deleted. Save to make it permanent.");
+					} else {
+						self.status = format!("No saved entry named '{name}'.");
+					}
+				}
+			}
+			Message::PasswordEntryNameInput(text) => self.password_entry.set_name(text),
+			Message::PasswordEntryUsernameInput(text) => self.password_entry.set_username(text),
+			Message::PasswordEntryUrlInput(text) => self.password_entry.set_url(text),
+			Message::PasswordEntryTagsInput(text) => self.password_entry.set_tags(text),
+			// Hidden fields take no input; the inputs are read-only then too.
+			Message::PasswordEntryPasswordInput(text) => {
+				if self.is_password_visible {
+					self.password_entry.set_password(text);
+				}
+			}
+			Message::PasswordEntryPinInput(text) => {
+				if self.is_pin_visible {
+					self.password_entry.set_pin(text);
+				}
+			}
+			Message::PasswordEntryNoteAction(action) => {
+				if self.is_note_visible {
+					self.note.perform(action.clone());
+					self.password_entry
+						.set_note(&Zeroizing::new(self.note.text()));
+				}
+			}
+			Message::ToggleGenerator => {
+				if self.generator_open {
+					self.close_generator();
+				} else {
+					self.close_list();
+					self.generator_open = true;
+					self.preview_revealed = false;
+					self.draw_preview();
+				}
+			}
+			Message::TogglePreviewVisibility => {
+				self.preview_revealed = !self.preview_revealed;
+			}
+			Message::GeneratePassword => {
+				self.draw_preview();
+				if self.preview.is_none() {
+					self.status = format!(
+						"Nothing generated: choose a class and 1 to {} characters, or 1 to {} words.",
+						generator::MAX_LENGTH,
+						generator::MAX_WORDS
+					);
+				}
+			}
+			Message::UseGenerated => {
+				if let Some(secret) = self.preview.take() {
+					self.password_entry.set_password(&secret);
+					self.draft = true;
+					self.close_generator();
+					self.status = format!(
+						"Password filled in, {} bits. Set the entry to keep it.",
+						generator::whole_bits(&self.generator.kind())
+					);
+				}
+			}
+			_ => return None,
+		}
+		Some(Task::none())
+	}
 }
 
 enum AppState {
 	Locked(LockedState),
-	Unlocked(UnlockedState),
+	Unlocked(Box<UnlockedState>),
 }
 
 pub const APP_NAME: &str = "Keptino";
@@ -197,7 +774,22 @@ fn tick_subscription(app_state: &AppState) -> Subscription<Message> {
 }
 
 fn keyboard_subscription(_app_state: &AppState) -> Subscription<Message> {
-	iced::event::listen().map(|event| match event {
+	iced::event::listen_with(|event, status, _window| {
+		// A focused input takes Escape to unfocus itself; the popovers close
+		// on it all the same. Other keys count only when no widget took them.
+		let escape = matches!(
+			&event,
+			Event::Keyboard(keyboard::Event::KeyPressed {
+				key: keyboard::Key::Named(keyboard::key::Named::Escape),
+				..
+			})
+		);
+		(escape || matches!(status, iced::event::Status::Ignored)).then(|| key_message(event))
+	})
+}
+
+fn key_message(event: Event) -> Message {
+	match event {
 		Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
 			// Ctrl+L locks at once, as in KeePassXC; the locked screen ignores it.
 			if let keyboard::Key::Character(character) = key.as_ref()
@@ -211,6 +803,17 @@ fn keyboard_subscription(_app_state: &AppState) -> Subscription<Message> {
 				} else {
 					Message::FocusNext
 				}
+			} else if let keyboard::Key::Character(character) = key.as_ref()
+				&& character.eq_ignore_ascii_case("f")
+				&& modifiers.control()
+			{
+				Message::FocusFind
+			} else if key == keyboard::Key::Named(keyboard::key::Named::ArrowUp) {
+				Message::ListCursor(-1)
+			} else if key == keyboard::Key::Named(keyboard::key::Named::ArrowDown) {
+				Message::ListCursor(1)
+			} else if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+				Message::Escape
 			} else if key == keyboard::Key::Named(keyboard::key::Named::ArrowLeft) {
 				if modifiers.control() {
 					Message::NavigatePrevious
@@ -228,7 +831,7 @@ fn keyboard_subscription(_app_state: &AppState) -> Subscription<Message> {
 			}
 		}
 		_ => Message::None,
-	})
+	}
 }
 
 fn view(app_state: &AppState) -> Element<'_, Message> {
@@ -266,45 +869,10 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 				)
 			}
 		}
-		AppState::Unlocked(UnlockedState {
-			query,
-			password_entry,
-			generator,
-			is_password_visible,
-			is_pin_visible,
-			is_note_visible,
-			last_copy_time: _,
-			last_interaction_time: _,
-			note,
-			status,
-			health,
-			keys,
-			matches,
-			draft,
-			unsaved,
-			vault,
-			..
-		}) => match (health, keys) {
-			(Some(report), _) => components::health_screen(report, status),
-			(None, Some(keys)) => components::keys_screen(keys, status),
-			(None, None) => components::password_screen(
-				query,
-				password_entry,
-				generator,
-				components::Revealed {
-					password: *is_password_visible,
-					pin: *is_pin_visible,
-					note: *is_note_visible,
-				},
-				components::EditorMarks {
-					vault_name: vault.database.meta("db_name").unwrap_or_default(),
-					find: find_position(query, matches, password_entry.get_name()),
-					draft: *draft,
-					unsaved: *unsaved,
-				},
-				note,
-				status,
-			),
+		AppState::Unlocked(state) => match (&state.health, &state.keys) {
+			(Some(report), _) => components::health_screen(report, &state.status),
+			(None, Some(keys)) => components::keys_screen(keys, &state.status),
+			(None, None) => components::editor_screen(state.editor_view()),
 		},
 	}
 }
@@ -401,26 +969,7 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 			*status = err;
 		}
 		Message::UnlockResult(Ok(vault)) => {
-			*app_state = AppState::Unlocked(UnlockedState {
-				query: "".into(),
-				password_entry: PasswordEntry::new(),
-				generator: GeneratorChoice::new(),
-				is_password_visible: false,
-				is_pin_visible: false,
-				is_note_visible: false,
-				last_copy_time: None,
-				last_interaction_time: Some(Instant::now()),
-				note: text_editor::Content::new(),
-				status: vault.status(),
-				vault,
-				saving: false,
-				confirm_delete: false,
-				health: None,
-				keys: None,
-				matches: Vec::new(),
-				draft: false,
-				unsaved: false,
-			});
+			*app_state = AppState::Unlocked(Box::new(UnlockedState::new(vault)));
 		}
 		Message::DbNameChanged(new_db_name) => {
 			*has_slots = persistence::local_has_slots(&new_db_name);
@@ -449,21 +998,6 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 	Task::none()
 }
 
-/// Where the find stands for the status of the find field: the entry's
-/// place among the matches and their count, or the count alone when the
-/// entry on screen is not one of them.
-fn find_position(query: &str, matches: &[String], current: &str) -> Option<(Option<usize>, usize)> {
-	(!query.trim().is_empty()).then(|| {
-		(
-			matches
-				.iter()
-				.position(|name| name == current)
-				.map(|i| i + 1),
-			matches.len(),
-		)
-	})
-}
-
 /// The key number in a "Key N did not answer" message from a removal.
 fn missing_key_number(err: &str) -> Option<usize> {
 	err.strip_prefix("Key ")?
@@ -474,30 +1008,19 @@ fn missing_key_number(err: &str) -> Option<usize> {
 }
 
 fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> {
-	let AppState::Unlocked(UnlockedState {
-		query,
-		password_entry,
-		generator: choice,
+	let AppState::Unlocked(state) = app_state else {
+		unreachable!("update_unlocked called with locked state")
+	};
+	let UnlockedState {
 		is_password_visible,
 		is_pin_visible,
 		is_note_visible,
-		last_copy_time,
 		last_interaction_time,
-		note,
 		status,
-		vault,
-		saving,
 		confirm_delete,
-		health,
-		keys,
-		matches,
 		draft,
-		unsaved,
-	}) = app_state
-	else {
-		unreachable!("update_unlocked called with locked state")
-	};
-	let db = &vault.database;
+		..
+	} = &mut **state;
 	const IDLE_MESSAGE: &str = "Idle time remaining:";
 	match message {
 		Message::None | Message::Tick => {}
@@ -526,219 +1049,40 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 	{
 		*draft = true;
 	}
-	// Showing another entry, or none, drops the reveals and any draft; a
-	// draft dropped this way is named, never saved.
-	let show = |entry: Option<PasswordEntry>,
-	            password_entry: &mut PasswordEntry,
-	            note: &mut text_editor::Content,
-	            revealed: [&mut bool; 3],
-	            draft: &mut bool|
-	 -> &'static str {
-		for flag in revealed {
-			*flag = false;
-		}
-		*note = text_editor::Content::new();
-		*password_entry = entry.unwrap_or_default();
-		if std::mem::take(draft) {
-			" Unset edits were discarded."
-		} else {
-			""
-		}
+	if let AppState::Unlocked(state) = app_state
+		&& let Some(task) = state.update_panes(&message)
+	{
+		return task;
+	}
+	let AppState::Unlocked(state) = app_state else {
+		unreachable!("update_unlocked called with locked state")
 	};
+	let UnlockedState {
+		query: _,
+		password_entry,
+		generator: choice,
+		is_password_visible,
+		is_pin_visible,
+		is_note_visible,
+		last_copy_time,
+		last_interaction_time,
+		note,
+		status,
+		vault,
+		saving,
+		confirm_delete: _,
+		health,
+		keys,
+		draft: _,
+		unsaved,
+		set_names,
+		saving_names,
+		generator_open,
+		preview,
+		..
+	} = &mut **state;
+	let db = &vault.database;
 	match message {
-		Message::QueryInput(new_text) => {
-			*matches = db.find(&new_text);
-			*query = new_text;
-		}
-		Message::QuerySubmit => {
-			// The exact name if there is one, else the first match, else the
-			// tag.N form the core still answers.
-			let pick = matches
-				.iter()
-				.find(|name| name.as_str() == query.trim())
-				.or(matches.first())
-				.and_then(|name| db.get_password_entry_by_name(name))
-				.or_else(|| db.query(query.trim()));
-			let found = pick.is_some();
-			let dropped = show(
-				pick,
-				password_entry,
-				note,
-				[is_password_visible, is_pin_visible, is_note_visible],
-				draft,
-			);
-			*status = if found {
-				format!("Entry retrieved.{dropped}")
-			} else {
-				format!("No entry matches.{dropped}")
-			};
-		}
-		Message::PasswordEntryNew => {
-			let dropped = show(
-				None,
-				password_entry,
-				note,
-				[is_password_visible, is_pin_visible, is_note_visible],
-				draft,
-			);
-			*status = format!("New entry: name it, fill it in, then Set entry.{dropped}");
-		}
-		Message::PasswordEntryNameInput(new_text) => {
-			password_entry.set_name(&new_text);
-		}
-		Message::PasswordEntryUsernameInput(new_text) => {
-			password_entry.set_username(&new_text);
-		}
-		Message::PasswordEntryPasswordInput(new_text) => {
-			if *is_password_visible {
-				password_entry.set_password(&new_text);
-			}
-		}
-		Message::PasswordEntryPinInput(new_text) => {
-			if *is_pin_visible {
-				password_entry.set_pin(&new_text);
-			}
-		}
-		Message::PasswordEntryUrlInput(new_text) => {
-			password_entry.set_url(&new_text);
-		}
-		Message::PasswordEntryTagsInput(new_text) => {
-			password_entry.set_tags(&new_text);
-		}
-		Message::PasswordEntryNoteAction(action) => {
-			if *is_note_visible {
-				note.perform(action);
-				password_entry.set_note(&Zeroizing::new(note.text()));
-			}
-		}
-		Message::NavigatePrevious | Message::NavigateNext => {
-			let forward = matches!(message, Message::NavigateNext);
-			let current = password_entry.get_name().to_owned();
-			let which = if forward { "Next" } else { "Previous" };
-			// With find text the arrows step through its matches, wrapping,
-			// and with no match they leave the editor and its draft alone.
-			// Only an empty find walks every entry.
-			if !query.trim().is_empty() && matches.is_empty() {
-				*status = format!("{which}: no entry matches.");
-				return Task::none();
-			}
-			let pick = if query.trim().is_empty() {
-				if forward {
-					db.next(&current)
-				} else {
-					db.previous(&current)
-				}
-			} else {
-				let at = matches.iter().position(|name| *name == current);
-				let index = match (at, forward) {
-					(Some(i), true) => (i + 1) % matches.len(),
-					(Some(i), false) => (i + matches.len() - 1) % matches.len(),
-					(None, true) => 0,
-					(None, false) => matches.len() - 1,
-				};
-				db.get_password_entry_by_name(&matches[index])
-			};
-			let found = pick.is_some();
-			let dropped = show(
-				pick,
-				password_entry,
-				note,
-				[is_password_visible, is_pin_visible, is_note_visible],
-				draft,
-			);
-			*status = if found {
-				format!("{which} entry retrieved.{dropped}")
-			} else {
-				format!("{which} entry not retrieved.{dropped}")
-			};
-		}
-		Message::PasswordEntrySet => {
-			let name = password_entry.get_name();
-			let note_string = password_entry.get_note();
-			if !name.is_empty() {
-				if let Some(mut old_entry) = db.get_password_entry_by_name(name) {
-					old_entry.set_username(password_entry.get_username());
-					old_entry.set_password(&password_entry.get_password());
-					old_entry.set_pin(&password_entry.get_pin());
-					old_entry.set_url(password_entry.get_url());
-					old_entry.set_tags(password_entry.get_tags());
-					old_entry.set_note(&note_string);
-					db.set_password_entry(old_entry);
-					*draft = false;
-					*unsaved = true;
-					// A set can add or drop the tag or name the find matches.
-					*matches = db.find(query);
-					*status = "Entry set. Save to keep it.".to_string();
-				} else {
-					let mut new_entry = PasswordEntry::new();
-					new_entry.set_name(name);
-					new_entry.set_username(password_entry.get_username());
-					new_entry.set_password(&password_entry.get_password());
-					new_entry.set_pin(&password_entry.get_pin());
-					new_entry.set_url(password_entry.get_url());
-					new_entry.set_tags(password_entry.get_tags());
-					new_entry.set_note(&note_string);
-					db.set_password_entry(new_entry.clone());
-					*password_entry = new_entry;
-					*draft = false;
-					*unsaved = true;
-					*matches = db.find(query);
-					*status = "New entry set. Save to keep it.".to_string();
-				}
-			} else {
-				*status = "Name cannot be empty.".to_string();
-			}
-		}
-		Message::PasswordEntryDelete => {
-			let name = password_entry.get_name().to_owned();
-			if name.is_empty() {
-				*status = "Nothing to delete: the entry has no name.".to_string();
-			} else if !*confirm_delete {
-				*confirm_delete = true;
-				*status = format!("Delete '{name}'? Press Delete again to confirm.");
-			} else {
-				*confirm_delete = false;
-				if db.delete_password_entry(&name) {
-					show(
-						None,
-						password_entry,
-						note,
-						[is_password_visible, is_pin_visible, is_note_visible],
-						draft,
-					);
-					*unsaved = true;
-					*matches = db.find(query);
-					*status = format!("Entry '{name}' deleted. Save to make it permanent.");
-				} else {
-					*status = format!("No saved entry named '{name}'.");
-				}
-			}
-		}
-		Message::GeneratePassword => {
-			let kind = choice.kind();
-			match generator::generate(&kind) {
-				Some(secret) => {
-					password_entry.set_password(&secret);
-					*is_password_visible = true;
-					*draft = true;
-					let made = match kind {
-						Kind::Characters { length, .. } => format!("{length} characters"),
-						Kind::Passphrase { words } => format!("{words} words"),
-					};
-					*status = format!(
-						"Generated {made}, {} bits. Set the entry to keep it.",
-						generator::whole_bits(&kind)
-					);
-				}
-				None => {
-					*status = format!(
-						"Nothing generated: choose a class and 1 to {} characters, or 1 to {} words.",
-						generator::MAX_LENGTH,
-						generator::MAX_WORDS
-					);
-				}
-			}
-		}
 		Message::GeneratorKindToggled => {
 			choice.words = !choice.words;
 			choice.count = if choice.words {
@@ -746,10 +1090,18 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			} else {
 				generator::LENGTH.to_string()
 			};
+			// The open panel's preview follows the choice.
+			if *generator_open {
+				*preview = generator::generate(&choice.kind());
+			}
 		}
 		Message::GeneratorCountInput(text) => {
 			if text.len() <= 3 && text.bytes().all(|b| b.is_ascii_digit()) {
 				choice.count = text;
+			}
+			// The open panel's preview follows the choice.
+			if *generator_open {
+				*preview = generator::generate(&choice.kind());
 			}
 		}
 		Message::GeneratorCountStep(step) => {
@@ -767,6 +1119,10 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 			.clamp(1, max);
 			choice.count = next.to_string();
+			// The open panel's preview follows the choice.
+			if *generator_open {
+				*preview = generator::generate(&choice.kind());
+			}
 		}
 		Message::GeneratorClassToggled(bit) => {
 			let c = &mut choice.classes;
@@ -775,6 +1131,10 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				2 => c.lower = !c.lower,
 				4 => c.digits = !c.digits,
 				_ => c.symbols = !c.symbols,
+			}
+			// The open panel's preview follows the choice.
+			if *generator_open {
+				*preview = generator::generate(&choice.kind());
 			}
 		}
 		Message::ShowHealth => {
@@ -944,14 +1304,21 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 			*saving = true;
 			*unsaved = false;
+			*saving_names = set_names.clone();
 			*status = "Saving Database...".to_string();
 			return Task::perform(vault.save(), Message::SaveResult);
 		}
 		Message::SaveResult(msg) => {
 			*saving = false;
 			// Saved locally counts as saved; nothing written does not.
-			if msg.starts_with("Not saved") || msg.starts_with("Local save failed") {
+			let failed = msg.starts_with("Not saved") || msg.starts_with("Local save failed");
+			let carried = std::mem::take(saving_names);
+			if failed {
 				*unsaved = true;
+			} else {
+				// A set made while the save ran is newer than the one it
+				// wrote, and stays flagged; a deleted name is already gone.
+				set_names.retain(|name, number| carried.get(name) != Some(number));
 			}
 			*status = msg;
 		}
@@ -1105,7 +1472,7 @@ mod tests {
 	}
 
 	#[test]
-	fn delete_needs_a_second_press_and_generate_reveals_a_fresh_password() {
+	fn delete_needs_a_second_press_and_the_generator_fills_a_fresh_password() {
 		let mut app = unlocked();
 		let _ = update(&mut app, Message::PasswordEntryDelete);
 		let AppState::Unlocked(state) = &app else {
@@ -1146,16 +1513,27 @@ mod tests {
 				.is_none()
 		);
 		assert!(state.password_entry.get_name().is_empty());
-		let _ = update(&mut app, Message::GeneratePassword);
-		let AppState::Unlocked(state) = &app else {
-			panic!()
-		};
-		assert!(state.is_password_visible);
-		assert_eq!(state.password_entry.get_password().len(), generator::LENGTH);
+		// The die opens the panel with a preview; the field is untouched
+		// until the preview is used, and then it is a draft.
+		let _ = update(&mut app, Message::ToggleGenerator);
+		let state = editor(&app);
+		assert_eq!(state.preview.as_ref().unwrap().len(), generator::LENGTH);
+		assert!(state.password_entry.get_password().is_empty());
+		assert!(!state.draft);
+		let _ = view(&app);
+		let preview = state.preview.clone().unwrap();
+		let _ = update(&mut app, Message::UseGenerated);
+		let state = editor(&app);
+		assert_eq!(*state.password_entry.get_password(), *preview);
+		assert!(state.draft && !state.generator_open && state.preview.is_none());
 		assert!(
-			state
-				.status
-				.starts_with("Generated 24 characters, 152 bits.")
+			!state.is_password_visible,
+			"using a preview reveals nothing"
+		);
+		assert!(
+			state.status.starts_with("Password filled in, 152 bits."),
+			"{}",
+			state.status
 		);
 	}
 
@@ -1344,16 +1722,13 @@ mod tests {
 	#[test]
 	fn the_die_follows_the_generator_choice() {
 		let mut app = unlocked();
+		let preview = |app: &AppState| editor(app).preview.clone();
+		let _ = update(&mut app, Message::ToggleGenerator);
 		let _ = update(&mut app, Message::GeneratorKindToggled);
-		let _ = update(&mut app, Message::GeneratePassword);
-		let AppState::Unlocked(state) = &app else {
-			panic!()
-		};
-		assert_eq!(state.generator.count, "6");
-		assert!(state.status.starts_with("Generated 6 words, 77 bits."));
+		assert_eq!(editor(&app).generator.count, "6");
 		// Six words of 3 to 9 letters joined by five hyphens; four table
 		// words carry a hyphen of their own, so the count is a lower bound.
-		let phrase = state.password_entry.get_password();
+		let phrase = preview(&app).unwrap();
 		assert!(phrase.split(generator::SEPARATOR).count() >= 6);
 		assert!((23..=59).contains(&phrase.len()), "{}", *phrase);
 		assert!(phrase.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'));
@@ -1365,24 +1740,29 @@ mod tests {
 		}
 		let _ = update(&mut app, Message::GeneratorCountInput("6x".into()));
 		let _ = update(&mut app, Message::GeneratorCountInput("6".into()));
-		let _ = update(&mut app, Message::GeneratePassword);
-		let AppState::Unlocked(state) = &app else {
-			panic!()
-		};
-		assert_eq!(state.generator.count, "6");
-		assert!(state.status.starts_with("Generated 6 characters, 19 bits."));
-		let pin = state.password_entry.get_password();
+		assert_eq!(editor(&app).generator.count, "6");
+		let pin = preview(&app).unwrap();
 		assert_eq!(pin.len(), 6);
 		assert!(pin.bytes().all(|b| b.is_ascii_digit()));
+		let _ = update(&mut app, Message::GeneratePassword);
+		assert_eq!(preview(&app).unwrap().len(), 6, "redraw keeps the choice");
 		let _ = view(&app);
 
+		// No class left: no preview, and Use does nothing.
 		let _ = update(&mut app, Message::GeneratorClassToggled(4));
+		assert!(preview(&app).is_none());
 		let _ = update(&mut app, Message::GeneratePassword);
-		let AppState::Unlocked(state) = &app else {
-			panic!()
-		};
-		assert!(state.status.starts_with("Nothing generated"));
-		assert_eq!(state.password_entry.get_password().len(), 6);
+		assert!(editor(&app).status.starts_with("Nothing generated"));
+		let _ = update(&mut app, Message::UseGenerated);
+		assert!(editor(&app).generator_open && !editor(&app).draft);
+		let _ = view(&app);
+		// Closing drops the preview; leaving the entry closes the panel.
+		let _ = update(&mut app, Message::GeneratorClassToggled(4));
+		let _ = update(&mut app, Message::ToggleGenerator);
+		assert!(!editor(&app).generator_open && preview(&app).is_none());
+		let _ = update(&mut app, Message::ToggleGenerator);
+		let _ = update(&mut app, Message::PasswordEntryNew);
+		assert!(!editor(&app).generator_open && preview(&app).is_none());
 	}
 
 	/// A vault of four entries, two of them tagged "work".
@@ -1392,7 +1772,7 @@ mod tests {
 			("bank", "money", "b"),
 			("mail", "work", "m"),
 			("router", "", "r"),
-			("wiki", "work", "w"),
+			("wiki", "work", "correct-horse-battery-staple-42"),
 		] {
 			let mut entry = PasswordEntry::new();
 			entry.set_name(name);
@@ -1416,50 +1796,40 @@ mod tests {
 	}
 
 	#[test]
-	fn find_opens_the_first_match_and_the_arrows_step_through_matches() {
+	fn find_opens_the_first_row_and_the_arrows_step_through_the_rows() {
 		let mut app = four_entries();
 		let name = |app: &AppState| editor(app).password_entry.get_name().to_owned();
-		let position = |app: &AppState| {
-			let state = editor(app);
-			find_position(
-				&state.query,
-				&state.matches,
-				state.password_entry.get_name(),
-			)
-		};
-		// No find text: no count, and the arrows walk every entry.
-		assert_eq!(position(&app), None);
+		let shown = |app: &AppState| editor(app).visible_names();
+		// No find text: every row, and the arrows walk them.
+		assert_eq!(shown(&app), ["bank", "mail", "router", "wiki"]);
 		let _ = update(&mut app, Message::NavigateNext);
 		assert_eq!(name(&app), "bank");
 
-		// Zero matches: Enter opens nothing and says so.
+		// Zero matches: Enter opens nothing, leaves the editor, says so.
 		let _ = update(&mut app, Message::QueryInput("nothing".into()));
-		assert_eq!(position(&app), Some((None, 0)));
+		assert!(shown(&app).is_empty());
 		let _ = update(&mut app, Message::QuerySubmit);
-		assert_eq!(name(&app), "");
+		assert_eq!(name(&app), "bank");
 		assert_eq!(editor(&app).status, "No entry matches.");
 
 		// One match, by part of a name in another case.
 		let _ = update(&mut app, Message::QueryInput("ROUT".into()));
 		let _ = update(&mut app, Message::QuerySubmit);
 		assert_eq!(name(&app), "router");
-		assert_eq!(position(&app), Some((Some(1), 1)));
 		let _ = update(&mut app, Message::NavigateNext);
-		assert_eq!(name(&app), "router", "one match wraps onto itself");
+		assert_eq!(name(&app), "router", "one row wraps onto itself");
 
 		// Several matches: a tag. Enter opens the first; the arrows wrap.
 		let _ = update(&mut app, Message::QueryInput("work".into()));
-		assert_eq!(position(&app), Some((None, 2)));
+		assert_eq!(shown(&app), ["mail", "wiki"]);
 		let _ = update(&mut app, Message::QuerySubmit);
 		assert_eq!(name(&app), "mail");
-		assert_eq!(position(&app), Some((Some(1), 2)));
 		let _ = update(&mut app, Message::NavigateNext);
 		assert_eq!(name(&app), "wiki");
 		let _ = update(&mut app, Message::NavigateNext);
 		assert_eq!(name(&app), "mail");
 		let _ = update(&mut app, Message::NavigatePrevious);
 		assert_eq!(name(&app), "wiki");
-		assert_eq!(position(&app), Some((Some(2), 2)));
 
 		// A query with no match: the arrows keep the entry and its draft.
 		let _ = update(&mut app, Message::PasswordEntryUrlInput("x".into()));
@@ -1477,10 +1847,10 @@ mod tests {
 		assert_eq!(name(&app), "mail");
 		let _ = update(&mut app, Message::PasswordEntryTagsInput("".into()));
 		let _ = update(&mut app, Message::PasswordEntrySet);
-		assert_eq!(editor(&app).matches, ["wiki"]);
+		assert_eq!(shown(&app), ["wiki"]);
 		let _ = update(&mut app, Message::PasswordEntryTagsInput("work".into()));
 		let _ = update(&mut app, Message::PasswordEntrySet);
-		assert_eq!(editor(&app).matches, ["mail", "wiki"]);
+		assert_eq!(shown(&app), ["mail", "wiki"]);
 		let _ = update(&mut app, Message::PasswordEntryTagsInput("".into()));
 		let _ = update(&mut app, Message::PasswordEntrySet);
 		let _ = update(&mut app, Message::NavigateNext);
@@ -1537,7 +1907,7 @@ mod tests {
 		assert!(editor(&app).unsaved, "a failed write is still unsaved");
 
 		// Leaving the draft discards it, and says so.
-		let _ = update(&mut app, Message::NavigateNext);
+		let _ = update(&mut app, Message::OpenEntry("bank".into()));
 		let state = editor(&app);
 		assert!(!state.draft);
 		assert!(
@@ -1591,8 +1961,258 @@ mod tests {
 		let _ = update(&mut app, Message::GeneratorCountInput("0".into()));
 		let _ = update(&mut app, Message::GeneratorCountStep(1));
 		assert_eq!(count(&app), "1");
-		let _ = update(&mut app, Message::GeneratePassword);
+		let _ = update(&mut app, Message::ToggleGenerator);
+		let _ = update(&mut app, Message::UseGenerated);
 		assert!(editor(&app).draft, "a generated password is a draft");
+	}
+
+	#[test]
+	fn chips_and_find_narrow_the_list_together() {
+		let mut app = four_entries();
+		let shown = |app: &AppState| editor(app).visible_names();
+		let chips = |app: &AppState| {
+			editor(app)
+				.chips()
+				.iter()
+				.map(|chip| chip.label.clone())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(chips(&app), ["All 4", "money", "work", "3 weak"]);
+		let _ = update(
+			&mut app,
+			Message::FilterChosen(ListFilter::Tag("work".into())),
+		);
+		assert_eq!(shown(&app), ["mail", "wiki"]);
+		let _ = update(&mut app, Message::QueryInput("m".into()));
+		assert_eq!(shown(&app), ["mail"]);
+		let _ = update(&mut app, Message::FilterChosen(ListFilter::Weak));
+		assert_eq!(shown(&app), ["mail"]);
+		let _ = update(&mut app, Message::QueryInput(String::new()));
+		assert_eq!(shown(&app), ["bank", "mail", "router"]);
+		let _ = view(&app);
+
+		// The chip's tag leaves every entry: the list falls back to All.
+		let _ = update(
+			&mut app,
+			Message::FilterChosen(ListFilter::Tag("money".into())),
+		);
+		let _ = update(&mut app, Message::OpenEntry("bank".into()));
+		let _ = update(&mut app, Message::PasswordEntryTagsInput("".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert_eq!(editor(&app).filter, ListFilter::All);
+		assert_eq!(chips(&app), ["All 4", "work", "3 weak"]);
+
+		// With no row shown, the arrows leave the editor and its draft.
+		let _ = update(&mut app, Message::QueryInput("nothing".into()));
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("x".into()));
+		for arrow in [Message::NavigateNext, Message::NavigatePrevious] {
+			let _ = update(&mut app, arrow);
+			assert_eq!(editor(&app).password_entry.get_name(), "bank");
+			assert!(editor(&app).draft);
+		}
+	}
+
+	#[test]
+	fn a_row_opens_its_entry_and_revert_restores_the_opened_one() {
+		let mut app = four_entries();
+		let _ = update(&mut app, Message::OpenEntry("mail".into()));
+		assert_eq!(editor(&app).opened.as_deref(), Some("mail"));
+		let _ = update(&mut app, Message::PasswordEntryUsernameInput("oops".into()));
+		// The open row again keeps the edit; another row drops it, and says so.
+		let _ = update(&mut app, Message::OpenEntry("mail".into()));
+		assert_eq!(editor(&app).password_entry.get_username(), "oops");
+		let _ = update(&mut app, Message::OpenEntry("wiki".into()));
+		let state = editor(&app);
+		assert_eq!(state.password_entry.get_name(), "wiki");
+		assert!(!state.draft);
+		assert!(
+			state.status.ends_with("Unset edits were discarded."),
+			"{}",
+			state.status
+		);
+
+		// Revert puts the opened entry back, even after its name was edited.
+		let _ = update(&mut app, Message::PasswordEntryNameInput("wiki2".into()));
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("u".into()));
+		let _ = update(&mut app, Message::PasswordEntryRevert);
+		let state = editor(&app);
+		assert_eq!(state.password_entry.get_name(), "wiki");
+		assert_eq!(state.password_entry.get_url(), "");
+		assert!(!state.draft);
+		assert_eq!(state.status, "Unset edits reverted.");
+		let _ = update(&mut app, Message::PasswordEntryRevert);
+		assert_eq!(editor(&app).status, "Nothing to revert.");
+
+		// A new entry reverts to empty.
+		let _ = update(&mut app, Message::PasswordEntryNew);
+		let _ = update(&mut app, Message::PasswordEntryNameInput("new".into()));
+		let _ = update(&mut app, Message::PasswordEntryRevert);
+		assert_eq!(editor(&app).password_entry.get_name(), "");
+		assert!(editor(&app).opened.is_none());
+		let _ = view(&app);
+	}
+
+	#[test]
+	fn the_set_flag_clears_on_a_save_and_stays_after_a_failed_one() {
+		let mut app = four_entries();
+		let flag = |app: &AppState, name: &str| {
+			editor(app)
+				.row_views()
+				.into_iter()
+				.find(|row| row.name == name)
+				.and_then(|row| row.flag)
+		};
+		assert_eq!(flag(&app, "wiki"), None);
+		assert_eq!(flag(&app, "bank"), Some("weak"));
+		let _ = update(&mut app, Message::OpenEntry("wiki".into()));
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("u".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert_eq!(flag(&app, "wiki"), Some("set"));
+		assert_eq!(
+			editor(&app).editor_view().unsaved.as_deref(),
+			Some("1 set, not saved")
+		);
+
+		let _ = update(&mut app, Message::Save);
+		assert_eq!(
+			flag(&app, "wiki"),
+			Some("set"),
+			"flagged until the save lands"
+		);
+		assert_eq!(
+			editor(&app).editor_view().unsaved.as_deref(),
+			Some("1 set, not saved")
+		);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Local save failed. Check disk space and file permissions.".into()),
+		);
+		assert_eq!(flag(&app, "wiki"), Some("set"));
+		let _ = update(&mut app, Message::Save);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Saved locally and to the bucket.".into()),
+		);
+		assert_eq!(flag(&app, "wiki"), None);
+		assert_eq!(editor(&app).editor_view().unsaved, None);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Saved locally and to the bucket.".into()),
+		);
+		assert_eq!(flag(&app, "wiki"), None);
+
+		// Set again while a save runs: one entry counted once, still set after.
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("v".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		let _ = update(&mut app, Message::Save);
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("w".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert_eq!(
+			editor(&app).editor_view().unsaved.as_deref(),
+			Some("1 set, not saved")
+		);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Saved locally and to the bucket.".into()),
+		);
+		assert_eq!(flag(&app, "wiki"), Some("set"), "the newer set is unsaved");
+		let _ = update(&mut app, Message::Save);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Saved locally and to the bucket.".into()),
+		);
+		assert_eq!(flag(&app, "wiki"), None);
+
+		// A delete is unsaved with nothing set.
+		let _ = update(&mut app, Message::OpenEntry("router".into()));
+		let _ = update(&mut app, Message::PasswordEntryDelete);
+		let _ = update(&mut app, Message::PasswordEntryDelete);
+		assert_eq!(
+			editor(&app).editor_view().unsaved.as_deref(),
+			Some("Not saved")
+		);
+		assert!(
+			editor(&app)
+				.visible_names()
+				.iter()
+				.all(|name| name != "router")
+		);
+		let _ = view(&app);
+	}
+
+	#[test]
+	fn the_results_float_under_find_and_the_keys_drive_them() {
+		let mut app = four_entries();
+		let state = |app: &AppState| {
+			let state = editor(app);
+			(state.list_open, state.list_cursor)
+		};
+		// Typing opens the results with the cursor on the first row.
+		let _ = update(&mut app, Message::QueryInput("i".into()));
+		assert_eq!(editor(&app).visible_names(), ["mail", "wiki"]);
+		assert_eq!(state(&app), (true, Some(0)));
+		let _ = view(&app);
+		// The arrows move the cursor and wrap; Enter opens its row and closes.
+		let _ = update(&mut app, Message::ListCursor(1));
+		assert_eq!(state(&app), (true, Some(1)));
+		let _ = update(&mut app, Message::ListCursor(1));
+		assert_eq!(state(&app), (true, Some(0)));
+		let _ = update(&mut app, Message::ListCursor(-1));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(editor(&app).password_entry.get_name(), "wiki");
+		assert_eq!(state(&app), (false, None));
+		// Closed, the arrow keys do nothing.
+		let _ = update(&mut app, Message::ListCursor(1));
+		assert_eq!(state(&app), (false, None));
+
+		// The toggle opens every row shown, the cursor on the open entry.
+		let _ = update(&mut app, Message::QueryInput(String::new()));
+		let _ = update(&mut app, Message::Escape);
+		assert_eq!(state(&app), (false, None));
+		let _ = update(&mut app, Message::ToggleList);
+		assert_eq!(state(&app), (true, Some(3)));
+		assert_eq!(editor(&app).editor_view().list.unwrap().rows.len(), 4);
+		// One popover at a time.
+		let _ = update(&mut app, Message::ToggleGenerator);
+		assert!(editor(&app).generator_open && !editor(&app).list_open);
+		let _ = view(&app);
+		let _ = update(&mut app, Message::FocusFind);
+		assert!(!editor(&app).generator_open && editor(&app).list_open);
+		let _ = update(&mut app, Message::OpenEntry("bank".into()));
+		assert_eq!(state(&app), (false, None));
+		assert_eq!(editor(&app).find_count(), "");
+		let _ = update(
+			&mut app,
+			Message::FilterChosen(ListFilter::Tag("work".into())),
+		);
+		assert_eq!(editor(&app).find_count(), "work: 2 matches");
+
+		// Enter never opens a row the chip hides, by name or by tag.N.
+		let _ = update(&mut app, Message::FilterChosen(ListFilter::Weak));
+		for query in ["wiki", "work.2"] {
+			let _ = update(&mut app, Message::QueryInput(query.into()));
+			let _ = update(&mut app, Message::QuerySubmit);
+			assert_eq!(editor(&app).password_entry.get_name(), "bank", "{query}");
+			assert_eq!(editor(&app).status, "No entry matches.");
+		}
+		let _ = update(&mut app, Message::FilterChosen(ListFilter::All));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(
+			editor(&app).password_entry.get_name(),
+			"wiki",
+			"tag.N reaches it"
+		);
+		// tag.N naming the open entry keeps its draft.
+		let _ = update(
+			&mut app,
+			Message::PasswordEntryUrlInput("https://draft.example".into()),
+		);
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(
+			editor(&app).password_entry.get_url(),
+			"https://draft.example"
+		);
+		assert!(editor(&app).draft);
 	}
 
 	#[test]

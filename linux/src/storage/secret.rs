@@ -113,6 +113,9 @@ impl SecretMemory {
 /// kernel's direct map, mapped only for the duration of one operation.
 impl KeyStore for SecretMemory {
 	type Error = io::Error;
+	/// The list pane shows usernames, tags and a weak flag without opening
+	/// sealed records (ADR 0022). Passwords, PINs and notes stay sealed.
+	const INDEX_LIST_ROWS: bool = true;
 
 	fn from_bytes(key: &[u8; 32]) -> io::Result<Self> {
 		let memory = Self::new_pages(1)?;

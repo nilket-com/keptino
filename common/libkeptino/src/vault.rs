@@ -861,7 +861,8 @@ impl<K: KeyStore> Database<K> {
 	pub fn names(&self) -> Vec<String> {
 		self.read().names()
 	}
-	/// Visits the Android list projection without opening any sealed record.
+	/// Visits the list projection (ADR 0020, ADR 0022) without opening any
+	/// sealed record.
 	pub fn visit_list_rows(&self, mut visit: impl FnMut(&str, &ListRow)) {
 		let store = self.read();
 		let prefix = password_key("");

@@ -13,7 +13,7 @@ spacing and radii from this document.
 | Ground, field | `#040408` | Text fields and password inputs |
 | Ground, raised | `#0B0D14` | Cards, list surfaces, dialogs, bottom sheets |
 | Border, cobalt | `#1E4D94` | Default field, card and button borders |
-| Accent, cyan | `#20B4CC` | Actions, active focus borders, the one filled primary button per screen |
+| Accent, cyan | `#20B4CC` | Actions, active focus borders, filled primary button when used |
 | Brand / find, green | `#50B450` | Keptino brand mark, find input border, clean/saved state |
 | Status, sky | `#74B8F4` | Status line text and neutral readouts |
 | Caution, amber | `#D8B36A` | Unsaved/unset edits, weak passwords, cautions |
@@ -41,10 +41,12 @@ spacing and radii from this document.
 
 ## 4. Interaction rules
 
-- **One filled cyan button per screen**: reserved for the committing action
-  of that view (for example, Unlock on the locked screen, Save in the Linux
-  editor and Android vault list header, Set entry on the Android entry
-  screen, Use this password in the Android generator sheet).
+- **At most one filled cyan button per screen**: reserved for the committing
+  action of ceremony and mobile screens (Unlock, Create, Keys, Android
+  vault list `Save`, Android `Set entry`, Android generator `Use this
+  password`). The Linux editor stays calm with no filled or colored action
+  buttons: every button in its action row uses the uniform cobalt outline
+  with primary light text, and the amber note carries the unsaved state.
 - **Set and Save stay separate on both heads**: edits to a working entry
   apply to the open vault only when explicitly set (`Set entry`), and write
   to disk and sync only on `Save`. Accidental keystrokes on one entry are
@@ -56,19 +58,25 @@ spacing and radii from this document.
 
 ## 5. Head layouts
 
-### Linux (ADR 0019)
+### Linux (ADR 0019, ADR 0022)
 
 - **Title bar**: vault name beside labeled icon buttons for vault-level
   actions (`Health`, `Keys`, `Lock`).
-- **Find bar**: green-bordered find input where Enter selects the first
-  match, showing match position and count beside previous/next controls
-  (`Get` removed).
-- **Password generator**: compact strip attached beneath the password field
-  with Characters/Words switch, length stepper, character-class pills,
-  strength bar with whole bits, and Generate button.
-- **Bottom row**: entry actions on the left (`New`, `Delete`), commit
-  actions on the right (`Set entry`, filled cyan `Save`), plus an amber
-  indicator when the current entry has unset edits.
+- **Find bar and results popover**: green-bordered find input across the
+  top with match position and previous/next controls when closed. Typing,
+  pressing the toggle, or `Ctrl+F` opens a floating results popover under
+  find (no layout shift) with `All`, tag and `weak` chips plus scrollable
+  rows showing initial tile, name, non-secret username, and `set`/`weak`
+  flags from the core list projection.
+- **Password generator popover**: die icon on the password field opens a
+  floating generator popover under that field with masked preview, reveal
+  and redraw, strength bar with whole bits, `Characters | Words`, length
+  stepper, class pills, `Close`, and `Use this password`. Only one popover
+  is open at a time.
+- **Bottom row**: entry actions on the left (`New`, `Delete`), and on the
+  right the amber edit/unsaved indicator, `Revert`, `Set entry`, and
+  `Save`. All five buttons use the same cobalt outline with light text;
+  the amber indicator carries the state.
 
 ### Android (ADR 0020)
 
