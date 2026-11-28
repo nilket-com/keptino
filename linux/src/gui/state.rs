@@ -131,6 +131,12 @@ struct UnlockedState {
 	health: Option<Box<health::Report>>,
 	/// The keys screen in place of the editor, if any.
 	keys: Option<Box<KeysScreen>>,
+	/// The names the find text lands on, in navigation order.
+	matches: Vec<String>,
+	/// The entry on screen has edits that are not set.
+	draft: bool,
+	/// Entries were set, deleted or rekeyed since the last save.
+	unsaved: bool,
 }
 
 enum AppState {
@@ -273,6 +279,10 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			status,
 			health,
 			keys,
+			matches,
+			draft,
+			unsaved,
+			vault,
 			..
 		}) => match (health, keys) {
 			(Some(report), _) => components::health_screen(report, status),
@@ -285,6 +295,12 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 					password: *is_password_visible,
 					pin: *is_pin_visible,
 					note: *is_note_visible,
+				},
+				components::EditorMarks {
+					vault_name: vault.database.meta("db_name").unwrap_or_default(),
+					find: find_position(query, matches, password_entry.get_name()),
+					draft: *draft,
+					unsaved: *unsaved,
 				},
 				note,
 				status,
@@ -401,6 +417,9 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				confirm_delete: false,
 				health: None,
 				keys: None,
+				matches: Vec::new(),
+				draft: false,
+				unsaved: false,
 			});
 		}
 		Message::DbNameChanged(new_db_name) => {
@@ -430,6 +449,21 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 	Task::none()
 }
 
+/// Where the find stands for the status of the find field: the entry's
+/// place among the matches and their count, or the count alone when the
+/// entry on screen is not one of them.
+fn find_position(query: &str, matches: &[String], current: &str) -> Option<(Option<usize>, usize)> {
+	(!query.trim().is_empty()).then(|| {
+		(
+			matches
+				.iter()
+				.position(|name| name == current)
+				.map(|i| i + 1),
+			matches.len(),
+		)
+	})
+}
+
 /// The key number in a "Key N did not answer" message from a removal.
 fn missing_key_number(err: &str) -> Option<usize> {
 	err.strip_prefix("Key ")?
@@ -456,6 +490,9 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 		confirm_delete,
 		health,
 		keys,
+		matches,
+		draft,
+		unsaved,
 	}) = app_state
 	else {
 		unreachable!("update_unlocked called with locked state")
@@ -475,12 +512,76 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 		}
 	}
+	// Any edit to the entry on screen is a draft until it is set.
+	if matches!(
+		message,
+		Message::PasswordEntryNameInput(_)
+			| Message::PasswordEntryUsernameInput(_)
+			| Message::PasswordEntryUrlInput(_)
+			| Message::PasswordEntryTagsInput(_)
+	) || (*is_password_visible && matches!(message, Message::PasswordEntryPasswordInput(_)))
+		|| (*is_pin_visible && matches!(message, Message::PasswordEntryPinInput(_)))
+		|| (*is_note_visible
+			&& matches!(&message, Message::PasswordEntryNoteAction(action) if action.is_edit()))
+	{
+		*draft = true;
+	}
+	// Showing another entry, or none, drops the reveals and any draft; a
+	// draft dropped this way is named, never saved.
+	let show = |entry: Option<PasswordEntry>,
+	            password_entry: &mut PasswordEntry,
+	            note: &mut text_editor::Content,
+	            revealed: [&mut bool; 3],
+	            draft: &mut bool|
+	 -> &'static str {
+		for flag in revealed {
+			*flag = false;
+		}
+		*note = text_editor::Content::new();
+		*password_entry = entry.unwrap_or_default();
+		if std::mem::take(draft) {
+			" Unset edits were discarded."
+		} else {
+			""
+		}
+	};
 	match message {
 		Message::QueryInput(new_text) => {
+			*matches = db.find(&new_text);
 			*query = new_text;
 		}
 		Message::QuerySubmit => {
-			return Task::done(Message::PasswordEntryGet);
+			// The exact name if there is one, else the first match, else the
+			// tag.N form the core still answers.
+			let pick = matches
+				.iter()
+				.find(|name| name.as_str() == query.trim())
+				.or(matches.first())
+				.and_then(|name| db.get_password_entry_by_name(name))
+				.or_else(|| db.query(query.trim()));
+			let found = pick.is_some();
+			let dropped = show(
+				pick,
+				password_entry,
+				note,
+				[is_password_visible, is_pin_visible, is_note_visible],
+				draft,
+			);
+			*status = if found {
+				format!("Entry retrieved.{dropped}")
+			} else {
+				format!("No entry matches.{dropped}")
+			};
+		}
+		Message::PasswordEntryNew => {
+			let dropped = show(
+				None,
+				password_entry,
+				note,
+				[is_password_visible, is_pin_visible, is_note_visible],
+				draft,
+			);
+			*status = format!("New entry: name it, fill it in, then Set entry.{dropped}");
 		}
 		Message::PasswordEntryNameInput(new_text) => {
 			password_entry.set_name(&new_text);
@@ -510,46 +611,45 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				password_entry.set_note(&Zeroizing::new(note.text()));
 			}
 		}
-		Message::NavigatePrevious => {
-			*is_password_visible = false;
-			*is_pin_visible = false;
-			*is_note_visible = false;
-			if let Some(found_password_entry) = db.previous(password_entry.get_name()) {
-				*status = "Previous entry retrieved.".to_string();
-				*password_entry = found_password_entry.clone();
-				*note = text_editor::Content::new();
+		Message::NavigatePrevious | Message::NavigateNext => {
+			let forward = matches!(message, Message::NavigateNext);
+			let current = password_entry.get_name().to_owned();
+			let which = if forward { "Next" } else { "Previous" };
+			// With find text the arrows step through its matches, wrapping,
+			// and with no match they leave the editor and its draft alone.
+			// Only an empty find walks every entry.
+			if !query.trim().is_empty() && matches.is_empty() {
+				*status = format!("{which}: no entry matches.");
+				return Task::none();
+			}
+			let pick = if query.trim().is_empty() {
+				if forward {
+					db.next(&current)
+				} else {
+					db.previous(&current)
+				}
 			} else {
-				*status = "Previous entry not retrieved.".to_string();
-				*password_entry = PasswordEntry::new();
-				*note = text_editor::Content::new();
+				let at = matches.iter().position(|name| *name == current);
+				let index = match (at, forward) {
+					(Some(i), true) => (i + 1) % matches.len(),
+					(Some(i), false) => (i + matches.len() - 1) % matches.len(),
+					(None, true) => 0,
+					(None, false) => matches.len() - 1,
+				};
+				db.get_password_entry_by_name(&matches[index])
 			};
-		}
-		Message::NavigateNext => {
-			*is_password_visible = false;
-			*is_pin_visible = false;
-			*is_note_visible = false;
-			if let Some(found_password_entry) = db.next(password_entry.get_name()) {
-				*status = "Next entry retrieved.".to_string();
-				*password_entry = found_password_entry.clone();
-				*note = text_editor::Content::new();
+			let found = pick.is_some();
+			let dropped = show(
+				pick,
+				password_entry,
+				note,
+				[is_password_visible, is_pin_visible, is_note_visible],
+				draft,
+			);
+			*status = if found {
+				format!("{which} entry retrieved.{dropped}")
 			} else {
-				*status = "Next entry not retrieved.".to_string();
-				*password_entry = PasswordEntry::new();
-				*note = text_editor::Content::new();
-			};
-		}
-		Message::PasswordEntryGet => {
-			*is_password_visible = false;
-			*is_pin_visible = false;
-			*is_note_visible = false;
-			if let Some(found_password_entry) = db.query(query) {
-				*status = "Entry retrieved.".to_string();
-				*password_entry = found_password_entry.clone();
-				*note = text_editor::Content::new();
-			} else {
-				*status = "Entry not retrieved.".to_string();
-				*password_entry = PasswordEntry::new();
-				*note = text_editor::Content::new();
+				format!("{which} entry not retrieved.{dropped}")
 			};
 		}
 		Message::PasswordEntrySet => {
@@ -564,7 +664,11 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					old_entry.set_tags(password_entry.get_tags());
 					old_entry.set_note(&note_string);
 					db.set_password_entry(old_entry);
-					*status = "Entry set.".to_string();
+					*draft = false;
+					*unsaved = true;
+					// A set can add or drop the tag or name the find matches.
+					*matches = db.find(query);
+					*status = "Entry set. Save to keep it.".to_string();
 				} else {
 					let mut new_entry = PasswordEntry::new();
 					new_entry.set_name(name);
@@ -576,7 +680,10 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					new_entry.set_note(&note_string);
 					db.set_password_entry(new_entry.clone());
 					*password_entry = new_entry;
-					*status = "New entry set.".to_string();
+					*draft = false;
+					*unsaved = true;
+					*matches = db.find(query);
+					*status = "New entry set. Save to keep it.".to_string();
 				}
 			} else {
 				*status = "Name cannot be empty.".to_string();
@@ -592,11 +699,15 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			} else {
 				*confirm_delete = false;
 				if db.delete_password_entry(&name) {
-					*is_password_visible = false;
-					*is_pin_visible = false;
-					*is_note_visible = false;
-					*password_entry = PasswordEntry::new();
-					*note = text_editor::Content::new();
+					show(
+						None,
+						password_entry,
+						note,
+						[is_password_visible, is_pin_visible, is_note_visible],
+						draft,
+					);
+					*unsaved = true;
+					*matches = db.find(query);
 					*status = format!("Entry '{name}' deleted. Save to make it permanent.");
 				} else {
 					*status = format!("No saved entry named '{name}'.");
@@ -609,6 +720,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				Some(secret) => {
 					password_entry.set_password(&secret);
 					*is_password_visible = true;
+					*draft = true;
 					let made = match kind {
 						Kind::Characters { length, .. } => format!("{length} characters"),
 						Kind::Passphrase { words } => format!("{words} words"),
@@ -639,6 +751,22 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			if text.len() <= 3 && text.bytes().all(|b| b.is_ascii_digit()) {
 				choice.count = text;
 			}
+		}
+		Message::GeneratorCountStep(step) => {
+			let max = if choice.words {
+				generator::MAX_WORDS
+			} else {
+				generator::MAX_LENGTH
+			};
+			// Typed input can hold any three digits; step, then clamp both ways.
+			let count = choice.count.parse::<usize>().unwrap_or(0);
+			let next = if step < 0 {
+				count.saturating_sub(1)
+			} else {
+				count + 1
+			}
+			.clamp(1, max);
+			choice.count = next.to_string();
 		}
 		Message::GeneratorClassToggled(bit) => {
 			let c = &mut choice.classes;
@@ -775,6 +903,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					crate::storage::keys::set_slots(db, &slots);
 					screen.slots = slots;
 					screen.password = Zeroizing::new(String::new());
+					*unsaved = true;
 					*status = "Key added. Save to keep it.".to_string();
 				}
 				Ok(crate::storage::keys::KeysOutcome::Rekeyed { key, salt, slots }) => {
@@ -783,6 +912,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					db.rekey(key, &salt);
 					crate::storage::keys::set_slots(db, &slots);
 					vault.note_rekey();
+					*unsaved = true;
 					screen.slots = slots;
 					screen.confirm_remove = None;
 					screen.dropped.clear();
@@ -813,11 +943,16 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				return Task::none();
 			}
 			*saving = true;
+			*unsaved = false;
 			*status = "Saving Database...".to_string();
 			return Task::perform(vault.save(), Message::SaveResult);
 		}
 		Message::SaveResult(msg) => {
 			*saving = false;
+			// Saved locally counts as saved; nothing written does not.
+			if msg.starts_with("Not saved") || msg.starts_with("Local save failed") {
+				*unsaved = true;
+			}
 			*status = msg;
 		}
 		Message::CloseWindow => {
@@ -916,7 +1051,7 @@ mod tests {
 			Message::UnlockResult(Ok(OpenedVault::for_test(db))),
 		);
 		let _ = update(&mut app, Message::QueryInput("example".into()));
-		let _ = update(&mut app, Message::PasswordEntryGet);
+		let _ = update(&mut app, Message::QuerySubmit);
 		app
 	}
 
@@ -957,7 +1092,7 @@ mod tests {
 		assert_eq!(state.note.text(), "private note");
 		let _ = update(&mut app, Message::ToggleNoteVisibility);
 		let _ = update(&mut app, Message::PasswordEntrySet);
-		let _ = update(&mut app, Message::PasswordEntryGet);
+		let _ = update(&mut app, Message::QuerySubmit);
 		let AppState::Unlocked(state) = &app else {
 			panic!()
 		};
@@ -1248,6 +1383,216 @@ mod tests {
 		};
 		assert!(state.status.starts_with("Nothing generated"));
 		assert_eq!(state.password_entry.get_password().len(), 6);
+	}
+
+	/// A vault of four entries, two of them tagged "work".
+	fn four_entries() -> AppState {
+		let db = crate::storage::test_database();
+		for (name, tags, password) in [
+			("bank", "money", "b"),
+			("mail", "work", "m"),
+			("router", "", "r"),
+			("wiki", "work", "w"),
+		] {
+			let mut entry = PasswordEntry::new();
+			entry.set_name(name);
+			entry.set_tags(tags);
+			entry.set_password(password);
+			db.set_password_entry(entry);
+		}
+		let mut app = new();
+		let _ = update(
+			&mut app,
+			Message::UnlockResult(Ok(OpenedVault::for_test(db))),
+		);
+		app
+	}
+
+	fn editor(app: &AppState) -> &UnlockedState {
+		match app {
+			AppState::Unlocked(state) => state,
+			AppState::Locked(_) => panic!("locked"),
+		}
+	}
+
+	#[test]
+	fn find_opens_the_first_match_and_the_arrows_step_through_matches() {
+		let mut app = four_entries();
+		let name = |app: &AppState| editor(app).password_entry.get_name().to_owned();
+		let position = |app: &AppState| {
+			let state = editor(app);
+			find_position(
+				&state.query,
+				&state.matches,
+				state.password_entry.get_name(),
+			)
+		};
+		// No find text: no count, and the arrows walk every entry.
+		assert_eq!(position(&app), None);
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "bank");
+
+		// Zero matches: Enter opens nothing and says so.
+		let _ = update(&mut app, Message::QueryInput("nothing".into()));
+		assert_eq!(position(&app), Some((None, 0)));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(name(&app), "");
+		assert_eq!(editor(&app).status, "No entry matches.");
+
+		// One match, by part of a name in another case.
+		let _ = update(&mut app, Message::QueryInput("ROUT".into()));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(name(&app), "router");
+		assert_eq!(position(&app), Some((Some(1), 1)));
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "router", "one match wraps onto itself");
+
+		// Several matches: a tag. Enter opens the first; the arrows wrap.
+		let _ = update(&mut app, Message::QueryInput("work".into()));
+		assert_eq!(position(&app), Some((None, 2)));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(name(&app), "mail");
+		assert_eq!(position(&app), Some((Some(1), 2)));
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "wiki");
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "mail");
+		let _ = update(&mut app, Message::NavigatePrevious);
+		assert_eq!(name(&app), "wiki");
+		assert_eq!(position(&app), Some((Some(2), 2)));
+
+		// A query with no match: the arrows keep the entry and its draft.
+		let _ = update(&mut app, Message::PasswordEntryUrlInput("x".into()));
+		let _ = update(&mut app, Message::QueryInput("nothing".into()));
+		for arrow in [Message::NavigateNext, Message::NavigatePrevious] {
+			let _ = update(&mut app, arrow);
+			assert_eq!(name(&app), "wiki");
+			assert!(editor(&app).draft, "no match never discards a draft");
+		}
+		let _ = update(&mut app, Message::PasswordEntrySet);
+
+		// Set refreshes the matches as an entry gains or loses the tag.
+		let _ = update(&mut app, Message::QueryInput("work".into()));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(name(&app), "mail");
+		let _ = update(&mut app, Message::PasswordEntryTagsInput("".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert_eq!(editor(&app).matches, ["wiki"]);
+		let _ = update(&mut app, Message::PasswordEntryTagsInput("work".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert_eq!(editor(&app).matches, ["mail", "wiki"]);
+		let _ = update(&mut app, Message::PasswordEntryTagsInput("".into()));
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "wiki");
+		let _ = update(&mut app, Message::NavigateNext);
+		assert_eq!(name(&app), "wiki", "mail left the matches");
+
+		// An exact name wins over earlier partial matches.
+		let _ = update(&mut app, Message::QueryInput("wiki".into()));
+		let _ = update(&mut app, Message::QuerySubmit);
+		assert_eq!(name(&app), "wiki");
+		let _ = view(&app);
+	}
+
+	#[test]
+	fn a_set_entry_is_saved_without_an_unset_draft_on_another() {
+		let mut app = four_entries();
+		let _ = update(&mut app, Message::QueryInput("bank".into()));
+		let _ = update(&mut app, Message::QuerySubmit);
+		let _ = update(
+			&mut app,
+			Message::PasswordEntryUrlInput("https://bank.example".into()),
+		);
+		assert!(editor(&app).draft && !editor(&app).unsaved);
+		let _ = update(&mut app, Message::PasswordEntrySet);
+		assert!(!editor(&app).draft && editor(&app).unsaved);
+
+		// An accidental edit on another entry stays a draft...
+		let _ = update(&mut app, Message::QueryInput("mail".into()));
+		let _ = update(&mut app, Message::QuerySubmit);
+		let _ = update(&mut app, Message::PasswordEntryUsernameInput("oops".into()));
+		assert!(editor(&app).draft);
+		let _ = view(&app);
+		// ...and Save writes the vault as set: bank's edit, not mail's.
+		let task = update(&mut app, Message::Save);
+		drop(task);
+		let state = editor(&app);
+		assert!(!state.unsaved && state.saving);
+		let db = &state.vault.database;
+		assert_eq!(
+			db.get_password_entry_by_name("bank").unwrap().get_url(),
+			"https://bank.example"
+		);
+		assert_eq!(
+			db.get_password_entry_by_name("mail")
+				.unwrap()
+				.get_username(),
+			""
+		);
+		let _ = update(
+			&mut app,
+			Message::SaveResult("Local save failed. Check disk space and file permissions.".into()),
+		);
+		assert!(editor(&app).unsaved, "a failed write is still unsaved");
+
+		// Leaving the draft discards it, and says so.
+		let _ = update(&mut app, Message::NavigateNext);
+		let state = editor(&app);
+		assert!(!state.draft);
+		assert!(
+			state.status.ends_with("Unset edits were discarded."),
+			"{}",
+			state.status
+		);
+		assert_eq!(
+			state
+				.vault
+				.database
+				.get_password_entry_by_name("mail")
+				.unwrap()
+				.get_username(),
+			""
+		);
+
+		// Revealing a secret is not an edit; New clears the editor.
+		let _ = update(&mut app, Message::TogglePasswordVisibility);
+		assert!(!editor(&app).draft);
+		let _ = update(&mut app, Message::PasswordEntryNew);
+		assert_eq!(editor(&app).password_entry.get_name(), "");
+	}
+
+	#[test]
+	fn the_generator_stepper_stays_in_range() {
+		let mut app = four_entries();
+		let count = |app: &AppState| editor(app).generator.count.clone();
+		let _ = update(&mut app, Message::GeneratorCountInput("1".into()));
+		let _ = update(&mut app, Message::GeneratorCountStep(-1));
+		assert_eq!(count(&app), "1");
+		let _ = update(&mut app, Message::GeneratorCountStep(1));
+		assert_eq!(count(&app), "2");
+		let _ = update(
+			&mut app,
+			Message::GeneratorCountInput(generator::MAX_LENGTH.to_string()),
+		);
+		let _ = update(&mut app, Message::GeneratorCountStep(1));
+		assert_eq!(count(&app), generator::MAX_LENGTH.to_string());
+		let _ = update(&mut app, Message::GeneratorKindToggled);
+		let _ = update(
+			&mut app,
+			Message::GeneratorCountInput(generator::MAX_WORDS.to_string()),
+		);
+		let _ = update(&mut app, Message::GeneratorCountStep(1));
+		assert_eq!(count(&app), generator::MAX_WORDS.to_string());
+		// Typed past the maximum, either step lands back in range.
+		let _ = update(&mut app, Message::GeneratorCountInput("999".into()));
+		let _ = update(&mut app, Message::GeneratorCountStep(-1));
+		assert_eq!(count(&app), generator::MAX_WORDS.to_string());
+		let _ = update(&mut app, Message::GeneratorCountInput("0".into()));
+		let _ = update(&mut app, Message::GeneratorCountStep(1));
+		assert_eq!(count(&app), "1");
+		let _ = update(&mut app, Message::GeneratePassword);
+		assert!(editor(&app).draft, "a generated password is a draft");
 	}
 
 	#[test]

@@ -613,6 +613,30 @@ impl<K: KeyStore> Store<K> {
 			.collect()
 	}
 
+	/// The names a find for `query` lands on, in navigation order: every
+	/// name containing it, ignoring case, and every entry tagged exactly
+	/// with it. Only the indexes are read, so no record is opened.
+	pub fn find(&self, query: &str) -> Vec<String> {
+		let query = query.trim();
+		if query.is_empty() {
+			return Vec::new();
+		}
+		let lower = query.to_lowercase();
+		let tagged = self
+			.index_by_tag
+			.get(&tag_key(query))
+			.map_or(&[][..], Vec::as_slice);
+		let prefix = password_key("");
+		self.index_by_name
+			.range(prefix.clone()..format!("password\x01"))
+			.filter(|(key, id)| {
+				key[prefix.len()..].to_lowercase().contains(&lower)
+					|| tagged.binary_search(id).is_ok()
+			})
+			.map(|(key, _)| key[prefix.len()..].to_owned())
+			.collect()
+	}
+
 	pub fn previous(&self, name: &str) -> Option<PasswordEntry<K>> {
 		let id = *self
 			.index_by_name
@@ -794,6 +818,9 @@ impl<K: KeyStore> Database<K> {
 	}
 	pub fn names(&self) -> Vec<String> {
 		self.read().names()
+	}
+	pub fn find(&self, query: &str) -> Vec<String> {
+		self.read().find(query)
 	}
 	pub fn previous(&self, name: &str) -> Option<PasswordEntry<K>> {
 		self.read().previous(name)
@@ -1301,6 +1328,18 @@ pub(crate) mod tests {
 		assert_eq!(store.previous("other").unwrap().get_name(), "example");
 		assert!(store.next("other").is_none());
 		assert_eq!(store.query("other.2").unwrap().get_name(), "other");
+		// Find: names containing the text, any case, and exact tags, in
+		// navigation order, without opening a record.
+		assert_eq!(
+			store.find("other"),
+			["example", "other"],
+			"a tag and a name"
+		);
+		assert_eq!(store.find("OTH"), ["other"], "names ignore case");
+		assert_eq!(store.find("xam"), ["example"]);
+		assert_eq!(store.find("x"), ["example", "other"]);
+		assert!(store.find("  ").is_empty());
+		assert!(store.find("missing").is_empty());
 		assert!(store.delete_password_entry("example"));
 		assert!(!store.delete_password_entry("example"));
 		assert_eq!(store.get_password_entries_by_tag("other").unwrap().len(), 1);
