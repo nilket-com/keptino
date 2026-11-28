@@ -211,3 +211,24 @@ On **design**, Keptino is stronger than KeePassXC's defaults against specific th
 3. **Physical Android FIDO2 verification and recovery drills**: Verify Android USB HID and NFC FIDO2 on real hardware, and practice the full recovery paths on a throwaway vault (restoring from the pepper seed, adopting a bucket copy, and recovering after losing one security key).
 4. **Signed, reproducible releases and Linux seccomp**: Add a seccomp allowlist after Linux preflight (the second half of S1 alongside Landlock), and publish signed, reproducible release artifacts.
 5. **Default KDF cost vs phone availability (planned ADR 0024)**: Lower the default Argon2id cost for *new* vaults (e.g., 256 MiB, `t=3, p=1`) to reduce peak allocation so constrained phones are far less likely to OOM on creation or unlock, while keeping existing 4 GiB vaults, the legacy fallback, and `derive_pepper` untouched. This trades a modest per-guess memory cost, which matters only once the pepper or its recovery seed is also stolen, for vaults that open reliably on constrained phones.
+
+## Hardening sprint update, 2026-11-28 (post-ADR 0034)
+
+Superseding the open priorities above with what shipped on `main` across ADRs 0024 through 0034:
+
+| Item | State |
+| --- | --- |
+| Default KDF cost for new vaults (ADR 0024, ADR 0025) | Shipped on both heads: `KdfParams::CREATE` (`256 MiB, t=3, p=1`) for explicit Create on Linux and Android; legacy unmarked fallback (`4 GiB, t=1, p=1`), existing recorded vault costs on ordinary `Save`, and `derive_pepper` (`4 GiB, t=4`) stay untouched. API 37 emulator warm create/reopen measured 3.11 s / 2.93 s at 449–450 MiB peak RSS. |
+| `libkeptino` fuzzing (ADR 0026) | Shipped: 9 targets (`shards`, `envelope`, `payload`, `slot`, `s3`, `cbor`, `ctap`, `hid`, `nfc`) with round-trip invariants, a deterministic 400-mutation-per-seed smoke test in `cargo test`, and a stable coverage-guided `libFuzzer` runner (`common/libkeptino/fuzz/run.sh`; 25M initial runs, zero findings). |
+| Release-signed, non-debuggable Android everyday install (ADR 0027, ADR 0030) | Shipped: `android/setup.sh` defaults to `:app:assembleRelease` (`isDebuggable = false`), verifies release cert pins and two-step v3 signer rotation (`android/install-release.py`) retiring the old signer's permission capability, enforces one explicit Android user profile (`--user ID` or `am get-current-user`) across discovery, install, verification, and debug R2 provisioning, and puts `$JAVA_HOME/bin` first on `PATH` for `apksigner`. Verified on API 37 multi-user and rotation rehearsals and on the operator's Samsung. |
+| Linux system call filter — S1 completion (ADR 0028, ADR 0029) | Shipped: hand-built cBPF seccomp deny filter (`linux/src/seccomp.rs`) installed with `PR_SET_NO_NEW_PRIVS` + `TSYNC` after preflight (foreign arch / x32 `SIGSYS`, ~55 denied syscalls `EPERM`, `clone3` `ENOSYS` + namespace `clone` `EPERM`), cross-target compile checks across `x86_64`/`aarch64` × `gnu`/`musl` (`linux/seccomp-targets.sh`), and degraded preflight reporting. A strict syscall allowlist remains open and requires a separate vault-worker process. |
+| Reproducible Linux `.deb` build (ADR 0031, ADR 0034) | Shipped: `linux/build-deb.sh` (`SOURCE_DATE_EPOCH`, `--remap-path-prefix`, `BUILDINFO`, `SHA256SUMS`, optional SSH signing via `--sign KEY`, and full `git status --porcelain` dirty provenance including untracked files) plus `linux/repro-check.sh` verifying byte-identical packages with zero builder-path leaks. |
+| Android lock-on-screen-off — K3 completion (ADR 0032) | Shipped: `ACTION_SCREEN_OFF` (`RECEIVER_NOT_EXPORTED`, enabled by default) plus `onResume()` display/keyguard check immediately locks open vaults, cancels prompts, clears Keptino's clipboard, resets Compose state, and clears stale idle deadlines. Verified end to end on API 37. |
+| Automated recovery drills (ADR 0033) | Shipped: `cargo test -p keptino drill` (`linux/src/storage/drill.rs`, lost daily FIDO2 key → backup unlock → rekey/revoke → enroll replacement) and `linux/recovery-drill.sh` (five live RustFS + `keptino --derive-pepper` disaster cases, including fail-closed corrupt local file recovery). |
+
+### Still open
+
+1. **Independent third-party security review** of the vault format, key composition, and parsers (still the single largest assurance gap versus KeePassXC).
+2. **Physical Android hardware FIDO2 verification** (live USB HID and NFC key enrollment on a physical phone).
+3. **Published signed releases** (creating and publishing `allowed_signers` and signed release artifacts using ADR 0031's `--sign` workflow).
+4. **Optional vault-worker split on Linux** if a strict seccomp allowlist (beyond ADR 0028's deny filter) is ever desired.
