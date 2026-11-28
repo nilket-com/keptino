@@ -353,8 +353,12 @@ impl Envelope {
 		if file.len() > MAX_FILE_BYTES {
 			return Err(FormatError::TooLarge);
 		}
-		let recovered = decode_shards(file)?;
-		let pairs = meta_pairs_in(&recovered, true)?;
+		Self::read(&decode_shards(file)?, default_kdf)
+	}
+
+	/// Reads an envelope already recovered from its shards.
+	pub fn read(recovered: &[u8], default_kdf: KdfParams) -> Result<Self, FormatError> {
+		let pairs = meta_pairs_in(recovered, true)?;
 		let mut metadata = HashMap::new();
 		for (name, value) in &pairs {
 			// A duplicate name could let one copy pass the mirror check

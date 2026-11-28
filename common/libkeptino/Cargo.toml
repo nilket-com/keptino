@@ -10,6 +10,8 @@ default = []
 fido = ["dep:aes", "dep:cbc", "dep:hkdf", "dep:hmac", "dep:p256", "dep:sha2"]
 s3 = ["dep:hmac", "dep:sha2"]
 test-support = ["fido"]
+# The fuzz target bodies (ADR 0026), for the crate in fuzz/.
+fuzzing = ["fido", "s3"]
 
 [dependencies]
 aes = { version = "0.8.4", optional = true }

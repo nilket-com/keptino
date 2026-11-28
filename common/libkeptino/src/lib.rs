@@ -13,6 +13,8 @@ pub mod erasure;
 #[cfg(feature = "fido")]
 pub mod fido;
 pub mod format;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzz;
 pub mod generator;
 pub mod health;
 pub mod policy;

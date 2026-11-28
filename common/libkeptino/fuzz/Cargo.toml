@@ -1,0 +1,83 @@
+# libFuzzer targets over libkeptino's untrusted inputs (ADR 0026). Outside
+# the workspace: run with `cargo fuzz run NAME` from common/libkeptino.
+# The bodies live in libkeptino::fuzz, where the smoke test runs them too.
+[package]
+name = "libkeptino-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+libkeptino = { path = "..", features = ["fuzzing"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "shards"
+path = "fuzz_targets/shards.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload"
+path = "fuzz_targets/payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "slot"
+path = "fuzz_targets/slot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "s3"
+path = "fuzz_targets/s3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor"
+path = "fuzz_targets/cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctap"
+path = "fuzz_targets/ctap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hid"
+path = "fuzz_targets/hid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nfc"
+path = "fuzz_targets/nfc.rs"
+test = false
+doc = false
+bench = false
