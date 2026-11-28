@@ -19,9 +19,12 @@ use std::convert::Infallible;
 use std::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const FIXTURE_PATH: &str = "../../../android/droid/tests/fixtures/linux-debug-fido.keptino";
+pub const FIXTURE_PATH: &str = concat!(
+	env!("CARGO_MANIFEST_DIR"),
+	"/../android/droid/tests/fixtures/linux-debug-fido.keptino"
+);
 pub const FIXTURE: &[u8] =
-	include_bytes!("../../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
+	include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino");
 /// The daily key: has a PIN, holds slot 1 in verified mode.
 pub const KEY_SEED: [u8; 32] = *b"keptino-fixture-security-key-001";
 pub const KEY_PIN: &str = "1234";

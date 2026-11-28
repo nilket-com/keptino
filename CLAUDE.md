@@ -15,7 +15,7 @@ with the operator. These rules keep that safe.
   what remains open.
 
 ## Ownership and coordination
-- Claude owns `linux/` and `common/`; Codex owns `android/`; Gemini owns
+- Claude owns `linux/` and `libkeptino/`; Codex owns `android/`; Gemini owns
   `doc/` and `plans/` hygiene and reviews each implementation step before it
   is pushed. `README.md` is edited one section at a time and announced on
   chatd before editing.

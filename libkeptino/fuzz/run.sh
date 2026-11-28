@@ -2,14 +2,14 @@
 # Coverage-guided fuzzing of one libkeptino target on stable Rust (ADR 0026):
 # the flags cargo-fuzz passes with `-s none`, built for the host target so
 # build scripts stay uninstrumented, run under ci/heavy when present.
-#   common/libkeptino/fuzz/run.sh TARGET [SECONDS]
+#   libkeptino/fuzz/run.sh TARGET [SECONDS]
 # Targets: shards envelope payload slot s3 cbor ctap hid nfc.
 # A crash is saved under artifacts/TARGET/; rerun it by passing the file.
 set -eu
 target=${1:?target}
 seconds=${2:-300}
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/../../.." && pwd)
+root=$(cd "$here/../.." && pwd)
 host=$(rustc -vV | sed -n 's/^host: //p')
 # The shared host runner when this checkout has it, else run directly.
 heavy=

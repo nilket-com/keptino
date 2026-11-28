@@ -478,35 +478,34 @@ mod tests {
 		for (name, file) in [
 			(
 				"linux-debug",
-				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug.keptino")[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug.keptino")[..],
 			),
 			(
 				"linux-release",
-				&include_bytes!("../../../android/droid/tests/fixtures/linux-release.keptino")[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-release.keptino")[..],
 			),
 			(
 				"linux-debug-v2",
-				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-v2.keptino")[..],
 			),
 			(
 				"linux-release-v2",
-				&include_bytes!("../../../android/droid/tests/fixtures/linux-release-v2.keptino")[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-release-v2.keptino")[..],
 			),
 			(
 				"linux-debug-unmarked",
-				&include_bytes!(
-					"../../../android/droid/tests/fixtures/linux-debug-unmarked.keptino"
-				)[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-unmarked.keptino")
+					[..],
 			),
 			(
 				"linux-release-unmarked",
 				&include_bytes!(
-					"../../../android/droid/tests/fixtures/linux-release-unmarked.keptino"
+					"../../android/droid/tests/fixtures/linux-release-unmarked.keptino"
 				)[..],
 			),
 			(
 				"linux-debug-fido",
-				&include_bytes!("../../../android/droid/tests/fixtures/linux-debug-fido.keptino")[..],
+				&include_bytes!("../../android/droid/tests/fixtures/linux-debug-fido.keptino")[..],
 			),
 		] {
 			let stored = fixture_shards(file);

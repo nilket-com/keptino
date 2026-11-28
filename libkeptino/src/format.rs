@@ -866,27 +866,27 @@ mod tests {
 	const FIXTURES: [(&str, &[u8]); 6] = [
 		(
 			"linux-debug",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-debug.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-debug.keptino"),
 		),
 		(
 			"linux-release",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-release.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-release.keptino"),
 		),
 		(
 			"linux-debug-v2",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-debug-v2.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-debug-v2.keptino"),
 		),
 		(
 			"linux-release-v2",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-release-v2.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-release-v2.keptino"),
 		),
 		(
 			"linux-debug-unmarked",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-debug-unmarked.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-debug-unmarked.keptino"),
 		),
 		(
 			"linux-release-unmarked",
-			include_bytes!("../../../android/droid/tests/fixtures/linux-release-unmarked.keptino"),
+			include_bytes!("../../android/droid/tests/fixtures/linux-release-unmarked.keptino"),
 		),
 	];
 	const FIXTURE_PASSWORD: &[u8] = b"correct horse battery staple";

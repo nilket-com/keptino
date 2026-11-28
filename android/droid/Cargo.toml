@@ -11,10 +11,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 getrandom = "0.4.1"
 jni = { version = "0.21.1", default-features = false }
-libkeptino = { path = "../../common/libkeptino", features = ["fido", "s3"] }
+libkeptino = { path = "../../libkeptino", features = ["fido", "s3"] }
 libc = "0.2.191"
 zeroize = "1.8.2"
 
 [dev-dependencies]
 hex = "0.4.3"
-libkeptino = { path = "../../common/libkeptino", features = ["test-support"] }
+libkeptino = { path = "../../libkeptino", features = ["test-support"] }

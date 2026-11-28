@@ -1,7 +1,7 @@
 # Keptino
 
 A password vault by nilket for Linux and Android. Both heads share one Rust
-core (`common/libkeptino`), one encrypted vault format, and the
+core (`libkeptino/`), one encrypted vault format, and the
 [Nautilus design language](doc/design.md).
 
 - **Offline-resistant vaults**: every vault combines the master password, a
@@ -35,7 +35,7 @@ The four screens below use a sample vault. Select an image to view it at full si
 
 ## Cryptography and vault format
 
-Both heads read and write the same `.keptino` format through `common/libkeptino`:
+Both heads read and write the same `.keptino` format through `libkeptino`:
 
 - **Key derivation**: Argon2id with SHA-3 pre- and post-hashing, a per-vault
   salt, a 32-byte pepper, and an optional 32-byte roaming secret from enrolled
@@ -52,7 +52,7 @@ Both heads read and write the same `.keptino` format through `common/libkeptino`
   input budgets (64 MiB file, 30 MiB decompressed vault, 100,000 records,
   16 MiB field).
 - **Corruption repair**: Reed-Solomon 8+4 erasure coding with per-shard BLAKE3
-  checksums, implemented in-tree (`common/libkeptino/src/erasure.rs`, no
+  checksums, implemented in-tree (`libkeptino/src/erasure.rs`, no
   dependencies).
 - **Mirror check and rollback floor**: every vault file carries its envelope
   metadata both outside and inside the ciphertext; opening fails unless both
@@ -219,7 +219,7 @@ provisioning (`--debug --r2`).
   advisories against accepted entries in `.cargo/audit.toml`.
 - **Fuzzing**: `cargo test` runs deterministic mutation smoke tests over all
   nine `libkeptino` untrusted-input targets; run coverage-guided `libFuzzer` on
-  stable Rust with `common/libkeptino/fuzz/run.sh TARGET [SECONDS]`.
+  stable Rust with `libkeptino/fuzz/run.sh TARGET [SECONDS]`.
 - **Recovery drills**: `cargo test -p keptino drill` rehearses losing a daily
   FIDO2 key and recovering with a backup key; `./linux/recovery-drill.sh`
   rehearses five live RustFS and pepper-seed disaster cases on throwaway

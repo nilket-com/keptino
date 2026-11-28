@@ -453,7 +453,7 @@ mod tests {
 	#[test]
 	fn the_pepper_matches_the_argon2_command_line_tool() {
 		// printf 'correct horse' | argon2 digipepper -id -t 4 -m 12 -p 1 -l 32 -r -v 13
-		let expected = include_str!("../../../android/droid/tests/fixtures/pepper_m12.hex")
+		let expected = include_str!("../../android/droid/tests/fixtures/pepper_m12.hex")
 			.trim()
 			.to_owned();
 		let mut pepper = [0u8; PEPPER_SIZE];
