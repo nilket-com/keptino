@@ -195,8 +195,8 @@ checks the downloaded vault and preserves the previous local bytes as
 bucket copy is reconciled.
 
 Create derives a new vault key with Argon2id at **256 MiB, three passes, one lane**.
-Unlock and Save honor the cost in the vault. A legacy production vault without
-recorded costs still needs 4 GiB at one pass. Deriving the pepper from its seed
+Unlock and Save honor the cost in the vault. When the vault records no cost,
+Android uses 4 GiB, one pass, and one lane. Deriving the pepper from its seed
 also needs 4 GiB, at four passes. Importing the original pepper skips that step.
 
 On every open, Android compares the plaintext metadata against the copy inside
@@ -309,8 +309,7 @@ The debug interoperability run also builds the Android vault core at
 unmarked Linux file, then checks the edit, revision and recorded KDF costs
 with the current reader.
 
-For the full emulator check, generate the Linux fixtures with
-`interop/run.sh fixtures`, build both APKs with
+For the full emulator check, use the committed Linux fixtures. Build both APKs with
 `./gradlew assembleDebug assembleDebugAndroidTest`, and run:
 
 ```sh
@@ -324,21 +323,22 @@ credential prompt, canceled reads and writes, and migration of legacy setup.
 The script starts an isolated Backblaze
 mock and connects through `adb reverse`; it does not depend on emulator host-IP
 routing. It checks native error handling, Keystore/local storage, the Linux debug
-fixture, B2 upload/download, and the visible editor with the production Linux
-fixture. It also opens a production fixture available only from the mock, edits it through
-the UI, uploads it, and asks the unmodified Linux harness to verify all three
-Android-written files. Logs and outputs are under `build/reports/interop/`.
-Fixture credentials are synthetic and listed in `droid/tests/fixtures/manifest.json`.
+fixture and B2 upload/download. The visible editor opens the unmarked 4 MiB
+fixture from local storage and from the mock bucket. Linux reopens all five
+Android outputs using the public pepper in `droid/tests/fixtures/manifest.json`.
+Logs and outputs are under `build/reports/interop/`.
 
-The credential, migration and production editor tests passed on the Android 17
-(API 37) x86-64 emulator with 8.5 GiB of guest RAM. The following configuration
-provides 12 GiB:
+To exercise the 4 GiB Argon2id fixture through both editor paths, add
+`--argon2-4gib`. That run previously passed on the Android 17 (API 37)
+x86-64 emulator with 8.5 GiB of guest RAM. The following example starts
+an emulator for the ordinary suite. For the 4 GiB run, increase
+`-memory` to 8704 MiB or more.
 
 ```sh
 sdkmanager 'emulator' 'system-images;android-37.0;default;x86_64'
 printf 'no\n' | avdmanager create avd --name keptino-api37 \
   --package 'system-images;android-37.0;default;x86_64' --device pixel_6
-"$ANDROID_HOME/emulator/emulator" -avd keptino-api37 -memory 12288 -cores 4 \
+"$ANDROID_HOME/emulator/emulator" -avd keptino-api37 -memory 2048 -cores 4 \
   -no-window -no-audio -no-snapshot -gpu software
 ```
 

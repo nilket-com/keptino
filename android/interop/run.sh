@@ -53,10 +53,17 @@ mock="http://127.0.0.1:$port"
 
 # What linux/setup.sh stores, minus the TPM: `systemd-creds decrypt` is
 # replaced by a script that prints the file.
-say 'Deriving the pepper as linux/setup.sh does (4 GiB)'
-# The same binary and flag setup runs (ADR 0010), not the argon2 tool.
-cargo build --quiet --locked --release -p keptino
-pepper=$(printf '%s' "$PEPPER_SEED" | "$target_dir/release/keptino" --derive-pepper)
+case ${1:-debug} in
+	debug|check)
+		pepper=$(python3 -c 'import json; print(json.load(open("../droid/tests/fixtures/manifest.json"))["pepper_hex"])')
+		;;
+	release|fixtures)
+		say 'Deriving the pepper as linux/setup.sh does (4 GiB)'
+		cargo build --quiet --locked --release -p keptino
+		pepper=$(printf '%s' "$PEPPER_SEED" | "$target_dir/release/keptino" --derive-pepper)
+		;;
+	*) sed -n '2,11p' "$0" >&2; exit 2 ;;
+esac
 mkdir -p "$work/bin" "$work/home/.config/keptino"
 printf '#!/bin/sh\nexec cat "$4"\n' >"$work/bin/systemd-creds"
 chmod +x "$work/bin/systemd-creds"
@@ -292,6 +299,5 @@ with open(path, "w") as file:
 PY
 		echo "Fixtures written to $fixtures"
 		;;
-	*) sed -n '2,11p' "$0" >&2; exit 2 ;;
 esac
 say 'All interoperability checks passed'

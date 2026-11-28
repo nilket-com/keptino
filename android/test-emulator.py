@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run the real JNI/storage/B2 and production UI round trips on an emulator.
-Requires a running 64-bit emulator with >=8 GiB RAM, built APKs and Linux fixtures.
+Requires a dedicated 64-bit emulator, built APKs and the committed Linux fixtures.
 Writes the Android-produced vaults and instrumentation logs to build/reports/interop.
 """
 import argparse
@@ -23,7 +23,13 @@ parser.add_argument('--device-pin', default='1234', metavar='PIN',
                     help='lock screen PIN to set on the dedicated emulator for the device credential tests (default 1234)')
 parser.add_argument('--no-device-pin', action='store_true',
                     help='do not set a lock screen PIN; tests needing the credential prompt are skipped')
+parser.add_argument('--argon2-4gib', action='store_true',
+                    help='run the editor tests with the 4 GiB Argon2id fixture (requires a large emulator)')
 args = parser.parse_args()
+if args.argon2_4gib and args.no_device_pin:
+    parser.error('--argon2-4gib needs the device PIN for the editor tests')
+ui_fixture = 'linux-release.keptino' if args.argon2_4gib else 'linux-debug-unmarked.keptino'
+ui_profile = 'release' if args.argon2_4gib else 'debug'
 if not args.no_device_pin and not (args.device_pin.isdigit() and 4 <= len(args.device_pin) <= 16):
     parser.error('--device-pin must be 4 to 16 digits')
 adb = str(Path(os.environ.get('ANDROID_HOME', Path.home() / 'Android/Sdk')) / 'platform-tools/adb')
@@ -114,11 +120,15 @@ try:
               else: raise RuntimeError('B2 mock did not start')
               call(adb, '-s', args.serial, 'reverse', f'tcp:{port}', f'tcp:{port}')
               common = {'password': manifest['password'], 'pepperHex': manifest['pepper_hex'], 'entry': 'bank'}
-              instrument('native-debug-and-b2', 'com.keptino.app.VaultIntegrationTest', dict(common, fixture='linux-debug.keptino', dbName='vaultdebug', memoryKib=4096, mockBaseUrl=f'http://127.0.0.1:{port}'))
+              # The signing rehearsal spans APK installs and has its own runner.
+              native_tests = 'com.keptino.app.VaultIntegrationTest'
+              instrument('native-debug-and-b2', native_tests, dict(common, fixture='linux-debug.keptino',
+                         dbName='vaultdebug', memoryKib=4096, mockBaseUrl=f'http://127.0.0.1:{port}',
+                         notClass=native_tests + '#signingUpdateKeepsVaultAndSettings'))
               collect('android-roundtrip.keptino', 'android-debug-roundtrip.keptino')
               for form, label in [('v2', 'format-2'), ('unmarked', 'unmarked')]:
                   instrument('native-' + label, 'com.keptino.app.VaultIntegrationTest#linuxFixtureEditAndExport',
-                             dict(common, fixture=f'linux-debug-{form}.keptino', dbName=f'vaultdebug-{form}', memoryKib=4194304))
+                             dict(common, fixture=f'linux-debug-{form}.keptino', dbName=f'vaultdebug-{form}', memoryKib=8192))
                   collect('android-roundtrip.keptino', f'android-{label}-roundtrip.keptino')
               if device_pin is None:
                   print('No device PIN: the production UI runs need the credential prompt and are skipped', flush=True)
@@ -132,10 +142,10 @@ try:
                   instrument('screen-off', 'com.keptino.app.VaultUiTest#screenOffLocksVaultUnlessDisabled', {})
                   instrument('health-report', 'com.keptino.app.VaultUiTest#healthReportUsesSetEntriesAndClosesOnLock', {})
                   instrument('credential-cancel', 'com.keptino.app.VaultUiTest#cancelledCredentialPromptKeepsVaultLocked', {})
-                  instrument('production-ui', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName=local_name))
+                  instrument('production-ui', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture=ui_fixture, dbName=local_name))
                   collect('android-ui-roundtrip.keptino', 'android-ui-roundtrip.keptino')
-                  (Path(directory) / (remote_name + '.keptino')).write_bytes(base64.b64encode((root / 'droid/tests/fixtures/linux-release.keptino').read_bytes()))
-                  instrument('production-ui-b2', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName=remote_name, mockBaseUrl=f'http://127.0.0.1:{port}'))
+                  (Path(directory) / (remote_name + '.keptino')).write_bytes(base64.b64encode((root / 'droid/tests/fixtures' / ui_fixture).read_bytes()))
+                  instrument('production-ui-b2', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture=ui_fixture, dbName=remote_name, mockBaseUrl=f'http://127.0.0.1:{port}'))
                   (report / 'android-b2-roundtrip.keptino').write_bytes(base64.b64decode((Path(directory) / (remote_name + '.keptino')).read_bytes(), validate=True))
           finally:
               subprocess.run([adb, '-s', args.serial, 'reverse', '--remove', f'tcp:{port}'], check=False)
@@ -146,7 +156,7 @@ finally:
     if device_pin: clear_device_pin(device_pin)
 print('Android output files: ' + str(report))
 outputs = [('android-debug-roundtrip.keptino', 'debug'), ('android-format-2-roundtrip.keptino', 'debug'), ('android-unmarked-roundtrip.keptino', 'debug')]
-if device_pin: outputs += [('android-ui-roundtrip.keptino', 'release'), ('android-b2-roundtrip.keptino', 'release')]
+if device_pin: outputs += [('android-ui-roundtrip.keptino', ui_profile), ('android-b2-roundtrip.keptino', ui_profile)]
 for filename, profile in outputs:
     result = subprocess.run([str(root / 'interop/run.sh'), 'check', str(report / filename), profile], cwd=root, capture_output=True, text=True, check=True, timeout=360)
     (report / (filename + '.linux.log')).write_text(result.stdout + result.stderr)

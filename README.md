@@ -43,7 +43,7 @@ Both heads read and write the same `.keptino` format through `libkeptino`:
   - **New vaults** created on Linux or Android derive and record **256 MiB,
     3 passes, 1 lane**.
   - **Existing vaults** keep their recorded cost on ordinary saves and rekeys.
-    Legacy unmarked production vaults open at **4 GiB, 1 pass, 1 lane**.
+    When a vault records no cost, release builds use **4 GiB, 1 pass, 1 lane**.
   - **Pepper derivation** from the recovery seed uses **4 GiB, 4 passes,
     1 lane** (`keptino --derive-pepper` on Linux, native `libkeptino` on
     Android).
