@@ -1825,6 +1825,45 @@ pub(crate) mod tests {
 	}
 
 	#[test]
+	fn a_new_vault_records_the_creation_cost_and_saves_keep_any_recorded_cost() {
+		let derived = std::cell::Cell::new(None);
+		let mut derive = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {
+			derived.set(Some(candidate.cost));
+			Derived::Key(test_key(candidate.salt, candidate.cost))
+		};
+		let created = unlock("example", None, None, KdfParams::CREATE, &mut derive).unwrap();
+		assert_eq!(
+			derived.get(),
+			Some(KdfParams::CREATE),
+			"derived at the creation cost"
+		);
+		let db = created.database;
+		let file = db.encode(true, KdfParams::CREATE).unwrap();
+		let envelope = Envelope::parse(&file, KdfParams::RELEASE).unwrap();
+		assert_eq!(envelope.kdf, KdfParams::CREATE);
+		assert_eq!(
+			[db.meta("kdf_m"), db.meta("kdf_t"), db.meta("kdf_p")],
+			[Some("262144".into()), Some("3".into()), Some("1".into())]
+		);
+		// A later save on a release build passes the legacy fallback; the
+		// recorded cost wins.
+		let saved = db.encode(true, KdfParams::RELEASE).unwrap();
+		assert_eq!(
+			Envelope::parse(&saved, KdfParams::RELEASE).unwrap().kdf,
+			KdfParams::CREATE
+		);
+		// A vault already recording 4 GiB keeps it.
+		let key = HeapKey::from_bytes(&[42; KEY_SIZE]).unwrap();
+		let old = Database::new(key, "old", &[7; crypto::SALT_SIZE]);
+		old.encode(false, KdfParams::RELEASE).unwrap();
+		let resaved = old.encode(false, KdfParams::CREATE).unwrap();
+		assert_eq!(
+			Envelope::parse(&resaved, KdfParams::CREATE).unwrap().kdf,
+			KdfParams::RELEASE
+		);
+	}
+
+	#[test]
 	fn unlock_orders_the_copies_falls_back_and_derives_once() {
 		let derivations = std::cell::Cell::new(0);
 		let mut counted = |candidate: &Candidate<'_>| -> Derived<HeapKey, Infallible> {

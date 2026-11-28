@@ -264,7 +264,21 @@ impl KdfParams {
 		t_cost: 1,
 		p_cost: 1,
 	};
-	/// The cost matching this build's profile.
+	/// The cost a new vault is created with (ADR 0024): 256 MiB, three
+	/// passes, one lane. Vaults that record a cost keep it.
+	pub const CREATE: Self = Self {
+		m_cost: 1 << 18,
+		t_cost: 3,
+		p_cost: 1,
+	};
+	/// The creation cost matching this build's profile.
+	pub const CREATE_DEFAULT: Self = if cfg!(debug_assertions) {
+		Self::DEBUG
+	} else {
+		Self::CREATE
+	};
+	/// The cost matching this build's profile, and the cost of a vault that
+	/// records none.
 	pub const BUILD_DEFAULT: Self = if cfg!(debug_assertions) {
 		Self::DEBUG
 	} else {

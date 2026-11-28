@@ -328,14 +328,14 @@ pub async fn create(db_name: &str, password: Zeroizing<String>) -> Result<Opened
 		Ok(key) => Derived::Key(key),
 		Err(err) => Derived::Failed(err),
 	};
-	let database = unlock(db_name, None, None, KdfParams::BUILD_DEFAULT, derive)
+	let database = unlock(db_name, None, None, KdfParams::CREATE_DEFAULT, derive)
 		.map_err(|err: UnlockError<String>| err.to_string())?
 		.database;
 	let fail = |database: &Database, err: String| {
 		database.zeroize();
 		Err(err)
 	};
-	let bytes = match database.encode(WRITE_AAD_FORMAT, KdfParams::BUILD_DEFAULT) {
+	let bytes = match database.encode(WRITE_AAD_FORMAT, KdfParams::CREATE_DEFAULT) {
 		Ok(bytes) => bytes,
 		Err(err) => return fail(&database, format!("Not created: {err}")),
 	};
