@@ -594,6 +594,37 @@ pub fn derive_master(
 	master_key_derivation(password, &pepper, salt, roaming, vault_cost(db))
 }
 
+/// What a rekey says when the typed password is not the vault's.
+pub const WRONG_PASSWORD: &str = "That is not this vault's master password; nothing changed.";
+
+/// Checks `password`, with the roaming secret when the vault has key slots,
+/// against the key the vault is open under, by deriving that key again at
+/// the vault's own salt and cost (ADR 0041). A rekey derives its new key
+/// from the typed password, so a typo would otherwise lock the vault.
+pub fn verify_password(
+	db: &Database,
+	password: &str,
+	roaming: Option<&[u8; crypto::ROAMING_SIZE]>,
+) -> Result<(), String> {
+	let salt = db.salt().ok_or("The open vault records no salt.")?;
+	let pepper = load_pepper()?;
+	let mut key = Zeroizing::new([0u8; KEY_SIZE]);
+	crypto::derive_master_key(
+		password.as_bytes(),
+		&pepper,
+		&salt,
+		roaming,
+		vault_cost(db),
+		&mut key,
+	)
+	.map_err(|err| err.to_string())?;
+	if db.is_master_key(&key) {
+		Ok(())
+	} else {
+		Err(WRONG_PASSWORD.into())
+	}
+}
+
 /// Derives the master key and moves it into secret memory.
 fn master_key_derivation(
 	password: &str,

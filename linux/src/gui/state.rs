@@ -59,6 +59,10 @@ pub struct KeysScreen {
 	pub slots: Vec<libkeptino::roaming::KeySlot>,
 	/// The master password, needed to derive the new key for a rekey.
 	pub password: Zeroizing<String>,
+	/// The password typed again, asked for only when no enrolled key can
+	/// release the secret that checks it (ADR 0041).
+	pub confirm: Zeroizing<String>,
+	pub needs_confirm: bool,
 	pub pin: Zeroizing<String>,
 	pub touch_only: bool,
 	/// Remove was pressed on this slot; the next press rekeys without it.
@@ -73,6 +77,8 @@ impl KeysScreen {
 		Self {
 			slots: crate::storage::keys::slots_of(db),
 			password: Zeroizing::new(String::new()),
+			confirm: Zeroizing::new(String::new()),
+			needs_confirm: false,
 			pin: Zeroizing::new(String::new()),
 			touch_only: false,
 			confirm_remove: None,
@@ -1177,6 +1183,11 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				keys.password = text;
 			}
 		}
+		Message::KeysConfirmInput(text) => {
+			if let Some(keys) = keys {
+				keys.confirm = text;
+			}
+		}
 		Message::KeysPinInput(text) => {
 			if let Some(keys) = keys {
 				keys.pin = text;
@@ -1201,6 +1212,8 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			if let Some(keys) = keys {
 				keys.confirm_remove = None;
 				keys.dropped.clear();
+				keys.confirm = Zeroizing::new(String::new());
+				keys.needs_confirm = false;
 				*status = String::new();
 			}
 		}
@@ -1216,13 +1229,22 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 				*status = "Enter the master password to rekey.".to_string();
 				return Task::none();
 			}
+			if screen.needs_confirm && *screen.confirm != *screen.password {
+				*status = "The two passwords differ.".to_string();
+				return Task::none();
+			}
 			screen.busy = true;
 			*status = "Touch your security key when it blinks.".to_string();
+			let confirmed = screen.needs_confirm;
 			let database = db.clone();
 			let slots = screen.slots.clone();
 			let password = screen.password.clone();
+			let checked = (database.clone(), password.clone());
 			let derive = move |salt: &[u8; 32], roaming: Option<&[u8; 32]>| {
 				persistence::derive_master(&database, &password, salt, roaming)
+			};
+			let verify = move |roaming: Option<&[u8; 32]>| {
+				persistence::verify_password(&checked.0, &checked.1, roaming)
 			};
 			let pin = screen.pin();
 			let touch_only = screen.touch_only;
@@ -1238,11 +1260,11 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			return Task::perform(
 				async move {
 					match action {
-						0 => crate::storage::keys::protect(&derive, pin, touch_only),
+						0 => crate::storage::keys::protect(&derive, &verify, pin, touch_only),
 						1 => crate::storage::keys::add_key(&slots, pin, touch_only),
 						_ => match remove {
 							Some(index) => crate::storage::keys::remove_key(
-								&derive, &slots, index, &dropped, pin,
+								&derive, &verify, &slots, index, &dropped, pin, confirmed,
 							),
 							None => Err("No key selected.".into()),
 						},
@@ -1277,6 +1299,8 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 					screen.confirm_remove = None;
 					screen.dropped.clear();
 					screen.password = Zeroizing::new(String::new());
+					screen.confirm = Zeroizing::new(String::new());
+					screen.needs_confirm = false;
 					*status = if screen.slots.is_empty() {
 						"Protection removed and the vault rekeyed. Save to keep it.".to_string()
 					} else {
@@ -1293,6 +1317,9 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 						screen.dropped.push(number - 1);
 						*status = format!("{err} Press Remove again to drop key {number} as well.");
 					} else {
+						if err == crate::storage::keys::CONFIRM_PASSWORD {
+							screen.needs_confirm = true;
+						}
 						*status = err;
 					}
 				}
@@ -1607,6 +1634,60 @@ mod tests {
 			panic!()
 		};
 		assert!(!state.offer_adopt);
+	}
+
+	#[test]
+	fn removing_the_last_key_without_a_key_asks_for_the_password_twice() {
+		let mut app = unlocked();
+		let _ = update(&mut app, Message::ShowKeys);
+		let _ = update(&mut app, Message::RemoveKey(0));
+		let _ = update(
+			&mut app,
+			Message::KeysPasswordInput(Zeroizing::new("pw".into())),
+		);
+		let _ = update(&mut app, Message::ConfirmRemoveKey);
+		let _ = update(
+			&mut app,
+			Message::KeysResult(Err(crate::storage::keys::CONFIRM_PASSWORD.into())),
+		);
+		let keys = |app: &AppState| match app {
+			AppState::Unlocked(state) => (
+				state.keys.as_deref().unwrap().needs_confirm,
+				state.keys.as_deref().unwrap().busy,
+				state.status.clone(),
+			),
+			_ => panic!(),
+		};
+		assert_eq!(
+			keys(&app),
+			(
+				true,
+				false,
+				crate::storage::keys::CONFIRM_PASSWORD.to_string()
+			)
+		);
+		let _ = view(&app);
+		// A confirmation that differs starts nothing.
+		let _ = update(
+			&mut app,
+			Message::KeysConfirmInput(Zeroizing::new("pv".into())),
+		);
+		let _ = update(&mut app, Message::ConfirmRemoveKey);
+		assert_eq!(
+			keys(&app),
+			(true, false, "The two passwords differ.".to_string())
+		);
+		// The same password twice starts the removal.
+		let _ = update(
+			&mut app,
+			Message::KeysConfirmInput(Zeroizing::new("pw".into())),
+		);
+		let _ = update(&mut app, Message::ConfirmRemoveKey);
+		assert!(keys(&app).1, "the ceremony runs");
+		// Canceling clears the confirmation.
+		let _ = update(&mut app, Message::KeysResult(Err("Canceled.".into())));
+		let _ = update(&mut app, Message::CancelRemoveKey);
+		assert!(!keys(&app).0);
 	}
 
 	#[test]

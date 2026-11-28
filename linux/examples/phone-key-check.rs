@@ -82,7 +82,10 @@ fn main() -> Result<(), String> {
 		return Err("Unexpected fixture name".into());
 	}
 	if command == "enroll" {
-		let keys::KeysOutcome::Rekeyed { key, salt, slots } = keys::protect(&derive, pin, true)?
+		// The fixture was opened above with this same password.
+		let opened = |_: Option<&[u8; 32]>| Ok(());
+		let keys::KeysOutcome::Rekeyed { key, salt, slots } =
+			keys::protect(&derive, &opened, pin, true)?
 		else {
 			return Err("Expected a rekey".into());
 		};

@@ -1230,6 +1230,14 @@ pub fn keys_screen<'a>(keys: &'a KeysScreen, status: &'a str) -> Element<'a, Mes
 				.font(Font::MONOSPACE)
 				.on_input(|value| Message::KeysPasswordInput(Zeroizing::new(value))),
 		);
+		if keys.needs_confirm {
+			body = body.push(
+				styled_text_input("confirm password", &keys.confirm)
+					.secure(true)
+					.font(Font::MONOSPACE)
+					.on_input(|value| Message::KeysConfirmInput(Zeroizing::new(value))),
+			);
+		}
 	}
 	body = body.push(
 		styled_text_input("security key PIN, if the key has one", &keys.pin)

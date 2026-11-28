@@ -809,6 +809,20 @@ impl<K: KeyStore> Database<K> {
 			.ok()
 	}
 
+	/// Whether `candidate` is the master key this database is open under,
+	/// compared in constant time: how a head checks a typed password before
+	/// it derives a new key from it (ADR 0041).
+	pub fn is_master_key(&self, candidate: &[u8; KEY_SIZE]) -> bool {
+		let slot = self.master_key.read().unwrap_or_else(|e| e.into_inner());
+		slot.with_key(|key| {
+			let difference = key
+				.iter()
+				.zip(candidate)
+				.fold(0u8, |acc, (a, b)| acc | (a ^ b));
+			std::hint::black_box(difference) == 0
+		})
+	}
+
 	/// Puts the database under a new master key derived with `salt`: the old
 	/// key is wiped, the salt meta entry is replaced, and the next save
 	/// writes a file only the new key opens. The records are untouched;
@@ -1608,6 +1622,24 @@ pub(crate) mod tests {
 			Some(FormatError::TooLarge)
 		);
 		db.write().entries.entries.remove(&(id + 1));
+	}
+
+	#[test]
+	fn the_open_key_is_recognized_and_any_other_is_not() {
+		let salt = [1u8; crypto::SALT_SIZE];
+		let db = Database::new(test_key(&salt, KdfParams::DEBUG), "example", &salt);
+		let mut key = [0u8; KEY_SIZE];
+		test_key(&salt, KdfParams::DEBUG).with_key(|bytes| key = *bytes);
+		assert!(db.is_master_key(&key));
+		for index in [0, KEY_SIZE - 1] {
+			let mut other = key;
+			other[index] ^= 1;
+			assert!(!db.is_master_key(&other));
+		}
+		// After a rekey only the new key is the open one.
+		let new_salt = [2u8; crypto::SALT_SIZE];
+		db.rekey(test_key(&new_salt, KdfParams::DEBUG), &new_salt);
+		assert!(!db.is_master_key(&key));
 	}
 
 	#[test]

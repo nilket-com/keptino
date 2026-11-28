@@ -73,6 +73,7 @@ pub enum Message {
 	SaveResult(String),
 	ShowKeys,
 	KeysPasswordInput(Zeroizing<String>),
+	KeysConfirmInput(Zeroizing<String>),
 	KeysPinInput(Zeroizing<String>),
 	KeysToggleTouchOnly,
 	ProtectVault,

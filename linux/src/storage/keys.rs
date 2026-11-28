@@ -128,8 +128,6 @@ pub fn add_key(
 	Ok(KeysOutcome::Added(slot))
 }
 
-/// Protects a vault without slots: a fresh secret and salt, the first key
-/// enrolled, the master key re-derived.
 /// Derives a master key for a salt and an optional roaming secret: the
 /// persistence layer's derivation with the vault's cost and this machine's
 /// pepper, or a test's stand-in.
@@ -138,11 +136,24 @@ pub type Derive<'a> = &'a dyn Fn(
 	Option<&[u8; ROAMING_SIZE]>,
 ) -> Result<crate::storage::SecretMemory, String>;
 
+/// Checks the typed master password, with the vault's current roaming
+/// secret when it has one, against the key the vault is open under
+/// (ADR 0041). Every rekey calls it before deriving a new key.
+pub type Verify<'a> = &'a dyn Fn(Option<&[u8; ROAMING_SIZE]>) -> Result<(), String>;
+
+/// What removing the last key says when no enrolled key answered, so the
+/// password cannot be checked: the one case where it is typed twice.
+pub const CONFIRM_PASSWORD: &str = "No enrolled key answered, so the master password cannot be checked against the vault. Type it again under Confirm password and press Remove again.";
+
+/// Protects a vault without slots: the password checked, a fresh secret
+/// and salt, the first key enrolled, the master key re-derived.
 pub fn protect(
 	derive: Derive<'_>,
+	verify: Verify<'_>,
 	pin: Option<Zeroizing<String>>,
 	touch_only: bool,
 ) -> Result<KeysOutcome, String> {
+	verify(None)?;
 	let cancel = AtomicBool::new(false);
 	let (roaming, salt) = fresh_secret();
 	let slot =
@@ -159,12 +170,18 @@ pub fn protect(
 /// other key touched in turn for a new slot, the master key re-derived.
 /// A key in `dropped` is left out without being asked, after the user
 /// confirmed it by name. Removing the last key turns protection off.
+///
+/// The password is checked with the old roaming secret the first kept key
+/// releases. Removing the last key asks any enrolled key for it; when none
+/// answers, `confirmed` (the password typed twice) is the only check left.
 pub fn remove_key(
 	derive: Derive<'_>,
+	verify: Verify<'_>,
 	slots: &[KeySlot],
 	index: usize,
 	dropped: &[usize],
 	pin: Option<Zeroizing<String>>,
+	confirmed: bool,
 ) -> Result<KeysOutcome, String> {
 	if index >= slots.len() {
 		return Err("No such key.".into());
@@ -174,7 +191,14 @@ pub fn remove_key(
 		.enumerate()
 		.filter(|(i, _)| *i != index && !dropped.contains(i))
 		.collect();
+	let cancel = AtomicBool::new(false);
 	if remaining.is_empty() {
+		match roaming_from_keys(slots, pin, &cancel) {
+			Ok(roaming) => verify(Some(&roaming))?,
+			Err(Failure::Canceled) => return Err("Canceled; nothing changed.".into()),
+			Err(_) if confirmed => {}
+			Err(_) => return Err(CONFIRM_PASSWORD.into()),
+		}
 		let (_, salt) = fresh_secret();
 		let key = derive(&salt, None)?;
 		return Ok(KeysOutcome::Rekeyed {
@@ -183,7 +207,6 @@ pub fn remove_key(
 			slots: Vec::new(),
 		});
 	}
-	let cancel = AtomicBool::new(false);
 	let (roaming, salt) = fresh_secret();
 	let mut new_slots = Vec::with_capacity(remaining.len());
 	for (position, slot) in remaining {
@@ -191,7 +214,14 @@ pub fn remove_key(
 		match fido::reenroll_owner(slot, &roaming, pin.clone(), &cancel, |prompt| {
 			info(prompt_text(prompt))
 		}) {
-			Ok(new_slot) => new_slots.push(new_slot),
+			Ok((new_slot, previous)) => {
+				// The first key that answers settles the password before
+				// any other key is asked.
+				if new_slots.is_empty() {
+					verify(Some(&previous))?;
+				}
+				new_slots.push(new_slot);
+			}
 			Err(Failure::Canceled) => return Err("Canceled; nothing changed.".into()),
 			Err(failure) => {
 				return Err(format!(
@@ -347,6 +377,16 @@ mod tests {
 		crate::storage::SecretMemory::from_bytes(&bytes).map_err(|_| "no secret memory".to_string())
 	}
 
+	/// A password check that accepts, as for the right password.
+	fn accept(_: Option<&[u8; ROAMING_SIZE]>) -> Result<(), String> {
+		Ok(())
+	}
+
+	/// A password check that refuses, as for a typo.
+	fn refuse(_: Option<&[u8; ROAMING_SIZE]>) -> Result<(), String> {
+		Err("wrong password".into())
+	}
+
 	fn key(seed: u8, pin: Option<&'static str>) -> SimKey {
 		SimKey {
 			seed: [seed; 32],
@@ -359,7 +399,7 @@ mod tests {
 	fn protect_add_and_remove_rekey_as_the_decision_says() {
 		let pin = || Some(Zeroizing::new("1234".to_string()));
 		let protected = with_keys(vec![key(1, Some("1234"))], || {
-			protect(&test_derive, pin(), false)
+			protect(&test_derive, &accept, pin(), false)
 		})
 		.unwrap();
 		let KeysOutcome::Rekeyed {
@@ -393,7 +433,7 @@ mod tests {
 		// Remove the first key with the backup present: a new salt, one new
 		// slot wrapping a new secret, touch-only as before.
 		let removed = with_keys(vec![key(2, None)], || {
-			remove_key(&test_derive, &both, 0, &[], None)
+			remove_key(&test_derive, &accept, &both, 0, &[], None, false)
 		})
 		.unwrap();
 		let KeysOutcome::Rekeyed {
@@ -412,23 +452,80 @@ mod tests {
 
 		// The backup is not in hand: the removal names it and changes nothing.
 		let Err(err) = with_keys(vec![key(1, Some("1234"))], || {
-			remove_key(&test_derive, &both, 0, &[], pin())
+			remove_key(&test_derive, &accept, &both, 0, &[], pin(), false)
 		}) else {
 			panic!("a missing key must stop the removal");
 		};
 		assert!(err.starts_with("Key 2 did not answer"), "{err}");
 		// Dropping it too turns protection off: no slots, a plain key.
 		let off = with_keys(vec![key(1, Some("1234"))], || {
-			remove_key(&test_derive, &both, 0, &[1], pin())
+			remove_key(&test_derive, &accept, &both, 0, &[1], pin(), false)
 		})
 		.unwrap();
 		assert!(matches!(off, KeysOutcome::Rekeyed { slots, .. } if slots.is_empty()));
-		// Removing the last key of a one-key vault likewise.
-		let off = with_keys(vec![], || remove_key(&test_derive, &slots, 0, &[], None)).unwrap();
+		// Removing the last key of a one-key vault with no key in hand: the
+		// password cannot be checked, so it must be typed twice first.
+		let unchecked = with_keys(vec![], || {
+			remove_key(&test_derive, &accept, &slots, 0, &[], None, false)
+		});
+		assert!(matches!(unchecked, Err(ref e) if e == CONFIRM_PASSWORD));
+		let off = with_keys(vec![], || {
+			remove_key(&test_derive, &accept, &slots, 0, &[], None, true)
+		})
+		.unwrap();
 		assert!(matches!(off, KeysOutcome::Rekeyed { slots, .. } if slots.is_empty()));
-		assert!(remove_key(&test_derive, &slots, 5, &[], None).is_err());
+		assert!(remove_key(&test_derive, &accept, &slots, 5, &[], None, true).is_err());
 		// Nothing to enroll with.
-		assert!(with_keys(vec![], || protect(&test_derive, None, false)).is_err());
+		assert!(with_keys(vec![], || protect(&test_derive, &accept, None, false)).is_err());
+	}
+
+	#[test]
+	fn a_wrong_password_stops_every_rekey_and_changes_nothing() {
+		let pin = || Some(Zeroizing::new("1234".to_string()));
+		// Protect checks before any key is asked: no key in hand, yet the
+		// password is what fails.
+		assert_eq!(
+			with_keys(vec![], || protect(&test_derive, &refuse, pin(), false)).err(),
+			Some("wrong password".to_string())
+		);
+		let KeysOutcome::Rekeyed { slots, .. } = with_keys(vec![key(1, Some("1234"))], || {
+			protect(&test_derive, &accept, pin(), false)
+		})
+		.unwrap() else {
+			panic!("protect rekeys");
+		};
+		let KeysOutcome::Added(backup) =
+			with_keys(vec![key(1, Some("1234")), key(2, None)], || {
+				add_key(&slots, pin(), true)
+			})
+			.unwrap()
+		else {
+			panic!("add does not rekey");
+		};
+		let both = vec![slots[0].clone(), backup];
+		// Removing a key checks with the secret the kept key releases.
+		let seen = std::cell::Cell::new(false);
+		let checking = |roaming: Option<&[u8; ROAMING_SIZE]>| {
+			seen.set(roaming.is_some());
+			Err("wrong password".to_string())
+		};
+		assert_eq!(
+			with_keys(vec![key(2, None)], || {
+				remove_key(&test_derive, &checking, &both, 0, &[], None, false)
+			})
+			.err(),
+			Some("wrong password".to_string())
+		);
+		assert!(seen.get(), "the old roaming secret reached the check");
+		// Removing the last key with a key in hand checks too, even when
+		// the user had confirmed the password by typing it twice.
+		assert_eq!(
+			with_keys(vec![key(1, Some("1234"))], || {
+				remove_key(&test_derive, &refuse, &slots, 0, &[], pin(), true)
+			})
+			.err(),
+			Some("wrong password".to_string())
+		);
 	}
 
 	#[test]

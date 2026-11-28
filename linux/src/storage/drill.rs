@@ -29,6 +29,23 @@ mod tests {
 		SecretMemory::from_bytes(&key).map_err(|_| "no secret memory".to_string())
 	}
 
+	/// The keys screen's password check, against the open vault.
+	fn verify(db: &Database, roaming: Option<&[u8; ROAMING_SIZE]>) -> Result<(), String> {
+		let mut key = zeroize::Zeroizing::new([0u8; KEY_SIZE]);
+		crypto::derive_master_key(
+			PASSWORD.as_bytes(),
+			&PEPPER,
+			&db.salt().unwrap(),
+			roaming,
+			COST,
+			&mut key,
+		)
+		.map_err(|err| err.to_string())?;
+		db.is_master_key(&key)
+			.then_some(())
+			.ok_or_else(|| "wrong password".to_string())
+	}
+
 	/// The daily key has a PIN and holds a verified slot.
 	fn daily() -> SimKey {
 		SimKey {
@@ -123,7 +140,12 @@ mod tests {
 		entry.set_password("hunter2");
 		db.set_password_entry(entry);
 		let protected = with_keys(vec![daily()], || {
-			keys::protect(&derive, pin_for(&[daily()]), false)
+			keys::protect(
+				&derive,
+				&|roaming| verify(&db, roaming),
+				pin_for(&[daily()]),
+				false,
+			)
 		})
 		.unwrap();
 		apply(&db, protected);
@@ -148,7 +170,15 @@ mod tests {
 		// that only the backup wraps.
 		let slots = keys::slots_of(&recovered);
 		let removed = with_keys(vec![backup()], || {
-			keys::remove_key(&derive, &slots, 0, &[], None)
+			keys::remove_key(
+				&derive,
+				&|roaming| verify(&recovered, roaming),
+				&slots,
+				0,
+				&[],
+				None,
+				false,
+			)
 		})
 		.unwrap();
 		apply(&recovered, removed);

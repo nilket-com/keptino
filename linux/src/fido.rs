@@ -437,13 +437,15 @@ pub fn enroll_new_key(
 /// Finds the key that owns `slot` among those present, by asserting it,
 /// and enrolls that same key into a new slot wrapping `roaming`: how a rekey
 /// keeps a key enrolled without trusting whichever key happens to be first.
+/// Also returns the roaming secret the old slot released, so the caller can
+/// check the master password against the open vault (ADR 0041).
 pub fn reenroll_owner(
 	slot: &libkeptino::roaming::KeySlot,
 	roaming: &[u8; 32],
 	pin: Option<Zeroizing<String>>,
 	cancel: &AtomicBool,
 	mut on_prompt: impl FnMut(Prompt),
-) -> Result<libkeptino::roaming::KeySlot, Failure> {
+) -> Result<(libkeptino::roaming::KeySlot, Zeroizing<[u8; 32]>), Failure> {
 	let keys = open_keys();
 	if keys.is_empty() {
 		return Err(Failure::NoCredential);
@@ -454,7 +456,7 @@ pub fn reenroll_owner(
 			Err(_) => continue,
 		};
 		let (mut ceremony, step) = Ceremony::assert(transport, vec![slot.clone()]);
-		match run(
+		let previous = match run(
 			&mut ceremony,
 			step,
 			device.as_mut(),
@@ -462,11 +464,11 @@ pub fn reenroll_owner(
 			cancel,
 			&mut on_prompt,
 		) {
-			Step::Done(Outcome::Asserted { .. }) => {}
+			Step::Done(Outcome::Asserted { roaming, .. }) => roaming,
 			Step::Failed(Failure::NoCredential) => continue,
 			Step::Failed(failure) => return Err(failure),
 			_ => return Err(Failure::Mismatch),
-		}
+		};
 		// This device owns the slot: it gets the new one.
 		let (mut ceremony, step) =
 			Ceremony::enroll(transport, slot.uv_mode, Zeroizing::new(*roaming));
@@ -478,7 +480,7 @@ pub fn reenroll_owner(
 			cancel,
 			&mut on_prompt,
 		) {
-			Step::Done(Outcome::Enrolled(new_slot)) => Ok(new_slot),
+			Step::Done(Outcome::Enrolled(new_slot)) => Ok((new_slot, previous)),
 			Step::Failed(failure) => Err(failure),
 			_ => Err(Failure::Mismatch),
 		};
@@ -761,9 +763,10 @@ mod tests {
 		// Re-enrolling the owner: with both present, the backup is found by
 		// its slot and gets the new one; the daily key alone does not qualify.
 		let fresh = [0x44u8; 32];
-		let renewed = with_keys(vec![daily.clone(), backup.clone()], || {
+		let (renewed, previous) = with_keys(vec![daily.clone(), backup.clone()], || {
 			reenroll_owner(&slot, &fresh, None, &cancel, |_| {}).unwrap()
 		});
+		assert_eq!(*previous, roaming, "the old slot released the old secret");
 		assert_ne!(renewed.cred_id, slot.cred_id);
 		assert_eq!(renewed.uv_mode, UvMode::TouchOnly);
 		let opened = with_keys(vec![backup], || {
