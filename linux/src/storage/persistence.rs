@@ -7,7 +7,10 @@
 use crate::storage::keys::{self, RekeyMarker};
 use crate::{
 	logger::{error, info, warn},
-	storage::{Database, MetaEntry, SYSTEMD_CREDS, SecretMemory, remote::Remote},
+	storage::{
+		Database, MetaEntry, SYSTEMD_CREDS, SecretMemory,
+		remote::{REMOTE_CHANGED, Remote},
+	},
 };
 use libkeptino::{
 	crypto::{self, KEY_SIZE, PEPPER_SIZE, SALT_SIZE},
@@ -177,7 +180,7 @@ impl OpenedVault {
 					Ok(fetched) => {
 						let current = fetched.bytes.as_deref().map(blake3::hash);
 						if current != *synced.lock().unwrap_or_else(|e| e.into_inner()) {
-							Err("The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.".into())
+							Err(REMOTE_CHANGED.into())
 						} else {
 							// The store is asked to refuse the write if the
 							// object moved between the fetch and now; an S3
@@ -250,6 +253,13 @@ fn parse_envelope(bytes: &[u8], what: &str) -> Result<Envelope, String> {
 	Envelope::parse(bytes, KdfParams::BUILD_DEFAULT).map_err(|err| format!("{what} vault: {err}"))
 }
 
+/// The message for a name with no local file and no bucket object.
+pub fn no_such_vault(db_name: &str) -> String {
+	format!(
+		"No vault named \"{db_name}\" exists here or in the bucket. Check the name, or use Create vault to start one."
+	)
+}
+
 /// The message for two copies with different salts, naming the way out.
 pub const DIFFERENT_VAULT_HELP: &str = "The copy in the bucket has a different salt: it was rekeyed on another device, or another vault uses this name. To take the bucket copy and keep this one as a generation, use Adopt bucket copy.";
 
@@ -261,6 +271,129 @@ pub async fn load(db_name: &str, input: UnlockInput) -> Result<OpenedVault, Stri
 /// generation: the explicit way across a rekey done elsewhere.
 pub async fn adopt_remote(db_name: &str, input: UnlockInput) -> Result<OpenedVault, String> {
 	open(db_name, input, true).await
+}
+
+/// Why `db_name` cannot be created on this machine, checked before any
+/// request: a vault file, a pending rekey or a revision record means a
+/// vault by that name was here, and a new one would hide or break it.
+fn creation_blocker(dir: &Path, db_name: &str) -> Option<String> {
+	if db_name.is_empty() {
+		return Some("Enter a name for the new vault.".into());
+	}
+	if db_name.contains(['/', '\0']) {
+		return Some("Use a database name without path separators or NUL bytes.".into());
+	}
+	[
+		format!("{db_name}.keptino"),
+		format!("{db_name}.keptino.rekey"),
+		format!("{db_name}.revision"),
+	]
+	.into_iter()
+	.find(|file| fs::symlink_metadata(dir.join(file)).is_ok())
+	.map(|file| {
+		format!(
+			"A vault named \"{db_name}\" was used here: ~/.config/keptino/{file} exists. Unlock it, or remove that file to start over."
+		)
+	})
+}
+
+/// Creates `db_name` (ADR 0018): only after the bucket answered that no
+/// such object exists, and with the local file and revision record written
+/// only after the new vault reached the bucket. A request that fails or
+/// loses a race leaves nothing on this machine.
+pub async fn create(db_name: &str, password: Zeroizing<String>) -> Result<OpenedVault, String> {
+	let dir = base_path();
+	if let Some(blocker) = creation_blocker(&dir, db_name) {
+		return Err(blocker);
+	}
+	if password.is_empty() {
+		return Err("Enter a master password for the new vault.".into());
+	}
+	let taken = || {
+		format!("A vault named \"{db_name}\" already exists in the bucket. Use Unlock to open it.")
+	};
+	let (provider, fetched) = Remote::download(&dir, db_name).await?;
+	if fetched.bytes.is_some() {
+		return Err(taken());
+	}
+	let precondition = fetched.precondition()?;
+	let pepper = load_pepper()?;
+	let derive = |candidate: &Candidate<'_>| match master_key_derivation(
+		&password,
+		&pepper,
+		candidate.salt,
+		None,
+		candidate.cost,
+	) {
+		Ok(key) => Derived::Key(key),
+		Err(err) => Derived::Failed(err),
+	};
+	let database = unlock(db_name, None, None, KdfParams::BUILD_DEFAULT, derive)
+		.map_err(|err: UnlockError<String>| err.to_string())?
+		.database;
+	let fail = |database: &Database, err: String| {
+		database.zeroize();
+		Err(err)
+	};
+	let bytes = match database.encode(WRITE_AAD_FORMAT, KdfParams::BUILD_DEFAULT) {
+		Ok(bytes) => bytes,
+		Err(err) => return fail(&database, format!("Not created: {err}")),
+	};
+	// A store that speaks S3 refuses the write if any object appeared since
+	// the fetch. Backblaze cannot, so it is asked once more just before an
+	// unconditional upload; the window left is named in ADR 0018.
+	if !fetched.conditional {
+		match provider.fetch(&dir, db_name).await {
+			Ok(again) if again.bytes.is_none() => {}
+			Ok(_) => return fail(&database, taken()),
+			Err(err) => return fail(&database, format!("Not created. {err}")),
+		}
+	}
+	match provider.upload(&dir, db_name, &bytes, precondition).await {
+		Ok(()) => {}
+		Err(err) if err == REMOTE_CHANGED => {
+			return fail(
+				&database,
+				format!(
+					"Another device created a vault named \"{db_name}\" first. Use Unlock to open it."
+				),
+			);
+		}
+		Err(err) => return fail(&database, format!("Not created. {err}")),
+	}
+	// Create-only on this machine too: a file that appeared during the
+	// derivation is kept, and this one is not written over it.
+	if write_new(&temp_path(db_name), &db_path(db_name), &bytes).is_err() {
+		return fail(
+			&database,
+			"The new vault reached the bucket, but the local file could not be written. Use Unlock to open it."
+				.into(),
+		);
+	}
+	// The rollback floor must exist before the vault is used; a failure is
+	// reported, not only logged.
+	let recorded = database.revision().map_or(Ok(()), |revision| {
+		write_atomic(
+			&revision_temp_path(db_name),
+			&revision_path(db_name),
+			revision.to_string().as_bytes(),
+		)
+	});
+	if let Err(err) = recorded {
+		return fail(
+			&database,
+			format!(
+				"The new vault was created, but its revision record could not be written ({err}). Use Unlock to open it."
+			),
+		);
+	}
+	info("New database created.");
+	Ok(OpenedVault {
+		database,
+		remote: Ok(provider),
+		synced: Arc::new(Mutex::new(Some(blake3::hash(&bytes)))),
+		rekey: Arc::default(),
+	})
 }
 
 async fn open(db_name: &str, input: UnlockInput, adopt: bool) -> Result<OpenedVault, String> {
@@ -295,6 +428,11 @@ async fn open(db_name: &str, input: UnlockInput, adopt: bool) -> Result<OpenedVa
 		Err(err) if local.is_some() => (Err(format!("Opened local copy. {err}")), None, None, None),
 		Err(err) => return Err(err),
 	};
+	// Unlock never creates (ADR 0018): a name found nowhere is most often
+	// a typing mistake, and creating there would hide it.
+	if local.is_none() && remote.is_none() {
+		return Err(no_such_vault(db_name));
+	}
 	// A rekey this device committed and has not uploaded: the remote is the
 	// predecessor it names, so it is withheld and the local copy opens
 	// alone, with uploads enabled to finish the rekey.
@@ -517,6 +655,32 @@ fn write_atomic_keeping(
 	Ok(())
 }
 
+/// Writes `dat` at `path` only if nothing is there: through a private,
+/// synced temporary that is hard-linked into place, which fails when the
+/// name exists, then removed.
+fn write_new(tmp_path: &Path, path: &Path, dat: &[u8]) -> std::io::Result<()> {
+	match fs::remove_file(tmp_path) {
+		Ok(()) => {}
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+		Err(err) => return Err(err),
+	}
+	let mut file = fs::OpenOptions::new()
+		.write(true)
+		.create_new(true)
+		.mode(0o600)
+		.open(tmp_path)?;
+	file.write_all(dat)?;
+	file.sync_all()?;
+	mem::drop(file);
+	let linked = fs::hard_link(tmp_path, path);
+	let _ = fs::remove_file(tmp_path);
+	linked?;
+	if let Some(parent) = path.parent() {
+		fs::File::open(parent)?.sync_all()?;
+	}
+	Ok(())
+}
+
 fn generation_path(path: &Path, n: usize) -> PathBuf {
 	let mut name = path.as_os_str().to_owned();
 	name.push(format!(".{n}"));
@@ -554,6 +718,19 @@ mod tests {
 		fs::create_dir_all(&dir).unwrap();
 		let tmp = dir.join(".main.keptino");
 		let path = dir.join("main.keptino");
+		// Create-only: never over an existing file, and no temporary left.
+		write_new(&tmp, &path, b"first").unwrap();
+		assert_eq!(
+			fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+			0o600
+		);
+		assert_eq!(
+			write_new(&tmp, &path, b"second").unwrap_err().kind(),
+			std::io::ErrorKind::AlreadyExists
+		);
+		assert_eq!(fs::read(&path).unwrap(), b"first");
+		assert!(!tmp.exists());
+		fs::remove_file(&path).unwrap();
 		fs::write(&tmp, b"interrupted").unwrap();
 		fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
 		write_atomic(&tmp, &path, b"vault").unwrap();
@@ -702,6 +879,31 @@ mod tests {
 		assert!(converted.aad.is_empty());
 		assert_eq!(converted.revision, Some(3));
 		assert!(Envelope::parse(&encoded[1..], KdfParams::DEBUG).is_err());
+	}
+
+	#[test]
+	fn creation_is_refused_where_a_vault_of_that_name_was() {
+		let dir = env::temp_dir().join(format!("keptino-create-{}", std::process::id()));
+		fs::create_dir_all(&dir).unwrap();
+		assert_eq!(creation_blocker(&dir, "fresh"), None);
+		assert!(creation_blocker(&dir, "").is_some());
+		assert!(creation_blocker(&dir, "a/b").is_some());
+		assert!(creation_blocker(&dir, "a\0b").is_some());
+		for file in ["main.keptino", "main.keptino.rekey", "main.revision"] {
+			fs::write(dir.join(file), b"").unwrap();
+			let blocker = creation_blocker(&dir, "main").expect("refused");
+			assert!(blocker.contains(file), "{blocker}");
+			fs::remove_file(dir.join(file)).unwrap();
+		}
+		// A dangling link is still something there.
+		std::os::unix::fs::symlink(dir.join("gone"), dir.join("main.keptino")).unwrap();
+		assert!(creation_blocker(&dir, "main").is_some());
+		// Generations alone, or another vault's files, do not block.
+		fs::remove_file(dir.join("main.keptino")).unwrap();
+		fs::write(dir.join("main.keptino.1"), b"").unwrap();
+		fs::write(dir.join("mainly.keptino"), b"").unwrap();
+		assert_eq!(creation_blocker(&dir, "main"), None);
+		fs::remove_dir_all(&dir).unwrap();
 	}
 
 	#[test]

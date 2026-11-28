@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 #[derive(Clone)]
 pub enum Message {
 	AttemptUnlock,
+	AttemptCreate,
 	AdoptRemote,
 	CloseWindow,
 	CopyUsername,
@@ -13,6 +14,7 @@ pub enum Message {
 	CopyPin,
 	DbNameChanged(String),
 	DbPasswordChanged(Zeroizing<String>),
+	DbPasswordConfirmChanged(Zeroizing<String>),
 	DbPinChanged(Zeroizing<String>),
 	DragWindow,
 	FocusNext,
@@ -53,6 +55,7 @@ pub enum Message {
 	CancelRemoveKey,
 	KeysResult(Result<KeysOutcome, String>),
 	Tick,
+	ToggleCreate,
 	TogglePasswordVisibility,
 	TogglePinVisibility,
 	ToggleNoteVisibility,

@@ -27,6 +27,26 @@ struct LockedState {
 	offer_adopt: bool,
 	is_processing: bool,
 	status: String,
+	/// The screen creates a new vault instead of unlocking one (ADR 0018).
+	creating: bool,
+	/// The new vault's password, entered a second time.
+	db_password_confirm: Zeroizing<String>,
+}
+
+impl LockedState {
+	fn fresh() -> Self {
+		Self {
+			db_name: "".into(),
+			db_password: Zeroizing::new(String::new()),
+			db_pin: Zeroizing::new(String::new()),
+			has_slots: false,
+			offer_adopt: false,
+			is_processing: false,
+			status: String::new(),
+			creating: false,
+			db_password_confirm: Zeroizing::new(String::new()),
+		}
+	}
 }
 
 /// The keys screen: the vault's slots and the inputs its ceremonies need.
@@ -149,15 +169,7 @@ pub fn run() -> Result {
 }
 
 fn new() -> AppState {
-	AppState::Locked(LockedState {
-		db_name: "".into(),
-		db_password: Zeroizing::new(String::new()),
-		db_pin: Zeroizing::new(String::new()),
-		has_slots: false,
-		offer_adopt: false,
-		is_processing: false,
-		status: String::new(),
-	})
+	AppState::Locked(LockedState::fresh())
 }
 
 fn update(app_state: &mut AppState, message: Message) -> Task<Message> {
@@ -223,17 +235,31 @@ fn view(app_state: &AppState) -> Element<'_, Message> {
 			offer_adopt,
 			is_processing,
 			status,
-		}) => components::unlock_screen(
-			db_name,
-			db_password,
-			db_pin,
-			components::UnlockExtras {
-				has_slots: *has_slots,
-				offer_adopt: *offer_adopt,
-			},
-			is_processing,
-			status,
-		),
+			creating,
+			db_password_confirm,
+		}) => {
+			if *creating {
+				components::create_screen(
+					db_name,
+					db_password,
+					db_password_confirm,
+					is_processing,
+					status,
+				)
+			} else {
+				components::unlock_screen(
+					db_name,
+					db_password,
+					db_pin,
+					components::UnlockExtras {
+						has_slots: *has_slots,
+						offer_adopt: *offer_adopt,
+					},
+					is_processing,
+					status,
+				)
+			}
+		}
 		AppState::Unlocked(UnlockedState {
 			query,
 			password_entry,
@@ -276,13 +302,15 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 		offer_adopt,
 		is_processing,
 		status,
+		creating,
+		db_password_confirm,
 	}) = app_state
 	else {
 		unreachable!("update_locked called with non-Locked state")
 	};
 	match message {
 		Message::AttemptUnlock | Message::AdoptRemote => {
-			if *is_processing {
+			if *is_processing || *creating {
 				return Task::none();
 			}
 			*is_processing = true;
@@ -309,6 +337,47 @@ fn update_locked(message: Message, app_state: &mut AppState) -> Task<Message> {
 				},
 				Message::UnlockResult,
 			);
+		}
+		Message::ToggleCreate => {
+			if *is_processing {
+				return Task::none();
+			}
+			*creating = !*creating;
+			*offer_adopt = false;
+			*db_password = Zeroizing::new(String::new());
+			*db_password_confirm = Zeroizing::new(String::new());
+			*status = if *creating {
+				"The master password cannot be recovered. Keep it, and the pepper seed, safe."
+					.into()
+			} else {
+				String::new()
+			};
+		}
+		Message::AttemptCreate => {
+			if *is_processing || !*creating {
+				return Task::none();
+			}
+			if db_password.is_empty() {
+				*status = "Enter a master password for the new vault.".into();
+				return Task::none();
+			}
+			if **db_password != **db_password_confirm {
+				*status = "The two passwords differ.".into();
+				*db_password_confirm = Zeroizing::new(String::new());
+				return Task::none();
+			}
+			*is_processing = true;
+			*status = "Creating the vault; deriving the key takes a moment.".into();
+			*db_password_confirm = Zeroizing::new(String::new());
+			let password = std::mem::replace(db_password, Zeroizing::new(String::new()));
+			let db_name_clone = db_name.clone();
+			return Task::perform(
+				async move { persistence::create(&db_name_clone, password).await },
+				Message::UnlockResult,
+			);
+		}
+		Message::DbPasswordConfirmChanged(new_password) => {
+			*db_password_confirm = new_password;
 		}
 		Message::UnlockResult(Err(err)) => {
 			*is_processing = false;
@@ -822,15 +891,7 @@ fn update_unlocked(message: Message, app_state: &mut AppState) -> Task<Message> 
 			}
 			clipboard::clear_pending();
 			db.zeroize();
-			*app_state = AppState::Locked(LockedState {
-				db_name: "".into(),
-				db_password: Zeroizing::new(String::new()),
-				db_pin: Zeroizing::new(String::new()),
-				has_slots: false,
-				offer_adopt: false,
-				is_processing: false,
-				status: String::new(),
-			});
+			*app_state = AppState::Locked(LockedState::fresh());
 		}
 		_ => {}
 	}
@@ -1187,6 +1248,60 @@ mod tests {
 		};
 		assert!(state.status.starts_with("Nothing generated"));
 		assert_eq!(state.password_entry.get_password().len(), 6);
+	}
+
+	#[test]
+	fn create_asks_for_the_password_twice_and_moves_it_out_of_the_ui() {
+		let locked = |app: &AppState| match app {
+			AppState::Locked(state) => (
+				state.creating,
+				state.is_processing,
+				state.db_password.to_string(),
+				state.db_password_confirm.to_string(),
+				state.status.clone(),
+			),
+			AppState::Unlocked(_) => panic!("unlocked"),
+		};
+		let mut app = new();
+		// Unlock's form never creates; Create is its own mode.
+		let _ = update(&mut app, Message::AttemptCreate);
+		assert!(!locked(&app).1);
+		let _ = update(&mut app, Message::ToggleCreate);
+		let _ = view(&app);
+		assert!(locked(&app).0);
+		assert!(locked(&app).4.contains("cannot be recovered"));
+		let _ = update(&mut app, Message::DbNameChanged("new".into()));
+		let _ = update(&mut app, Message::AttemptCreate);
+		assert!(!locked(&app).1);
+		assert!(locked(&app).4.contains("Enter a master password"));
+		let _ = update(
+			&mut app,
+			Message::DbPasswordChanged(Zeroizing::new("one".into())),
+		);
+		let _ = update(
+			&mut app,
+			Message::DbPasswordConfirmChanged(Zeroizing::new("two".into())),
+		);
+		let _ = update(&mut app, Message::AttemptCreate);
+		let (_, processing, password, confirm, status) = locked(&app);
+		assert!(!processing && password == "one" && confirm.is_empty());
+		assert_eq!(status, "The two passwords differ.");
+		// Unlock is ignored while the create form is up.
+		let _ = update(&mut app, Message::AttemptUnlock);
+		assert!(!locked(&app).1);
+		let _ = update(
+			&mut app,
+			Message::DbPasswordConfirmChanged(Zeroizing::new("one".into())),
+		);
+		let task = update(&mut app, Message::AttemptCreate);
+		let (creating, processing, password, confirm, _) = locked(&app);
+		assert!(creating && processing && password.is_empty() && confirm.is_empty());
+		let _ = update(&mut app, Message::ToggleCreate);
+		assert!(locked(&app).0, "Back waits for the running creation");
+		drop(task);
+		let _ = update(&mut app, Message::UnlockResult(Err("Not created.".into())));
+		let _ = update(&mut app, Message::ToggleCreate);
+		assert!(!locked(&app).0);
 	}
 
 	#[test]

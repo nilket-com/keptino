@@ -54,7 +54,9 @@ mock="http://127.0.0.1:$port"
 # What linux/setup.sh stores, minus the TPM: `systemd-creds decrypt` is
 # replaced by a script that prints the file.
 say 'Deriving the pepper as linux/setup.sh does (4 GiB)'
-pepper=$(printf '%s' "$PEPPER_SEED" | argon2 digipepper -id -t 4 -m 22 -p 1 -l 32 -r -v 13)
+# The same binary and flag setup runs (ADR 0010), not the argon2 tool.
+cargo build --quiet --locked --release -p keptino
+pepper=$(printf '%s' "$PEPPER_SEED" | "$target_dir/release/keptino" --derive-pepper)
 mkdir -p "$work/bin" "$work/home/.config/keptino"
 printf '#!/bin/sh\nexec cat "$4"\n' >"$work/bin/systemd-creds"
 chmod +x "$work/bin/systemd-creds"
@@ -115,7 +117,7 @@ PY
 # isolated build uses its original CLI and lockfile; only its unused Linux
 # dependency is omitted so testing this binary does not build the desktop UI.
 legacy_writer_roundtrip() {
-	local input=$1 mem=$2 repo legacy="$work/legacy" copy="$work/legacy-edit.keptino"
+	local input=$1 mem=$2 revision=$3 repo legacy="$work/legacy" copy="$work/legacy-edit.keptino"
 	local ref=be0f6f370ee9b8a8a204a5def670176092f00a9b
 	repo=$(git rev-parse --show-toplevel)
 	mkdir -p "$legacy"
@@ -126,10 +128,10 @@ legacy_writer_roundtrip() {
 	cp "$input" "$copy"
 	local before after
 	before=$(android metadata "$copy" "$PASSWORD" "$pepper" "$mem")
-	python3 - "$before" "$mem" <<'PYMETA'
+	python3 - "$before" "$mem" "$revision" <<'PYMETA'
 import json, sys
 assert json.loads(sys.argv[1]) == {
-    "format": None, "revision": 1, "kdf_m": sys.argv[2], "kdf_t": "1", "kdf_p": "1"
+    "format": None, "revision": int(sys.argv[3]), "kdf_m": sys.argv[2], "kdf_t": "1", "kdf_p": "1"
 }
 PYMETA
 	"$legacy/target/debug/android-vault" write "$copy" "$PASSWORD" "$pepper" "$mem" <<'JSON'
@@ -160,7 +162,7 @@ roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
 
 	if [[ $format == unmarked ]]; then
 		say "[$profile] Linux creates an unmarked vault and uploads it"
-		linux write "$db" "$PASSWORD" <entries.json
+		linux create "$db" "$PASSWORD" <entries.json
 	else
 		say "[$profile] Seed both copies with the historical fixture"
 		cp "../droid/tests/fixtures/linux-$profile$suffix.keptino" "$file"
@@ -171,15 +173,19 @@ roundtrip() { # <profile> <mem-kib> <format> [fixture directory]
 	local written
 	written=$(linux read "$db" "$PASSWORD")
 	same 'Linux reads back what it wrote' "$(cat entries.json)" "$written"
+	# A created vault is uploaded empty at revision one and saved with the
+	# entries at two (ADR 0018); a seeded fixture opens at its own.
+	local first=1
+	[[ $format == unmarked ]] && first=2
 	if [[ $format != 1 ]]; then
-		[[ $(cat "$work/home/.config/keptino/$db.revision") == 1 ]]
+		[[ $(cat "$work/home/.config/keptino/$db.revision") == "$first" ]]
 	fi
 	if [[ -n $fixtures ]]; then
 		cp "$file" "$fixtures/linux-$profile$suffix.keptino"
 	fi
 
 	if [[ $profile == debug && $format == unmarked ]]; then
-		legacy_writer_roundtrip "$file" "$mem"
+		legacy_writer_roundtrip "$file" "$mem" "$first"
 	fi
 
 	say "[$profile] Android downloads and opens it"
@@ -206,7 +212,7 @@ JSON
 	local seen
 	seen=$(linux read "$db" "$PASSWORD")
 	if [[ $format != 1 ]]; then
-		[[ $(cat "$work/home/.config/keptino/$db.revision") == 2 ]]
+		[[ $(cat "$work/home/.config/keptino/$db.revision") == $((first + 1)) ]]
 	fi
 	same 'Linux reads the Android vault' "$edited" "$seen"
 	expect 'the edit made on Android' "$seen" bank password 'changed on the phone ☎'
@@ -266,8 +272,8 @@ manifest = {
 		"linux-release.keptino": {"mem_kib": 4194304},
 		"linux-debug-v2.keptino": {"mem_kib": 4096, "format": 2},
 		"linux-release-v2.keptino": {"mem_kib": 4194304, "format": 2},
-		"linux-debug-unmarked.keptino": {"mem_kib": 4096, "revision": 1},
-		"linux-release-unmarked.keptino": {"mem_kib": 4194304, "revision": 1},
+		"linux-debug-unmarked.keptino": {"mem_kib": 4096, "revision": 2},
+		"linux-release-unmarked.keptino": {"mem_kib": 4194304, "revision": 2},
 		"linux-debug-fido.keptino": {
 			"mem_kib": 4096, "revision": 1, "db_name": "vaultfido",
 			"fido_slot_1": {"uv_mode": "verified", "seed": "keptino-fixture-security-key-001", "pin": "1234"},

@@ -141,12 +141,52 @@ linux() {
 	env HOME="$work/home" PATH="$work/bin:$PATH" "$bin" "$@" 2>>"$work/linux.log"
 }
 
-say 'Missing object: a fresh vault is created and uploaded'
-printf '[{"name":"first","username":"a","password":"one"}]' | linux write "$db" "$password"
+say 'Missing object: Unlock reports it and creates nothing (ADR 0018)'
+set +e
+printf '[]' | linux write "$db" "$password"
+rc=$?
+set -e
+[[ $rc == 4 ]] || { echo "unlock of a missing name did not fail (exit $rc)"; tail -5 "$work/linux.log"; exit 1; }
+grep -q "No vault named \"$db\" exists" "$work/linux.log" || { echo "the refusal did not name the missing vault"; tail -5 "$work/linux.log"; exit 1; }
+code=$(aws_curl GET "$endpoint/$bucket/$db.keptino")
+[[ $code == 404 ]] || { echo "unlock wrote to the bucket: HTTP $code"; exit 1; }
+[[ ! -e $work/home/.config/keptino/$db.keptino && ! -e $work/home/.config/keptino/$db.revision ]] || { echo "unlock wrote a local file"; exit 1; }
+ok 'unlock of a missing name wrote nothing'
+
+say 'Create: the new vault reaches the bucket, then the local file at revision one'
+printf '[{"name":"first","username":"a","password":"one"}]' | linux create "$db" "$password"
 code=$(aws_curl GET "$endpoint/$bucket/$db.keptino")
 [[ $code == 200 ]] || { echo "upload missing: HTTP $code"; cat "$work/linux.log"; exit 1; }
 cp "$work/curl.out" "$work/first.b64"
-ok 'first save reached the bucket'
+# create uploads revision 1, and the entries save as revision 2.
+[[ $(cat "$work/home/.config/keptino/$db.revision") == 2 ]] || { echo "unexpected revision record"; exit 1; }
+linux read "$db" "$password" | grep -q '"first"' || { echo "the created vault did not reopen"; exit 1; }
+ok 'created, saved and reopened'
+
+say 'Create again: refused by the local file, then by the bucket object'
+set +e
+printf '[]' | linux create "$db" "$password"; rc_local=$?
+mv "$work/home/.config/keptino" "$work/home/kept"
+mkdir -p "$work/home/.config/keptino"
+cp "$work/home/kept/"{pepper.cred,storage-provider,s3.cred} "$work/home/.config/keptino/"
+printf '[]' | linux create "$db" "$password"; rc_bucket=$?
+set -e
+[[ $rc_local == 4 && $rc_bucket == 4 ]] || { echo "a second create was not refused ($rc_local, $rc_bucket)"; tail -5 "$work/linux.log"; exit 1; }
+grep -q "was used here" "$work/linux.log" && grep -q "already exists in the bucket" "$work/linux.log" || { echo "the refusals did not name their reason"; tail -5 "$work/linux.log"; exit 1; }
+[[ ! -e $work/home/.config/keptino/$db.keptino && ! -e $work/home/.config/keptino/$db.revision ]] || { echo "a refused create wrote a local file"; exit 1; }
+rm -r "$work/home/.config/keptino"; mv "$work/home/kept" "$work/home/.config/keptino"
+aws_curl GET "$endpoint/$bucket/$db.keptino" >/dev/null
+cmp -s "$work/curl.out" "$work/first.b64" || { echo "a refused create changed the bucket"; exit 1; }
+ok 'both duplicates refused, nothing written'
+
+say 'Create precondition: does this store honor If-None-Match?'
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT --aws-sigv4 "aws:amz:$region:s3" "${curl_ca[@]}" -u "$access_key:$secret_key" \
+	-H 'If-None-Match: *' --data-binary "@$work/first.b64" "$endpoint/$bucket/$db.keptino")
+if [[ $code == 412 || $code == 409 ]]; then
+	ok "the store refuses a create-only PUT over an existing object ($code)"
+else
+	echo "note: the store answered HTTP $code to If-None-Match over an existing object; the fetch before create alone protects this store"
+fi
 
 say 'Download: the same vault opens from the bucket alone'
 rm "$work/home/.config/keptino/$db.keptino" "$work/home/.config/keptino/$db.revision"

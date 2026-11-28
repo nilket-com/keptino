@@ -141,6 +141,15 @@ destination bucket. Switching redirects future syncs and leaves the previous
 bucket's object in place. To recover on another installation, configure the
 same bucket and use the original pepper seed, database name, and master password.
 
+Unlock opens an existing vault only: a name found neither on this machine
+nor in the bucket is reported, never created. To start a vault on Linux,
+choose Create vault on the locked screen and enter the name and the master
+password twice. Creation needs the bucket to answer that no object by that
+name exists, and the local file is written only after the upload succeeds.
+S3-compatible stores receive a create-only upload; Backblaze B2 cannot
+refuse a concurrent one, so do not create the same name on two devices at
+once.
+
 ### Cloud objects after the rename
 
 Keptino reads and writes `<database name>.keptino` in the existing bucket.

@@ -297,6 +297,9 @@ async fn bounded_body(mut resp: Response, what: &str) -> Result<Vec<u8>> {
 	Ok(body)
 }
 
+/// An upload's precondition failed: the object is not what was fetched.
+pub(super) const REMOTE_CHANGED: &str = "The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.";
+
 /// The storage session opened with this vault. The API credential is
 /// decrypted once at unlock and kept in secret memory, so a save spawns no
 /// helper and passes no plaintext through a pipe. The encrypted file is
@@ -376,7 +379,7 @@ impl Remote {
 				response.status(),
 				StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT | StatusCode::NOT_FOUND
 			) {
-			return Err("The remote vault changed since this session synced it. Saved locally only; unlock again to load the newer copy before uploading.".into());
+			return Err(REMOTE_CHANGED.into());
 		}
 		if !response.status().is_success() {
 			return Err(format!(

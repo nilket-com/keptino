@@ -150,6 +150,11 @@ pub fn unlock_screen<'a>(
 		DEFAULT_BUTTON_SIZE,
 	)]
 	.spacing(20);
+	buttons = buttons.push(styled_button(
+		"Create vault",
+		Message::ToggleCreate,
+		(180, 40),
+	));
 	if extras.offer_adopt {
 		buttons = buttons.push(styled_button(
 			"Adopt bucket copy",
@@ -163,6 +168,47 @@ pub fn unlock_screen<'a>(
 	let unlock_panel = container(center(fields)).width(Fill).height(Fill);
 
 	column![title_bar(), unlock_panel].into()
+}
+
+/// The locked screen's other form: a name and the new master password,
+/// twice. Creation never happens from Unlock (ADR 0018).
+pub fn create_screen<'a>(
+	db_name: &str,
+	db_password: &str,
+	db_password_confirm: &str,
+	is_processing: &bool,
+	status: &'a str,
+) -> Element<'a, Message> {
+	let buttons = row![
+		styled_button(
+			if *is_processing { "Creating" } else { "Create" },
+			Message::AttemptCreate,
+			DEFAULT_BUTTON_SIZE,
+		),
+		styled_button("Back", Message::ToggleCreate, DEFAULT_BUTTON_SIZE),
+	]
+	.spacing(20);
+	let fields = column![
+		center(text("Create Database").color(colors::BRAND_GREEN).size(18)).height(30),
+		styled_text_input("db_name...", db_name)
+			.on_input(Message::DbNameChanged)
+			.on_submit(Message::FocusNext),
+		styled_text_input("new master password...", db_password)
+			.secure(true)
+			.on_input(|value| Message::DbPasswordChanged(Zeroizing::new(value)))
+			.on_submit(Message::FocusNext),
+		styled_text_input("the same password again...", db_password_confirm)
+			.secure(true)
+			.on_input(|value| Message::DbPasswordConfirmChanged(Zeroizing::new(value)))
+			.on_submit(Message::AttemptCreate),
+		center(buttons).height(40),
+		center(text(status).color(colors::TEXT_STATUS)).height(100),
+	]
+	.spacing(20)
+	.width(600);
+	let create_panel = container(center(fields)).width(Fill).height(Fill);
+
+	column![title_bar(), create_panel].into()
 }
 
 fn styled_tooltip<'a, Message: 'a>(
