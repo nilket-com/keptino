@@ -1,6 +1,15 @@
 package com.keptino.app
 
 import android.app.Application
+import android.app.KeyguardManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -25,6 +34,39 @@ internal data class GeneratorOptions(
 internal data class EntryRow(val name: String, val username: String, val tags: List<String>, val weak: Boolean)
 
 class VaultViewModel(application: Application) : AndroidViewModel(application) {
+    private val preferences = application.getSharedPreferences("vault_lock", Context.MODE_PRIVATE)
+    var lockOnScreenOff by mutableStateOf(preferences.getBoolean("screen_off", true)); private set
+    private val screenLocks = MutableLiveData<Long>()
+    internal val screenLockEvents: LiveData<Long> get() = screenLocks
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) lockForScreenOff()
+        }
+    }
+
+    init {
+        ContextCompat.registerReceiver(application, screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    fun useScreenLock(enabled: Boolean) {
+        lockOnScreenOff = enabled
+        preferences.edit().putBoolean("screen_off", enabled).apply()
+    }
+
+    private fun lockForScreenOff() {
+        if (!lockOnScreenOff) return
+        lock()
+        screenLocks.value = (screenLocks.value ?: 0L) + 1
+    }
+
+    internal fun checkDeviceLock() {
+        val app = getApplication<Application>()
+        if (!app.getSystemService(PowerManager::class.java).isInteractive ||
+            app.getSystemService(KeyguardManager::class.java).isDeviceLocked) lockForScreenOff()
+    }
+
     val storage = VaultStorage(application)
     var configured by mutableStateOf(storage.configured()); private set
     var unlocked by mutableStateOf(false); private set
@@ -482,5 +524,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; pendingNames = emptySet(); currentEntryName = ""
         status = "Locked"
     }
-    override fun onCleared() { lock() }
+    override fun onCleared() {
+        getApplication<Application>().unregisterReceiver(screenReceiver)
+        lock()
+    }
 }

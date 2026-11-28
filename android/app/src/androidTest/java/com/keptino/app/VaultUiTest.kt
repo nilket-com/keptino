@@ -5,6 +5,8 @@ import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Until
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -83,6 +85,96 @@ class VaultUiTest {
             compose.onNodeWithText("Lock").performClick()
             compose.onNodeWithText("Master password").assertExists()
             compose.onNodeWithText("Password health report").assertDoesNotExist()
+        }
+    }
+
+    @Test fun screenOffLocksVaultUnlessDisabled() {
+        val credential = DeviceCredential.fromArguments()
+        assumeTrue(android.os.Build.HARDWARE in setOf("ranchu", "goldfish"))
+        val device = androidx.test.uiautomator.UiDevice.getInstance(instrumentation)
+        val keyguard = context.getSystemService(android.app.KeyguardManager::class.java)
+        val name = "screen-" + java.util.UUID.randomUUID()
+        val master = "screen-test-password"
+        val pepper = pepper()
+        val storage = VaultStorage(context)
+        val handle = Core.open(name, master.toByteArray(), pepper, null, null, 4096)
+        try {
+            LegacySettings.write(context, Settings(pepper))
+            Core.setField(handle, 1, "screen-test-entry".toByteArray())
+            Core.setField(handle, 3, "screen-test-secret".toByteArray())
+            Core.commit(handle)
+            storage.write(name, Core.save(handle))
+        } finally { Core.close(handle); pepper.fill(0) }
+
+        fun unlock() {
+            compose.onNodeWithText("Vault name").performTextReplacement(name)
+            compose.onNodeWithText("Master password").performTextReplacement(master)
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            compose.onNodeWithText("Unlock").performScrollTo().performClick()
+            credential.enterPin()
+            compose.waitUntil(30_000) { shown("screen-test-entry") }
+        }
+
+        fun wake() {
+            device.wakeUp()
+            device.executeShellCommand("wm dismiss-keyguard")
+            if (keyguard.isDeviceLocked) {
+                device.swipe(device.displayWidth / 2, device.displayHeight * 3 / 4,
+                    device.displayWidth / 2, device.displayHeight / 4, 16)
+                fun press(id: String) {
+                    val button = device.wait(Until.findObject(By.res("com.android.systemui", id)), 10_000)
+                    checkNotNull(button) { "The emulator lock screen did not show $id" }.click()
+                }
+                for (digit in args.getString("devicePin")!!) press("key$digit")
+                press("key_enter")
+            }
+            compose.waitUntil(15_000) { !keyguard.isDeviceLocked }
+        }
+
+        val preferences = context.getSharedPreferences("vault_lock", android.content.Context.MODE_PRIVATE)
+        val before = preferences.all["screen_off"] as? Boolean
+        preferences.edit().remove("screen_off").commit()
+        try {
+            wake()
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                lateinit var vm: VaultViewModel
+                scenario.onActivity { vm = androidx.lifecycle.ViewModelProvider(it)[VaultViewModel::class.java] }
+                unlock()
+                compose.onNodeWithText("screen-test-entry").performClick()
+                compose.onNodeWithContentDescription("Reveal Password").performScrollTo().performClick()
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+                scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+                compose.onNodeWithText("Password").assertTextContains("screen-test-secret")
+                device.sleep()
+                try {
+                    // Compose is stopped while the display is off. Poll the retained model on main.
+                    val deadline = android.os.SystemClock.elapsedRealtime() + 8_000
+                    var locked = false
+                    while (!locked && android.os.SystemClock.elapsedRealtime() < deadline) {
+                        instrumentation.runOnMainSync { locked = !vm.unlocked && vm.revealed.isEmpty() && vm.fields.all(String::isEmpty) }
+                        if (!locked) android.os.SystemClock.sleep(100)
+                    }
+                    assertTrue("Screen off must revoke the session before wake", locked)
+                } finally { wake() }
+                compose.onNodeWithText("Master password").assertExists()
+                compose.onNodeWithContentDescription("Settings").performClick()
+                compose.onNodeWithContentDescription("Lock when screen turns off").performScrollTo().assertIsOn().performClick()
+            }
+            ActivityScenario.launch(MainActivity::class.java).use {
+                compose.onNodeWithContentDescription("Settings").performClick()
+                compose.onNodeWithContentDescription("Lock when screen turns off").performScrollTo().assertIsOff()
+                compose.onNodeWithContentDescription("Back to unlock").performClick()
+                unlock()
+                device.sleep()
+                wake()
+                compose.onNodeWithText("screen-test-entry").assertExists()
+            }
+        } finally {
+            val edit = preferences.edit()
+            if (before == null) edit.remove("screen_off") else edit.putBoolean("screen_off", before)
+            edit.commit()
+            LegacySettings.clear(context)
+            storage.file(name).delete()
         }
     }
 

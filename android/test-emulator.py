@@ -129,6 +129,7 @@ try:
                   local_name = run_id + '-local'
                   remote_name = run_id + '-remote'
                   instrument('generate-and-delete', 'com.keptino.app.VaultUiTest#generateRevertAndConfirmDelete', common)
+                  instrument('screen-off', 'com.keptino.app.VaultUiTest#screenOffLocksVaultUnlessDisabled', {})
                   instrument('health-report', 'com.keptino.app.VaultUiTest#healthReportUsesSetEntriesAndClosesOnLock', {})
                   instrument('credential-cancel', 'com.keptino.app.VaultUiTest#cancelledCredentialPromptKeepsVaultLocked', {})
                   instrument('production-ui', 'com.keptino.app.VaultUiTest#productionLinuxVaultCanBeEditedAndSavedThroughUi', dict(common, uiFixture='linux-release.keptino', dbName=local_name))

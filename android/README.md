@@ -250,7 +250,9 @@ Recents screenshot, and Android 14+ marks the vault window's accessibility
 data sensitive. Native allocations request synchronous memory tagging on devices
 that support ARM MTE. [Android MTE](https://developer.android.com/ndk/guides/arm-mte)
 
-The app locks after two minutes without interaction, including time spent in the
+By default, turning the screen off locks the vault. To change this on one
+Android profile, open Settings and toggle **Lock when screen turns off**.
+The app also locks after two minutes without interaction, including time spent in the
 background. A monotonic deadline is checked again when the app resumes, so a
 frozen background process does not extend the unlock period. Unsaved changes are
 discarded when it locks. Locking hides revealed fields immediately, even during

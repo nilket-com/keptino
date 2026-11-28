@@ -35,6 +35,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.isSensitiveData
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -66,6 +67,14 @@ class MainActivity : ComponentActivity() {
     private var clipboardDeadline = 0L
     private var ready = false
     private var promptSignal: CancellationSignal? = null
+    private var handledScreenLock by mutableLongStateOf(0L)
+    private val onScreenLock = androidx.lifecycle.Observer<Long> { event ->
+        if (handledScreenLock != event) {
+            handledScreenLock = event
+            requestR2 = false
+            clearLockedActivity()
+        }
+    }
     private val idleLock = Runnable {
         if (SystemClock.elapsedRealtime() >= idleDeadline) { lockVault() }
     }
@@ -88,14 +97,21 @@ class MainActivity : ComponentActivity() {
         idleDeadline = savedInstanceState?.getLong("idleDeadline") ?: 0L
         clipboardDeadline = savedInstanceState?.getLong("clipboardDeadline") ?: 0L
         clipboardToken = savedInstanceState?.getString("clipboardToken") ?: clipboardCleanup.getString("pending", null)
+        handledScreenLock = savedInstanceState?.getLong("screenLock") ?: 0L
         ready = true
+        vm.screenLockEvents.observeForever(onScreenLock)
         setContent {
             var warnings by remember { mutableStateOf(nativeWarnings) }
             LaunchedEffect(Unit) {
                 warnings = nativeWarnings + withContext(Dispatchers.IO) { deviceWarnings(applicationContext) }
                 vm.refreshKeyProtection()
             }
-            KeptinoTheme { VaultScreen(vm, ::copySecret, ::lockVault, ::authenticate, { AndroidSecurityKey(this) }, warnings, requestR2) { requestR2 = false } }
+            KeptinoTheme {
+                key(handledScreenLock) {
+                    VaultScreen(vm, ::copySecret, ::lockVault, ::authenticate, { AndroidSecurityKey(this) },
+                        warnings, requestR2) { requestR2 = false }
+                }
+            }
         }
     }
     internal suspend fun authenticate(cipher: Cipher): Cipher = withContext(Dispatchers.Main.immediate) {
@@ -144,14 +160,20 @@ class MainActivity : ComponentActivity() {
     }
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
+        outState.putLong("screenLock", handledScreenLock)
         outState.putLong("idleDeadline", idleDeadline)
         outState.putLong("clipboardDeadline", clipboardDeadline)
         outState.putString("clipboardToken", clipboardToken)
     }
     private val clipboardCleanup by lazy { getSharedPreferences("clipboard_cleanup", MODE_PRIVATE) }
     private fun lockVault() {
-        promptSignal?.cancel()
         vm.lock()
+        clearLockedActivity()
+    }
+    private fun clearLockedActivity() {
+        idleDeadline = 0L
+        timer.removeCallbacks(idleLock)
+        promptSignal?.cancel()
         clipboardDeadline = 0L
         clearClipboard()
     }
@@ -165,7 +187,10 @@ class MainActivity : ComponentActivity() {
         if (ready) vm.cancelKeyOperation(background = true)
     }
     override fun onDestroy() {
-        if (ready) vm.cancelKeyOperation()
+        if (ready) {
+            vm.screenLockEvents.removeObserver(onScreenLock)
+            vm.cancelKeyOperation()
+        }
         if (ready && isFinishing) {
             clearClipboard()
             clipboardCleanup.edit().putString("pending", clipboardToken).apply()
@@ -178,6 +203,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (!ready) return
+        vm.checkDeviceLock()
         val now = SystemClock.elapsedRealtime()
         if (idleDeadline != 0L && now >= idleDeadline) idleLock.run()
         if (clipboardToken != null && now >= clipboardDeadline) clearClipboard()
@@ -400,6 +426,11 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 Input("Vault name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
                 OutlinedButton(enabled = !vm.busy, onClick = { import.launch(arrayOf("*/*")) }) { Text("Import encrypted vault") }
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(vm.lockOnScreenOff, vm::useScreenLock, enabled = !vm.busy,
+                        modifier = Modifier.semantics { contentDescription = "Lock when screen turns off" })
+                    Text("Lock when screen turns off")
+                }
                 OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
             }
         }
