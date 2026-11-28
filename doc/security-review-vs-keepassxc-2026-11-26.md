@@ -170,3 +170,44 @@ All on `main`:
 Android (Codex): K1, K2, K3 (session revocation), K4, K6 (bounded and verified writes), K7 (sealed in-memory vault via `common/core::vault`), K9 (shared core budgets plus separate metadata and vault response caps), K10, and the Keystore-backed rollback guard are on `main`; interop harness runs against both heads.
 
 Open: S2 FIDO2 security keys: the roaming secret in the key derivation, the key slots and the CTAP2 protocol crate landed in ADR 0011, the Linux USB HID transport, unlock and keys screen in ADR 0012 (design in `plans/proposals/optional_fido2_security_keys.md`); the Android transports are ADR 0013, and until then Android opens a vault with key slots only in its tests. A custom S3 endpoint (`plans/proposals/custom_s3_sync.md`) is ADR 0014. TOTP stays out unless asked.
+
+## Status update, 2026-11-28 (post-ADR 0022)
+
+Superseding the 2026-11-26 evening `Open:` note above (TOTP remains out unless asked), the remaining planned security and core items landed on `main` (`948d832`):
+
+| Item | State |
+| --- | --- |
+| S2 FIDO2 security keys | Landed across both heads: roaming secret KDF, key slots (`fido_slot_1..4`), and pure-Rust `#![forbid(unsafe_code)]` CTAP2 in ADR 0011; Linux USB HID transport and Keys screen in ADR 0012 (verified on a physical YubiKey); Android USB HID and NFC `IsoDep` transports in ADR 0013 (NFC is fixture-tested only; physical Android USB enrollment still needs live-device verification). |
+| Custom S3 and Cloudflare R2 sync | Pure-Rust `#![forbid(unsafe_code)]` SigV4 signer and `"s3"` provider with `If-Match`/`If-None-Match` strong-ETag preconditions landed in ADR 0014 (removed `aws-sigv4`, `aws-credential-types`, and `quick-xml` from the S3 path); Cloudflare R2 and `BuildConfig.DEBUG`-gated USB/ADB provisioning landed on Android in ADR 0015. |
+| Single shared core and explicit creation | `common/libkeptino` unified the core, erasure, FIDO2, and S3 code into one crate with default-off features (ADR 0016). Explicit Create vault landed on Android (ADR 0017) and Linux (ADR 0018) so Unlock never silently creates a vault. |
+| Nautilus UI and list projection | Shared visual language in `doc/design.md`, Linux Nautilus + floating Find/Generator popovers (ADR 0019, ADR 0022), and Android four-screen Nautilus layout (ADR 0020, ADR 0021). List rendering and filtering use an opt-in non-secret list projection (`INDEX_LIST_ROWS`) and open no sealed records. |
+
+## Honest assessment, 2026-11-28 (Claude, Codex, Gemini)
+
+> **Self-assessment caveat**: This review and the findings table above were written by the project's three coding agents and its operator about their own code. No independent third party has audited or attacked Keptino yet.
+
+### Short version
+
+On **design**, Keptino is stronger than KeePassXC's defaults against specific threat scenarios such as bucket or disk theft, broad desktop integration attack surface, plaintext in RAM, silent rollback, and storage corruption. On **assurance**, KeePassXC is far ahead — and assurance is most of what security means in practice. For the operator's own Linux, Android, and R2 setup, Keptino's design is a reasonable choice; for a new user who cannot read the code or re-run the checks, KeePassXC still earns more trust today.
+
+### Where Keptino is ahead on design
+
+- **Stolen vault files are not enough**: A copy stolen from the bucket, a backup, or a disk cannot be brute-forced with the master password alone; it also requires the 32-byte pepper (recoverable or provisioned across devices, with its stored copy protected by the Linux TPM via `systemd-creds` or Android Keystore/StrongBox with per-use credential or biometric), plus any enrolled FIDO2 `hmac-secret` security key. KeePassXC's default `.kdbx` relies on the master password alone (64 MiB Argon2 default), though KeePassXC can also add an independent key file or YubiKey HMAC-SHA1 slot.
+- **Minimal attack surface and sandboxing**: No browser native messaging, Auto-Type, SSH agent, Secret Service, passkeys, or third-party importers — the areas where many KeePassXC security fixes land. Linux is Wayland-only and applies a Landlock sandbox on supported kernels; network traffic is limited to configured sync and provider authentication over one TLS client, with pure-Rust `#![forbid(unsafe_code)]` parsers in `libkeptino`.
+- **Memory isolation on both heads**: Whole-process `mlockall` and `memfd_secret` keys (outside the kernel direct map, unmapped between uses) on Linux; best-effort `LockedPage` keys on Android (where the KDF arena may be swapped); per-record and per-secret-field AEAD sealing in RAM on both heads; and list/filter views that never open sealed records. Revealing or copying still exposes plaintext while in use, and an attacker controlling the running process can read secrets as they are used.
+- **Rollback and corruption resistance**: Authenticated mirrored-TLV metadata, monotonic `revision` checked against a locally trusted last-seen revision, S3/R2 strong-ETag preconditions (`If-Match`/`If-None-Match`), and Reed-Solomon 8+4 with per-shard BLAKE3 repair.
+
+### Where KeePassXC is ahead (and why it matters more)
+
+- **Independent scrutiny**: KeePassXC has years of public use, external source review (2.7.4), and ANSSI certification (2.7.9 on Windows 10; see [KeePassXC audits](https://keepassxc.org/audits/)). Keptino's internal reviews caught real bugs at almost every ADR — evidence that the process works, and also evidence that there are bugs to find when outside eyes have not yet tried to break it.
+- **Custom format and key composition**: Keptino's primitives are standard (Argon2id, XChaCha20-Poly1305, AES-256-GCM, BLAKE3, SHA-3), but their composition — mirrored-metadata envelope, per-record sealing, pepper folding, and roaming key slots — is bespoke. Real-world password-manager breaks usually happen in composition and parsing, not in the ciphers.
+- **Lockout and recovery risk**: Losing both the machine and the pepper recovery seed, or every enrolled security key, permanently destroys access to the vault. The pepper recovery seed itself must be strong and stored separately. KeePassXC's failure modes are simpler.
+- **Bus factor and provenance**: Mostly agent-written code maintained by one operator. Fine for an author who inspects and tests it, harder to recommend broadly.
+
+### Concrete next security priorities
+
+1. **Release-signed, non-debuggable Android everyday build**: `android/setup.sh` currently builds `:app:assembleDebug` and installs `app-debug.apk` with `android:debuggable="true"` in the packaged manifest. While normal unlocks still use production KDF cost, `debuggable="true"` exposes the running app over an authorized debugging connection (and enables `BuildConfig.DEBUG` paths). Move everyday phone installs to a release-signed, non-debuggable build while preserving existing vaults and Keystore-wrapped settings across the signing transition. (Reference: [Android `debuggable` guidance](https://developer.android.com/privacy-and-security/risks/android-debuggable).)
+2. **Fuzzing and independent review**: Add `cargo-fuzz` targets on `libkeptino`'s untrusted-input boundaries (format/envelope reader, TLV parser, Reed-Solomon decoder, CTAP2/CBOR parser, and S3 response handling — the error-body scan and the ETag and header parsing), followed by an external review of the format and key handling by someone who did not write them.
+3. **Physical Android FIDO2 verification and recovery drills**: Verify Android USB HID and NFC FIDO2 on real hardware, and practice the full recovery paths on a throwaway vault (restoring from the pepper seed, adopting a bucket copy, and recovering after losing one security key).
+4. **Signed, reproducible releases and Linux seccomp**: Add a seccomp allowlist after Linux preflight (the second half of S1 alongside Landlock), and publish signed, reproducible release artifacts.
+5. **Default KDF cost vs phone availability (planned ADR 0024)**: Lower the default Argon2id cost for *new* vaults (e.g., 256 MiB, `t=3, p=1`) to reduce peak allocation so constrained phones are far less likely to OOM on creation or unlock, while keeping existing 4 GiB vaults, the legacy fallback, and `derive_pepper` untouched. This trades a modest per-guess memory cost, which matters only once the pepper or its recovery seed is also stolen, for vaults that open reliably on constrained phones.
