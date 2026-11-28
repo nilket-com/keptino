@@ -25,17 +25,61 @@ import it and use **Save** with sync configured to upload it under the new key.
 
 ## Install or update over ADB
 
-Enable **USB debugging** on the phone, connect it to your Linux computer, and
-accept the debugging authorization prompt. From the repository root, run:
+Everyday installs use a non-debuggable release signed by your own key. For
+the first install, create the key on your trusted build host. Keep the key
+and its password in separate backups you can recover without opening Keptino.
+These commands prompt for the password. Use JDK 21's `keytool`.
+
+```sh
+(
+    set -eu
+    umask 077
+    mkdir -p ~/.config/keptino-signing
+    cd ~/.config/keptino-signing
+    keytool -genkeypair -storetype PKCS12 -keystore release.p12 -alias keptino \
+        -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=Keptino release"
+    keytool -exportcert -keystore release.p12 -alias keptino -file release.der
+    sha256sum release.der | cut -d' ' -f1 > release.sha256
+)
+```
+
+Compare the pinned digest in `release.sha256` with the SHA-256 fingerprint
+shown by `keytool -list -v -keystore release.p12`. Keep a trusted copy of the
+fingerprint with your backup. To use another private directory outside the
+checkout, set `KEPTINO_SIGNING_DIR`.
+
+Connect the phone, enable **USB debugging** and authorize this computer.
+For an existing debug install, supply its original signing key once:
+
+```sh
+./android/setup.sh --rotate-from ~/.android/debug.keystore
+```
+
+The installer checks the installed certificate, signs the rotation with both
+keys and saves `release.lineage` alongside the release key. Back up this
+public file too. Android checks the signer of the private receiver permission
+that AndroidX declares. Setup installs the same non-debuggable release twice
+during rotation. The first update transfers ownership of the permission. The
+second retires the old signer's permission capability. If interrupted
+between updates, rerun setup with the release key and saved lineage to finish.
+The final lineage grants the old certificate continuity for installed data
+and disables rollback to the debug signer. A missing or mismatched key
+stops the upgrade before installation. Keep your existing installation
+while you locate the original key.
+
+For a fresh install and subsequent updates, run:
 
 ```sh
 ./android/setup.sh
 ```
 
-Setup builds the debug APK from the current checkout and installs it in place,
-preserving saved vaults and Keystore settings. For updates, use the same
-debug signing key as the existing install. On first launch, configure the
-pepper and optional sync credentials in the app.
+Setup verifies the package, version code, signer and packaged manifest before
+and after installation. An upgrade preserves vaults, revision records and
+Keystore-protected settings. On a fresh install, enter the pepper and optional
+sync credentials on the phone. Interactive signing reads the keystore
+passwords from the terminal. Automation can pass a descriptor number in
+`KEPTINO_RELEASE_PASSWORD_FD` and, for rotation, `KEPTINO_OLD_PASSWORD_FD`;
+each descriptor supplies one line and must be inherited by the installer.
 
 With several devices or emulators connected, use `adb devices -l` to find the
 target and run `./android/setup.sh --serial SERIAL`. Setup also honors
@@ -71,11 +115,12 @@ them against the authenticated inner copy before opening the vault.
 
 ## Use your Linux R2 setup on Android
 
-With the Samsung or another Android phone connected over authorized USB
-debugging, run this command from the repository root:
+An everyday release keeps existing R2 settings during an upgrade. On a fresh
+release, choose **Use Cloudflare R2** on the phone. For a separate development
+installation, USB import is available with an explicit debug build:
 
 ```sh
-./android/setup.sh --r2
+./android/setup.sh --debug --r2
 ```
 
 The installer updates Keptino in place. On the phone, tap **Receive setup**
@@ -85,7 +130,7 @@ an app-private FIFO. The phone reads the selected vault object before saving
 its settings. The terminal reports whether it found the vault. The vault
 master password stays with you and is used on the ordinary unlock screen.
 
-Use `--serial SERIAL --r2` if several devices are attached. For manual
+Use `--serial SERIAL --debug --r2` if several devices are attached. For manual
 setup, select **Use Cloudflare R2** and enter the account ID, bucket, access
 key ID and secret access key, along with the original pepper. R2 uses the
 same default-jurisdiction endpoint, `auto` region and base64 object as Linux.
@@ -298,8 +343,7 @@ not been used to validate memory availability or OEM lifecycle behavior.
 
 Both apps choose a fresh random nonce on every save. Android also advances the
 modification timestamp on each save so Linux can recognize the newer copy. ARM64 and x86-64 libraries are built; only x86-64 has been
-executed in the emulator. `assembleRelease` produces an unsigned APK: distribution
-requires a signing configuration and key, which this repository does not contain.
+executed in the emulator. `assembleRelease` produces an unsigned APK: `setup.sh` signs it with the host release key and verifies it for the device.
 
 Use command-line tools 23.0 when creating the API 37 AVD. Older tools can silently
 write `target=android-0`, causing emulator graphics/system-server crashes. Check

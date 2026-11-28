@@ -3,8 +3,8 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 [--serial ADB_SERIAL] [--r2]"
-    echo "--r2 imports the Linux pepper and Cloudflare R2 settings over USB after installation."
+    echo "Usage: $0 [--serial ADB_SERIAL] [--rotate-from ORIGINAL_DEBUG_KEYSTORE | --debug [--r2]]"
+    echo "Default: install a signed release. See android/README.md to set up the release key."
     echo "Connect a device with USB debugging enabled and authorize this computer."
 }
 
@@ -12,16 +12,27 @@ fail() { echo "$*" >&2; exit 1; }
 
 serial=${ANDROID_SERIAL:-}
 provision=false
+debug=false
+rotation=()
 while (( $# )); do
 case "$1" in
     -h|--help) usage; exit 0 ;;
     --serial|-s)
         [[ -n ${2:-} ]] || { usage >&2; exit 2; }
         serial=$2; shift 2 ;;
+    --debug) debug=true; shift ;;
+    --rotate-from)
+        [[ -n ${2:-} ]] || { usage >&2; exit 2; }
+        rotation=(--rotate-from "$(realpath -m -- "$2")"); shift 2 ;;
     --r2) provision=true; shift ;;
     *) usage >&2; exit 2 ;;
 esac
 done
+
+if $provision && ! $debug; then
+    fail "USB R2 provisioning needs --debug --r2. Release upgrades keep R2 settings. For a fresh release use setup on the phone."
+fi
+if $debug && (( ${#rotation[@]} )); then fail "--rotate-from requires a release build."; fi
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
@@ -61,6 +72,10 @@ fi
 [[ $("$adb" -s "$serial" get-state) == device ]] || fail "Unlock $serial and authorize USB debugging, then rerun setup."
 
 printf 'Building Keptino for installation on %s\n' "$serial"
+if ! $debug; then
+    ./gradlew :app:assembleRelease
+    exec python3 ./install-release.py --sdk "$sdk" --serial "$serial" "${rotation[@]}"
+fi
 ./gradlew :app:assembleDebug
 "$adb" -s "$serial" install -r app/build/outputs/apk/debug/app-debug.apk
 printf 'Installed Keptino on %s.\n' "$serial"

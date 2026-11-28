@@ -10,7 +10,7 @@ android {
         applicationId = "com.keptino.app"
         minSdk = 30
         targetSdk = 37
-        versionCode = 3
+        versionCode = 4
         versionName = "0.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
@@ -18,6 +18,7 @@ android {
     sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("droid/tests/fixtures"))
     buildTypes {
         release {
+            isDebuggable = false
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

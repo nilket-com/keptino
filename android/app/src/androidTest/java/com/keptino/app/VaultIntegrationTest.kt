@@ -39,6 +39,58 @@ class VaultIntegrationTest {
     }
     private fun prompter() = Prompter(ActivityScenario.launch(MainActivity::class.java))
 
+    /** Run in separate processes on either side of a disposable in-place signer change. */
+    @Test fun signingUpdateKeepsVaultAndSettings() {
+        val phase = args.getString("signingPhase")
+        org.junit.Assume.assumeTrue("Requires a disposable signing rehearsal", phase in listOf("seed", "upgrade", "reopen"))
+        val credential = DeviceCredential.fromArguments()
+        val storage = VaultStorage(context)
+        val name = "vaultdebug-unmarked"
+        val fixture = instrumentation.context.assets.open("linux-debug-unmarked.keptino").use { it.readBytes() }
+        val expected = Settings("3cd9546c0999a233094b17ca466b70e94cb3dc10cdf9a718d35ad025c4da2ae1".hexToByteArray(),
+            "fixture-id", "fixture-secret", provider = "r2", account = "a".repeat(32), bucket = "fixture")
+        prompter().use { prompt ->
+            if (phase == "seed") {
+                check(!storage.configured() && storage.read(name) == null) { "Expected an empty test installation" }
+                prompt.run(credential, { enterPin() }) { auth -> storage.writeSettings(expected, auth) }
+                storage.acceptRevision(name, 1uL) { storage.write(name, fixture) }
+            }
+            assertTrue(storage.configured())
+            val saved = prompt.run(credential, { enterPin() }) { auth -> storage.settings(auth) }
+            assertTrue(saved.remote() is R2)
+            assertArrayEquals(expected.pepper, saved.pepper)
+            assertEquals(expected.appKey, saved.appKey)
+            val remote = R2(saved) { url ->
+                assertEquals("https://${expected.account}.r2.cloudflarestorage.com/fixture/$name.keptino", url.toString())
+                object : java.net.HttpURLConnection(url) {
+                    override fun getResponseCode(): Int {
+                        assertTrue(getRequestProperty("Authorization").contains("Credential=fixture-id/"))
+                        return 200
+                    }
+                    override fun getInputStream() = java.util.Base64.getEncoder().encode(fixture).inputStream()
+                    override fun connect() {}
+                    override fun disconnect() {}
+                    override fun usingProxy() = false
+                }
+            }
+            assertArrayEquals(fixture, remote.fetch(name).bytes)
+            val handle = Core.open(name, "correct horse battery staple".toByteArray(), saved.pepper, storage.read(name), null, 4096)
+            try {
+                val revision = Core.revision(handle).toULong()
+                assertEquals(if (phase == "reopen") 2uL else 1uL, revision)
+                assertThrows(IllegalStateException::class.java) { storage.acceptRevision(name, revision - 1uL) }
+                assertTrue(Core.query(handle, "bank"))
+                if (phase == "upgrade") {
+                    set(handle, 2, "after signing update")
+                    Core.commit(handle)
+                    val edited = Core.save(handle)
+                    storage.acceptRevision(name, Core.revision(handle).toULong(), revision) { storage.write(name, edited) }
+                }
+                if (phase == "reopen") assertEquals("after signing update", text(handle, 2))
+            } finally { Core.close(handle) }
+        }
+    }
+
     @Test fun nativeErrorsDoNotAbortAndSavedVaultReopens() {
         val pepper = pepper()
         val password = "synthetic-test-password".toByteArray()
