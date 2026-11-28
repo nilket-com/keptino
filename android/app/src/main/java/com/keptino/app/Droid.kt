@@ -24,12 +24,18 @@ object Core {
         openWithKey(dbName, password, pepper, local, remote, kdfMemKib, io)
     @JvmStatic private external fun openWithKey(dbName: String, password: ByteArray, pepper: ByteArray, local: ByteArray?, remote: ByteArray?, kdfMemKib: Int, io: SecurityKeyIo?): Long
     @JvmStatic external fun keySlots(h: Long): Array<String>
+    @JvmStatic external fun hasKeySlots(file: ByteArray): Boolean
     @JvmStatic external fun fileStamp(file: ByteArray): ByteArray
     @JvmStatic external fun prepareKeys(h: Long, file: ByteArray, password: ByteArray, pepper: ByteArray, remove: Int, touchOnly: Boolean, io: SecurityKeyIo): Long
     @JvmStatic external fun modifiedTs(h: Long): Long
     @JvmStatic external fun revision(h: Long): Long
     @JvmStatic external fun uploadsPaused(h: Long): Boolean
     @JvmStatic external fun source(h: Long): Int
+    @JvmStatic external fun listRows(h: Long): Array<String>
+    @JvmStatic external fun findNames(h: Long, query: String): Array<String>
+    @JvmStatic external fun generatePreview(h: Long, kind: Int, count: Int, classes: Int): Int
+    @JvmStatic external fun readPreview(h: Long): ByteArray
+    @JvmStatic external fun finishPreview(h: Long, apply: Boolean)
     @JvmStatic external fun healthReport(h: Long): Array<String>
     @JvmStatic external fun query(h: Long, q: String): Boolean
     @JvmStatic external fun next(h: Long): Boolean

@@ -29,6 +29,8 @@ use zeroize::{Zeroize, Zeroizing};
 /// exposed only inside `with_key`, for the duration of one cipher operation.
 pub trait KeyStore: Send + Sync + Sized + 'static {
 	type Error: std::error::Error + Send + Sync + 'static;
+	/// Heads with a vault list can index its non-secret row fields at open.
+	const INDEX_LIST_ROWS: bool = false;
 
 	/// Stores a key the caller already holds, such as the derived master key.
 	fn from_bytes(key: &[u8; KEY_SIZE]) -> Result<Self, Self::Error>;
@@ -451,6 +453,25 @@ pub struct Store<K: KeyStore> {
 	entries: EntryAtlas<K>,
 	index_by_name: BTreeMap<String, u32>,
 	index_by_tag: BTreeMap<String, Vec<u32>>,
+	list_rows: BTreeMap<u32, ListRow>,
+}
+
+/// Display metadata retained by heads that render a list.
+pub struct ListRow {
+	pub username: Zeroizing<String>,
+	pub tags: Zeroizing<String>,
+	pub weak: bool,
+}
+
+impl ListRow {
+	fn new(username: &str, tags: &str, password: &str) -> Self {
+		Self {
+			username: Zeroizing::new(username.to_owned()),
+			tags: Zeroizing::new(tags.to_owned()),
+			weak: !password.is_empty()
+				&& crate::health::estimate_bits(password) < crate::health::WEAK_BITS,
+		}
+	}
 }
 
 impl<K: KeyStore> Default for Store<K> {
@@ -478,6 +499,7 @@ impl<K: KeyStore> Store<K> {
 			entries: EntryAtlas::try_new()?,
 			index_by_name: BTreeMap::new(),
 			index_by_tag: BTreeMap::new(),
+			list_rows: BTreeMap::new(),
 		})
 	}
 
@@ -503,7 +525,14 @@ impl<K: KeyStore> Store<K> {
 					let tags = fields.get_str(field::TAGS).unwrap_or_default().to_owned();
 					// Sealed as parsed: no per-entry key page is touched until
 					// an entry is actually opened.
-					store.store_password_record(&name, &tags, &fields.serialize());
+					let row = K::INDEX_LIST_ROWS.then(|| {
+						ListRow::new(
+							fields.get_str(field::USERNAME).unwrap_or_default(),
+							&tags,
+							fields.get_str(field::PASSWORD).unwrap_or_default(),
+						)
+					});
+					store.store_password_record(&name, &tags, &fields.serialize(), row);
 				}
 				_ => return Err(OpenError::Format(FormatError::Damaged)),
 			}
@@ -539,11 +568,19 @@ impl<K: KeyStore> Store<K> {
 	pub fn set_password_entry(&mut self, entry: PasswordEntry<K>) {
 		let name = entry.get_name().to_owned();
 		let tags = entry.get_tags().to_owned();
-		self.store_password_record(&name, &tags, &entry.serialize());
+		let row = K::INDEX_LIST_ROWS
+			.then(|| ListRow::new(entry.get_username(), &tags, &entry.get_password()));
+		self.store_password_record(&name, &tags, &entry.serialize(), row);
 	}
 
 	/// Indexes a password record by name and tags and seals its bytes.
-	fn store_password_record(&mut self, name: &str, tags: &str, record: &[u8]) {
+	fn store_password_record(
+		&mut self,
+		name: &str,
+		tags: &str,
+		record: &[u8],
+		row: Option<ListRow>,
+	) {
 		let (id, is_new) = self.allocate(password_key(name));
 		if !is_new {
 			self.unindex_tags(id);
@@ -555,6 +592,9 @@ impl<K: KeyStore> Store<K> {
 			let ids = self.index_by_tag.entry(tag_key(tag)).or_default();
 			ids.push(id);
 			ids.sort_unstable();
+		}
+		if let Some(row) = row {
+			self.list_rows.insert(id, row);
 		}
 		self.entries.set(id, TAG_PASSWORD, record);
 	}
@@ -580,6 +620,7 @@ impl<K: KeyStore> Store<K> {
 		};
 		self.entries.remove(id);
 		self.unindex_tags(id);
+		self.list_rows.remove(&id);
 		true
 	}
 
@@ -694,6 +735,7 @@ impl<K: KeyStore> Store<K> {
 
 	pub fn zeroize(&mut self) {
 		self.entries.clear();
+		self.list_rows.clear();
 		for (mut key, _) in mem::take(&mut self.index_by_name) {
 			key.zeroize();
 		}
@@ -818,6 +860,19 @@ impl<K: KeyStore> Database<K> {
 	}
 	pub fn names(&self) -> Vec<String> {
 		self.read().names()
+	}
+	/// Visits the Android list projection without opening any sealed record.
+	pub fn visit_list_rows(&self, mut visit: impl FnMut(&str, &ListRow)) {
+		let store = self.read();
+		let prefix = password_key("");
+		for (key, id) in store
+			.index_by_name
+			.range(prefix.clone()..String::from("password\x01"))
+		{
+			if let Some(row) = store.list_rows.get(id) {
+				visit(&key[prefix.len()..], row);
+			}
+		}
 	}
 	pub fn find(&self, query: &str) -> Vec<String> {
 		self.read().find(query)

@@ -71,10 +71,15 @@ class DeviceCredential private constructor(private val pin: String) {
     /** Waits for the prompt, types the PIN and confirms it. */
     fun enterPin() {
         awaitPrompt()
-        // Wait for the window transition before sending ordinary keyboard input.
-        SystemClock.sleep(500)
+        // SystemUI focuses the window before the PIN keypad accepts input.
+        // On API 37 a single input-text command can lose its first digit here.
+        device.waitForIdle(3_000)
+        SystemClock.sleep(1_500)
+        for (digit in pin) {
+            check(promptShowing()) { "Credential prompt lost focus" }
+            device.pressKeyCode(android.view.KeyEvent.KEYCODE_0 + digit.digitToInt())
+        }
         check(promptShowing()) { "Credential prompt lost focus" }
-        device.executeShellCommand("input text $pin")
         device.pressEnter()
         awaitDismissed()
     }

@@ -518,6 +518,79 @@ pub extern "system" fn Java_com_keptino_app_Core_clear<'local>(
 	})
 }
 
+fn generator_kind(kind: jint, count: jint, classes: jint) -> Result<Kind> {
+	let count = usize::try_from(count).map_err(|_| Error::Invalid("invalid generator count"))?;
+	Ok(match kind {
+		0 if (0..=15).contains(&classes) => Kind::Characters {
+			length: count,
+			classes: Classes::from_bits(classes as u8),
+		},
+		1 => Kind::Passphrase { words: count },
+		_ => return Err(Error::Invalid("invalid generator options")),
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_listRows(
+	mut env: JNIEnv,
+	_: JObject,
+	h: jlong,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		string_array(env, with(h, |v| Ok(v.list_rows()))?)
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_findNames<'a>(
+	mut env: JNIEnv<'a>,
+	_: JObject<'a>,
+	h: jlong,
+	query: JString<'a>,
+) -> jobjectArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		let q = string(env, &query)?;
+		string_array(env, with(h, |v| Ok(v.find_names(&q)))?)
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_generatePreview(
+	mut env: JNIEnv,
+	_: JObject,
+	h: jlong,
+	kind: jint,
+	count: jint,
+	classes: jint,
+) -> jint {
+	guard(&mut env, 0, |_| {
+		with(h, |v| {
+			Ok(v.generate_preview(generator_kind(kind, count, classes)?)? as jint)
+		})
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_readPreview(
+	mut env: JNIEnv,
+	_: JObject,
+	h: jlong,
+) -> jbyteArray {
+	guard(&mut env, std::ptr::null_mut(), |env| {
+		byte_array(env, with(h, |v| v.preview_password())?.as_bytes())
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_finishPreview(
+	mut env: JNIEnv,
+	_: JObject,
+	h: jlong,
+	apply: jboolean,
+) {
+	guard(&mut env, (), |_| with(h, |v| v.finish_preview(apply != 0)))
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_keptino_app_Core_generatePassword<'local>(
 	mut env: JNIEnv<'local>,
@@ -528,16 +601,7 @@ pub extern "system" fn Java_com_keptino_app_Core_generatePassword<'local>(
 	classes: jint,
 ) -> jint {
 	guard(&mut env, 0, |_| {
-		let count =
-			usize::try_from(count).map_err(|_| Error::Invalid("invalid generator count"))?;
-		let kind = match kind {
-			0 if (0..=15).contains(&classes) => Kind::Characters {
-				length: count,
-				classes: Classes::from_bits(classes as u8),
-			},
-			1 => Kind::Passphrase { words: count },
-			_ => return Err(Error::Invalid("invalid generator options")),
-		};
+		let kind = generator_kind(kind, count, classes)?;
 		with(handle, |vault| Ok(vault.generate_password(kind)? as jint))
 	})
 }
@@ -646,6 +710,19 @@ pub extern "system" fn Java_com_keptino_app_Core_keySlots<'local>(
 			})
 			.collect();
 		string_array(env, rows)
+	})
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_keptino_app_Core_hasKeySlots<'a>(
+	mut env: JNIEnv<'a>,
+	_: JObject<'a>,
+	file: JByteArray<'a>,
+) -> jboolean {
+	guard(&mut env, 0, |env| {
+		let envelope =
+			libkeptino::format::Envelope::parse(&bytes(env, &file)?, KdfParams::BUILD_DEFAULT)?;
+		Ok((!envelope.slots.is_empty()) as jboolean)
 	})
 }
 

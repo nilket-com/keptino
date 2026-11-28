@@ -22,6 +22,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.painterResource
+import com.keptino.app.ui.theme.Nautilus as N
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -228,6 +232,7 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
+    var masterVisible by remember { mutableStateOf(false) }
     var seed by remember { mutableStateOf("") }
     var pepper by remember { mutableStateOf("") }
     var r2 by remember { mutableStateOf(false) }
@@ -242,14 +247,21 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
     var appKey by remember { mutableStateOf("") }
     var authUrl by remember { mutableStateOf("https://api.backblazeb2.com") }
     var offline by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
+    var settingsAfterLock by remember { mutableStateOf(false) }
     var confirmLock by remember(vm.unlocked) { mutableStateOf(false) }
-    val requestLock = { if (vm.dirty) confirmLock = true else lock() }
+    val requestLock = { settingsAfterLock = false; if (vm.dirty) confirmLock = true else lock() }
+    val openSettings = {
+        if (vm.dirty) { settingsAfterLock = true; confirmLock = true }
+        else { lock(); settings = true }
+    }
+    LaunchedEffect(vm.unlocked) { if (vm.unlocked) settings = false }
     val deletableName = vm.deletableName
     var confirmDelete by remember(deletableName) { mutableStateOf(false) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) { creating = false; password = ""; seed = ""; pepper = ""; appKey = "" }
+            if (event == Lifecycle.Event.ON_STOP) { creating = false; password = ""; masterVisible = false; seed = ""; pepper = ""; appKey = "" }
         }
         owner.lifecycle.addObserver(observer)
         onDispose { owner.lifecycle.removeObserver(observer) }
@@ -293,19 +305,36 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                     items(rows.size) { index -> Text(rows[index]) }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = vm::closeHealth) { Text("Back to editor") }
+                    OutlinedButton(onClick = vm::closeHealth) { Text("Back to vault") }
                     OutlinedButton(onClick = requestLock) { Text("Lock") }
                 }
             }
             return@Surface
         }
-        Column(Modifier.safeDrawingPadding().imePadding().padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineLarge)
-            Text(if (vm.unlocked) "${vm.dbName} · ${if (vm.dirty) "unsaved changes" else "unlocked"}" else "Your encrypted vault", style = MaterialTheme.typography.titleMedium)
-            if (!vm.unlocked) {
-                vm.keyProtection?.let { Text(it) }
-                warnings.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
+        if (vm.unlocked) {
+            if (vm.inEntry) EntryEditor(vm, copy) { confirmDelete = true }
+            else VaultList(vm, requestLock, { export.launch("${vm.dbName}.keptino") }, openSettings)
+            return@Surface
+        }
+        BackHandler(enabled = settings && vm.configured && !confirmUsb) { settings = false }
+        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (vm.configured && !settings) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    ActionIcon(R.drawable.action_settings, "Settings", !vm.busy) { password = ""; masterVisible = false; settings = true }
+                }
+                Column(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Image(painterResource(R.mipmap.ic_launcher_foreground), null, Modifier.size(84.dp))
+                    Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium, color = N.green)
+                }
+            } else if (vm.configured) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ActionIcon(R.drawable.action_back, "Back to unlock", !vm.busy) { settings = false }
+                    Text("Settings", style = MaterialTheme.typography.titleLarge)
+                }
+                vm.keyProtection?.let { Readout(it) }
             }
+            warnings.forEach { Text(it, color = N.rose) }
             if (vm.busy) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (vm.opening) {
@@ -313,9 +342,9 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                     OutlinedButton(onClick = { vm.cancelKeyOperation() }) { Text("Cancel unlock") }
                 } else Text("Working…")
             }
-            if (vm.status.isNotEmpty()) Text(vm.status)
-            if (!vm.unlocked && BuildConfig.DEBUG) {
-                OutlinedButton(enabled = !vm.busy, onClick = { confirmUsb = true }) { Text("Import R2 setup from Linux") }
+            if (vm.status.isNotEmpty()) Readout(vm.status)
+            if (BuildConfig.DEBUG) {
+                if (settings || !vm.configured) OutlinedButton(enabled = !vm.busy, onClick = { confirmUsb = true }) { Text("Import R2 setup from Linux") }
                 if (confirmUsb) AlertDialog(onDismissRequest = { confirmUsb = false },
                     title = { Text("Use this Linux computer’s R2 setup?") },
                     text = { Text("Keptino will check the bucket, then ask you to unlock the phone to save the Linux pepper and R2 credentials.") },
@@ -339,12 +368,19 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                 Input(if (r2) "R2 secret access key" else "Application key", appKey, { appKey = it }, secret = true, enabled = !vm.busy)
                 if (BuildConfig.DEBUG && !r2) Input("Backblaze API base URL", authUrl, { authUrl = it }, enabled = !vm.busy)
                 Button(enabled = !vm.busy, onClick = { vm.setup(seed, pepper, keyId, appKey, authUrl, authenticate, if (r2) "r2" else "b2", account, bucket); seed = ""; pepper = ""; appKey = "" }) { Text("Save setup") }
-            } else if (!vm.unlocked) {
-                Input("Database name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
-                Input("Master password", password, { password = it }, secret = true, enabled = !vm.busy)
-                Row { Checkbox(offline, { offline = it }, enabled = !vm.busy); Text("Open local copy only", Modifier.padding(top = 12.dp)) }
-                Button(enabled = !vm.busy, onClick = { vm.unlock(password, offline, authenticate, securityKey()); password = "" }) { Text("Unlock") }
-                OutlinedButton(enabled = !vm.busy, onClick = { password = ""; creating = true }) { Text("Create vault") }
+            } else if (!settings) {
+                var keyHint by remember(vm.dbName) { mutableStateOf(false) }
+                LaunchedEffect(vm.dbName) { kotlinx.coroutines.delay(300); keyHint = vm.localKeyHint(vm.dbName) }
+                Input("Vault name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
+                Input("Master password", password, { password = it }, secret = true, enabled = !vm.busy,
+                    visible = masterVisible, toggle = { masterVisible = !masterVisible })
+                if (keyHint) Readout("Security key enrolled. Connect it before unlocking.")
+                Primary("Unlock", Modifier.fillMaxWidth(), !vm.busy) { vm.unlock(password, offline, authenticate, securityKey()); password = ""; masterVisible = false }
+                TextButton(enabled = !vm.busy, modifier = Modifier.fillMaxWidth(), onClick = { password = ""; masterVisible = false; creating = true }) { Text("Create a new vault") }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Switch(offline, { offline = it }, enabled = !vm.busy)
+                    Text("Open local copy only")
+                }
                 if (creating) CreateVaultDialog(onDismiss = { creating = false }) { name, master, confirmation ->
                     creating = false
                     vm.create(name, master, confirmation, offline, authenticate, securityKey())
@@ -360,42 +396,11 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
                             password = ""
                         }) { Text("Adopt") } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
                 }
-                OutlinedButton(enabled = !vm.busy, onClick = { import.launch(arrayOf("*/*")) }) { Text("Import Linux vault") }
-                OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
-                Text("Import preserves the source file and refuses to replace an existing local vault. Default production vaults require 4 GiB of available memory to unlock.")
             } else {
-                OutlinedButton(enabled = !vm.busy, onClick = vm::showKeys) { Text("Keys") }
-                if (vm.confirmEmptyBucket) OutlinedButton(enabled = !vm.busy && !vm.dirty, onClick = vm::publishToEmptyBucket) {
-                    Text("Publish local rekey to empty bucket")
-                }
-                OutlinedButton(enabled = !vm.busy, onClick = vm::showHealth) { Text("Health") }
-                Input("Find by name or tag", vm.query, { vm.query = it }, enabled = !vm.busy)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(enabled = !vm.busy, onClick = { vm.navigate(-1) }) { Text("Previous") }
-                    Button(enabled = !vm.busy, onClick = { vm.navigate(0) }) { Text("Find") }
-                    OutlinedButton(enabled = !vm.busy, onClick = { vm.navigate(1) }) { Text("Next") }
-                }
-                listOf(1 to "Name", 2 to "Username", 3 to "Password", 4 to "PIN", 6 to "URL", 7 to "Tags", 5 to "Note").forEach { (id, label) ->
-                    val secret = id in listOf(3, 4, 5)
-                    val visible = !secret || id in vm.revealed
-                    OutlinedTextField(value = if (visible) vm.fields[id - 1] else "", onValueChange = { vm.edit(id, it) }, label = { Text(label) },
-                        placeholder = { if (!visible) Text("Hidden") }, readOnly = !visible, enabled = !vm.busy,
-                        modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret }, singleLine = id != 5,
-                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
-                        trailingIcon = if (secret) {{ TextButton(enabled = !vm.busy, onClick = { vm.reveal(id) }) { Text(if (visible) "Hide" else "Reveal") } }} else null)
-                    if (id == 3) PasswordActions(vm) { copy(id) }
-                    if (id == 4) TextButton(enabled = !vm.busy, onClick = { copy(id) }) { Text("Copy $label") }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(enabled = !vm.busy, onClick = vm::newEntry) { Text("New") }
-                    Button(enabled = !vm.busy, onClick = vm::commit) { Text("Set entry") }
-                    Button(enabled = !vm.busy, onClick = vm::save) { Text("Save") }
-                }
-                if (deletableName != null) OutlinedButton(onClick = { confirmDelete = true }) { Text("Delete entry") }
-                if (vm.editing) OutlinedButton(enabled = !vm.busy, onClick = vm::revert) { Text("Revert entry edits") }
-                Text("Set entry applies edits to the open vault. Save writes the encrypted file and syncs when configured. Locking discards unsaved changes.")
+                Input("Vault name", vm.dbName, { vm.dbName = it }, enabled = !vm.busy)
+                OutlinedButton(enabled = !vm.busy, onClick = { import.launch(arrayOf("*/*")) }) { Text("Import encrypted vault") }
                 OutlinedButton(enabled = !vm.busy, onClick = { export.launch("${vm.dbName}.keptino") }) { Text("Export saved vault") }
-                OutlinedButton(onClick = requestLock) { Text("Lock") }
+                OutlinedButton(enabled = !vm.busy, onClick = vm::changeSetup) { Text("Change setup") }
             }
         }
     }
@@ -406,48 +411,8 @@ private fun VaultScreen(vm: VaultViewModel, copy: (Int) -> Unit, lock: () -> Uni
         dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } })
     if (vm.unlocked && confirmLock) AlertDialog(onDismissRequest = { confirmLock = false }, title = { Text("Discard unsaved changes?") },
         text = { Text("Save first to keep changes to this vault.") },
-        confirmButton = { TextButton(onClick = { confirmLock = false; lock() }) { Text("Discard and lock") } },
+        confirmButton = { TextButton(onClick = { confirmLock = false; lock(); settings = settingsAfterLock; settingsAfterLock = false }) { Text("Discard and lock") } },
         dismissButton = { TextButton(onClick = { confirmLock = false }) { Text("Cancel") } })
-}
-
-@Composable
-private fun PasswordActions(vm: VaultViewModel, copy: () -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val options = vm.generator
-    val enabled = !vm.busy
-    FlowRow {
-        TextButton(enabled = enabled, onClick = copy) { Text("Copy Password") }
-        TextButton(enabled = enabled && options.valid, onClick = vm::generatePassword) {
-            Text(if (options.passphrase) "Generate passphrase" else "Generate password")
-        }
-        TextButton(enabled = enabled, onClick = { expanded = !expanded }) {
-            Text(if (expanded) "Hide options" else "Generator options")
-        }
-    }
-    if (expanded) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !options.passphrase, enabled = enabled,
-                onClick = { vm.generator = options.copy(passphrase = false) }, label = { Text("Characters") })
-            FilterChip(selected = options.passphrase, enabled = enabled,
-                onClick = { vm.generator = options.copy(passphrase = true) }, label = { Text("Words") })
-        }
-        OutlinedTextField(
-            value = if (options.passphrase) options.words else options.length,
-            onValueChange = { value ->
-                if (value.all { it in '0'..'9' }) {
-                    vm.generator = if (options.passphrase) options.copy(words = value) else options.copy(length = value)
-                }
-            },
-            label = { Text(if (options.passphrase) "Word count (1–32)" else "Length (1–256)") },
-            enabled = enabled, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        )
-        if (!options.passphrase) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for ((bit, label) in listOf(1 to "Uppercase", 2 to "Lowercase", 4 to "Digits", 8 to "Symbols")) {
-                FilterChip(selected = options.classes and bit != 0, enabled = enabled,
-                    onClick = { vm.generator = options.copy(classes = options.classes xor bit) }, label = { Text(label) })
-            }
-        }
-    }
 }
 
 @Composable
@@ -473,10 +438,15 @@ internal fun CreateVaultDialog(onDismiss: () -> Unit, onCreate: (String, String,
 }
 
 @Composable
-private fun Input(label: String, value: String, change: (String) -> Unit, secret: Boolean = false, enabled: Boolean = true) {
+private fun Input(label: String, value: String, change: (String) -> Unit, secret: Boolean = false,
+                  enabled: Boolean = true, visible: Boolean = false, toggle: (() -> Unit)? = null) {
     OutlinedTextField(value, change, label = { Text(label) }, enabled = enabled, singleLine = true, modifier = Modifier.fillMaxWidth().semantics { isSensitiveData = secret },
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text),
-        visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None)
+        shape = MaterialTheme.shapes.small,
+        colors = OutlinedTextFieldDefaults.colors(unfocusedContainerColor = N.field, focusedContainerColor = N.field),
+        trailingIcon = if (toggle == null) null else {{ ActionIcon(if (visible) R.drawable.action_eye else R.drawable.action_hidden,
+            if (visible) "Hide master password" else "Reveal master password", enabled, click = toggle) }},
+        visualTransformation = if (secret && !visible) PasswordVisualTransformation() else VisualTransformation.None)
 }
 
 @Composable
@@ -515,7 +485,7 @@ private fun KeysScreen(vm: VaultViewModel, slots: Array<String>, authenticate: s
             slots.isEmpty() -> "Protect with a security key"
             else -> "Add a key"
         }
-        Button(enabled = !vm.busy && password.isNotEmpty() && (remove != 0 || slots.size < 4),
+        Button(modifier = Modifier.fillMaxWidth(), enabled = !vm.busy && password.isNotEmpty() && (remove != 0 || slots.size < 4),
             onClick = { confirming = true }) { Text(action) }
         if (confirming) AlertDialog(onDismissRequest = { confirming = false }, title = { Text("$action?") },
             text = { Text(when {
@@ -534,9 +504,9 @@ private fun KeysScreen(vm: VaultViewModel, slots: Array<String>, authenticate: s
             if (vm.keyInstruction.isNotEmpty()) Text(vm.keyInstruction)
             OutlinedButton(onClick = { vm.cancelKeyOperation() }) { Text("Cancel operation") }
         }
-        if (vm.status.isNotEmpty()) Text(vm.status)
+        if (vm.status.isNotEmpty()) Readout(vm.status)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(enabled = !vm.busy, onClick = vm::closeKeys) { Text("Back to editor") }
+            OutlinedButton(enabled = !vm.busy, onClick = vm::closeKeys) { Text("Back to vault") }
             OutlinedButton(onClick = lock) { Text("Lock") }
         }
     }

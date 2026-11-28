@@ -93,7 +93,7 @@ A changed object stops the conditional upload and preserves the local save.
 
 ## Create a vault on Android
 
-After setup, choose **Create vault**, enter a new vault name, and enter the
+After setup, choose **Create a new vault**, enter a new vault name, and enter the
 master password twice. Keptino uses the pepper in the phone's protected
 settings. Use the same pepper on Linux to open this vault there.
 
@@ -119,20 +119,18 @@ settings.
    overwrite an existing local file.
 4. Enter the master password and unlock. “Open local copy only” skips network
    access explicitly. Failed remote requests do not silently create an empty vault.
-5. Find an entry by name or tag; previous/next navigate the entries. Password,
-   PIN and note start hidden. Reveal a field to edit it; copy does not require reveal.
-   **Generate password** fills the working password with 24 random characters by default.
-   Under **Generator options**, choose the length and character classes, or choose
-   **Words** for a hyphen-joined passphrase. The status shows the entropy in bits.
-   Your choices last until you lock the vault.
-   **Revert entry edits** restores the stored value. **Delete entry** asks you
-   to confirm the selected name and takes effect on disk when you save.
-6. Use **Set entry**, then **Save**. Save writes the encrypted local file atomically
-   before uploading. An upload failure reports that the local save succeeded.
-   **Export saved vault** exports the last saved encrypted file for Linux to open.
-7. Choose **Health** to see which entries have reused, potentially weak, stale,
-   or empty passwords. The report runs offline and includes edits made with
-   **Set entry**. **Back to editor** returns to your working entry.
+5. Find an entry by part of its name or an exact tag, or use the tag and
+   weak-password filters. Tap a row to open it. The list shows usernames and
+   flags. Passwords, PINs, and notes stay hidden until you reveal them.
+6. The die beside Password opens the generator. Choose characters or words,
+   adjust the length, and tap **Use this password** to apply the preview.
+   **Revert** restores the set entry. Back discards unset edits.
+   **Set entry** returns to the list. **Save** writes the set entries and
+   confirmed deletions locally before syncing. If the upload fails, you
+   can retry Save. Use **Export** in the vault menu for the last saved file.
+7. Choose **Health** in the vault menu to see which entries have reused,
+   potentially weak, stale, or empty passwords. The report uses the set
+   entries and runs offline. **Back to vault** returns to the list.
 8. Open **Keys** to protect the vault or add a spare. Choose the attached USB
    key and follow the touch or PIN prompts. Each of the four slots can unlock
    the vault independently. NFC is experimental and has been tested with

@@ -265,6 +265,7 @@ impl LockedKey {
 }
 
 impl KeyStore for LockedKey {
+	const INDEX_LIST_ROWS: bool = true;
 	type Error = Error;
 
 	fn from_bytes(bytes: &[u8; crypto::KEY_SIZE]) -> Result<Self> {

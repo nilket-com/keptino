@@ -22,6 +22,8 @@ internal data class GeneratorOptions(
     val valid: Boolean get() = if (passphrase) (count ?: 0) in 1..32 else (count ?: 0) in 1..256 && classes != 0
 }
 
+internal data class EntryRow(val name: String, val username: String, val tags: List<String>, val weak: Boolean)
+
 class VaultViewModel(application: Application) : AndroidViewModel(application) {
     val storage = VaultStorage(application)
     var configured by mutableStateOf(storage.configured()); private set
@@ -30,6 +32,8 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     var status by mutableStateOf(""); private set
     var dbName by mutableStateOf("main")
     var query by mutableStateOf("")
+    var selectedTag by mutableStateOf<String?>(null)
+    var weakOnly by mutableStateOf(false)
     var fields by mutableStateOf(List(9) { "" }); private set
     var revealed by mutableStateOf(setOf<Int>()); private set
     var dirty by mutableStateOf(false); private set
@@ -44,7 +48,25 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     private var heldRevision = 0uL
     private var handle = 0L
     var editing by mutableStateOf(false); private set
-    private var committedDirty = false
+    var inEntry by mutableStateOf(false); private set
+    var pendingNames by mutableStateOf(emptySet<String>()); private set
+    val syncLabel get() = sessionSync?.label ?: "Local"
+    internal suspend fun rows(): List<EntryRow> {
+        val opened = handle
+        return withContext(Dispatchers.Default) {
+            Core.listRows(opened).asList().chunked(4) { (name, user, rawTags, weak) ->
+                EntryRow(name, user, rawTags.split(',').map(String::trim).filter(String::isNotEmpty), weak == "1")
+            }
+        }
+    }
+    internal suspend fun findNames(text: String): Set<String> {
+        val opened = handle
+        return withContext(Dispatchers.Default) { Core.findNames(opened, text).toSet() }
+    }
+    internal suspend fun localKeyHint(name: String) = withContext(Dispatchers.IO) {
+        validVaultName(name) && runCatching { storage.read(name)?.let(Core::hasKeySlots) == true }.getOrDefault(false)
+    }
+
     private var currentEntryName by mutableStateOf("")
     val deletableName: String? get() = currentEntryName.takeIf { unlocked && !busy && !editing && it.isNotEmpty() }
     @Volatile private var generation = 0L
@@ -182,7 +204,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
             adoptName = null
             heldRevision = Core.revision(pendingHandle).toULong()
             sessionSync = cloudSession
-            handle = pendingHandle; pendingHandle = 0L; unlocked = true; dirty = false; editing = false; committedDirty = false
+            handle = pendingHandle; pendingHandle = 0L; unlocked = true; dirty = false; editing = false; pendingNames = emptySet()
             status = if (Core.source(handle) == 2) "Opened remote database" else "Opened local database"
             if (sessionSync?.paused == true) status += ". The local and remote copies need reconciliation. Uploads paused."
             Core.clear(handle); refresh()
@@ -254,13 +276,28 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         if (busy || !unlocked) return
         try { block() } catch (e: Exception) { status = e.message ?: "Operation failed" }
     }
-    fun navigate(direction: Int) = action {
-        check(!editing) { "Set the current entry before navigating" }
-        val found = when (direction) { -1 -> Core.previous(handle); 1 -> Core.next(handle); else -> Core.query(handle, query) }
+    fun openEntry(name: String) = action {
+        check(Core.query(handle, name)) { "Entry no longer exists" }
         refresh()
-        if (!found) status = "No matching entry"
+        editing = false
+        inEntry = true
     }
-    fun newEntry() = action { check(!editing) { "Set the current entry before creating another" }; Core.clear(handle); refresh(); status = "New entry" }
+    fun newEntry() = action {
+        Core.clear(handle)
+        refresh()
+        editing = false
+        inEntry = true
+        status = "New entry"
+    }
+    fun leaveEntry() = action {
+        val discarded = editing
+        Core.clear(handle)
+        refresh()
+        editing = false
+        inEntry = false
+        dirty = pendingNames.isNotEmpty()
+        if (discarded) status = "Unset edits were discarded."
+    }
     fun showHealth() = task { started ->
         check(unlocked) { "Unlock first" }
         val openHandle = handle
@@ -272,19 +309,27 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         val bytes = text.toByteArray(); try { Core.setField(handle, id, bytes) } finally { bytes.fill(0) }
         fields = fields.toMutableList().also { it[id - 1] = text }; editing = true; dirty = true
     }
-    fun generatePassword() = action {
+    internal fun preview(): Int {
         val options = generator
-        val count = requireNotNull(options.count) { "Enter a generator count" }
-        val bits = Core.generatePassword(handle, if (options.passphrase) 1 else 0, count, options.classes)
-        editing = true
-        dirty = true
-        if (3 in revealed) fields = fields.toMutableList().also { it[2] = read(3) }
-        val unit = if (options.passphrase) "word" else "character"
-        status = "Generated $count $unit${if (count == 1) "" else "s"}, $bits bits. Set the entry to keep it."
+        return Core.generatePreview(handle, if (options.passphrase) 1 else 0, requireNotNull(options.count), options.classes)
+    }
+    internal fun previewText(): String {
+        val bytes = Core.readPreview(handle)
+        return try { String(bytes, Charsets.UTF_8) } finally { bytes.fill(0) }
+    }
+    internal fun finishPreview(use: Boolean) {
+        if (handle == 0L) return
+        Core.finishPreview(handle, use)
+        if (use) {
+            editing = true
+            dirty = true
+            if (3 in revealed) fields = fields.toMutableList().also { it[2] = read(3) }
+        }
     }
     fun deleteEntry(confirmedName: String) = action {
         if (deletableName != confirmedName || !Core.deleteSelected(handle, confirmedName)) return@action
-        committedDirty = true
+        pendingNames = pendingNames + confirmedName
+        inEntry = false
         dirty = true
         refresh()
         status = "Entry '$confirmedName' deleted. Save to persist changes."
@@ -295,11 +340,17 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun revert() = action {
         if (currentEntryName.isEmpty()) Core.clear(handle) else Core.query(handle, currentEntryName)
-        editing = false; dirty = committedDirty; refresh(); status = "Working entry edits discarded"
+        editing = false; dirty = pendingNames.isNotEmpty(); refresh(); status = "Working entry edits discarded"
     }
     fun secret(id: Int): String = if (unlocked && !busy) read(id) else ""
     fun commit() = action {
-        when (Core.commit(handle)) { 0 -> status = "Enter an entry name"; else -> { dirty = true; committedDirty = true; editing = false; status = "Entry set. Save to persist changes."; refresh() } }
+        if (Core.commit(handle) == 0) { status = "Enter an entry name"; return@action }
+        pendingNames = pendingNames + fields[0]
+        editing = false
+        dirty = true
+        leaveEntry()
+        status = "Entry set. Save to keep it."
+
     }
     fun showKeys() = action {
         check(!dirty && !editing) { "Save or discard entry changes before managing keys." }
@@ -369,7 +420,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
 
     fun save() = task { started ->
         check(unlocked) { "Unlock first" }
-        check(!editing) { "Set the current entry before saving" }
+
         val name = dbName
         val previous = heldRevision
         val saving = handle
@@ -387,7 +438,7 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
         if (started != generation) return@task
         heldRevision = Core.revision(handle).toULong()
         heldFile = encoded
-        dirty = false; committedDirty = false
+        dirty = editing; pendingNames = emptySet()
         uploadSaved(name, encoded, started)
     }
 
@@ -420,13 +471,16 @@ class VaultViewModel(application: Application) : AndroidViewModel(application) {
     fun report(message: String) { status = message }
     fun lock() {
         activeKey?.cancel()
+        inEntry = false
+        selectedTag = null
+        weakOnly = false
         generation++
         closeHealth()
         generator = GeneratorOptions()
         if (handle != 0L && handle != savingHandle) Core.close(handle)
         sessionSync = null
         heldFile = null; slots = null; confirmEmptyBucket = false; adoptName = null
-        handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; committedDirty = false; currentEntryName = ""
+        handle = 0; unlocked = false; fields = List(9) { "" }; revealed = emptySet(); query = ""; dirty = false; editing = false; pendingNames = emptySet(); currentEntryName = ""
         status = "Locked"
     }
     override fun onCleared() { lock() }

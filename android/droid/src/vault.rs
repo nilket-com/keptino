@@ -38,6 +38,7 @@ pub struct Vault {
 	roaming: Option<Arc<LockedKey>>,
 	database: Database<LockedKey>,
 	working: PasswordEntry<LockedKey>,
+	preview: Option<PasswordEntry<LockedKey>>,
 	source: Source,
 	pub uploads_paused: bool,
 	cost: KdfParams,
@@ -161,6 +162,7 @@ impl Vault {
 			database: unlocked.database,
 			roaming: opened_roaming,
 			working: PasswordEntry::try_new()?,
+			preview: None,
 			source,
 			uploads_paused: uploads_paused || unlocked.caution.is_some(),
 			cost: unlocked.cost,
@@ -208,6 +210,49 @@ impl Vault {
 	/// The names of all password entries, in navigation order.
 	pub fn names(&self) -> Vec<String> {
 		self.database.names()
+	}
+
+	pub fn list_rows(&self) -> Vec<String> {
+		let mut out = Vec::new();
+		self.database.visit_list_rows(|name, row| {
+			out.extend([
+				name.to_owned(),
+				row.username.to_string(),
+				row.tags.to_string(),
+				if row.weak { "1" } else { "0" }.to_owned(),
+			]);
+		});
+		out
+	}
+
+	pub fn find_names(&self, query: &str) -> Vec<String> {
+		self.database.find(query)
+	}
+
+	pub fn generate_preview(&mut self, kind: Kind) -> Result<u32> {
+		self.preview = None;
+		let password =
+			generator::generate(&kind).ok_or(Error::Invalid("invalid generator options"))?;
+		let mut candidate = PasswordEntry::try_new()?;
+		candidate.set_password(&password);
+		self.preview = Some(candidate);
+		Ok(generator::whole_bits(&kind))
+	}
+
+	pub fn preview_password(&self) -> Result<Zeroizing<String>> {
+		self.preview
+			.as_ref()
+			.map(PasswordEntry::get_password)
+			.ok_or(Error::Invalid("no generated password"))
+	}
+
+	pub fn finish_preview(&mut self, apply: bool) -> Result<()> {
+		let candidate = self.preview.take();
+		if apply {
+			let candidate = candidate.ok_or(Error::Invalid("no generated password"))?;
+			self.working.set_password(&candidate.get_password());
+		}
+		Ok(())
 	}
 
 	fn show(&mut self, found: Option<PasswordEntry<LockedKey>>) -> bool {
@@ -650,6 +695,32 @@ mod tests {
 			after.get_field(field::PASSWORD).unwrap().as_slice(),
 			b"untouched"
 		);
+	}
+
+	#[test]
+	fn list_rows_and_generator_preview_are_independent_of_the_working_entry() {
+		let mut vault = open(None, None).unwrap();
+		add(&mut vault, "mail", "short", "work,finance");
+		vault.set_field(field::USERNAME, b"alice").unwrap();
+		vault.commit();
+		let mut vault = open(Some(&vault.save().unwrap()), None).unwrap();
+		assert_eq!(vault.list_rows(), ["mail", "alice", "work,finance", "1"]);
+		assert_eq!(vault.find_names("WORK"), Vec::<String>::new());
+		assert_eq!(vault.find_names("AIL"), ["mail"]);
+		assert!(vault.query("mail"));
+		vault.generate_preview(Kind::DEFAULT).unwrap();
+		vault.finish_preview(false).unwrap();
+		assert_eq!(text(&vault, field::PASSWORD), "short");
+		assert!(vault.preview_password().is_err());
+		vault.generate_preview(Kind::DEFAULT).unwrap();
+		let expected = vault.preview_password().unwrap();
+		vault.finish_preview(true).unwrap();
+		assert_eq!(text(&vault, field::PASSWORD), expected.as_str());
+		assert_eq!(vault.list_rows()[3], "1");
+		vault.commit();
+		assert_eq!(vault.list_rows()[3], "0");
+		assert!(vault.delete_selected("mail").unwrap());
+		assert!(vault.list_rows().is_empty());
 	}
 
 	#[test]

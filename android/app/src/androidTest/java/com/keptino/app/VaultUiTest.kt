@@ -47,29 +47,40 @@ class VaultUiTest {
             storage.write(name, Core.save(handle))
         } finally { Core.close(handle); pepper.fill(0) }
         ActivityScenario.launch(MainActivity::class.java).use {
-            fun click(label: String) = compose.onNodeWithText(label).performScrollTo().performClick()
             fun openReport() {
-                click("Health")
+                compose.onNodeWithContentDescription("Vault actions").performClick()
+                compose.onNodeWithText("Health").performClick()
                 compose.waitUntil(10_000) { shown("Password health report") }
                 compose.onNodeWithText("Find by name or tag").assertDoesNotExist()
                 compose.onNodeWithText("bank, joint: 19 bits").assertExists()
             }
-            compose.onNodeWithText("Database name").performTextReplacement(name)
+            compose.onNodeWithText("Vault name").performTextReplacement(name)
             compose.onNodeWithText("Master password").performTextReplacement(master)
             androidx.test.espresso.Espresso.closeSoftKeyboard()
-            click("Unlock")
+            compose.onNodeWithText("Unlock").performScrollTo().performClick()
             credential.enterPin()
-            compose.waitUntil(30_000) { shown("Health") }
-            compose.onNodeWithText("Name").performScrollTo().performTextReplacement("draft")
+            compose.waitUntil(30_000) { shown("2 weak") }
+            compose.onNodeWithText("2 weak").performClick()
+            compose.onNodeWithText("blank").assertDoesNotExist()
+            compose.onNodeWithText("mail").performClick()
+            compose.onNodeWithText("Username").performTextReplacement("set-user")
+            compose.onNodeWithText("Set entry").performClick()
+            compose.waitUntil(10_000) { shown("1 set, not saved") && shown("bank, joint") }
+            compose.onNodeWithText("bank, joint").performClick()
+            compose.onNodeWithText("Username").performTextReplacement("unset-user")
+            compose.onNodeWithContentDescription("Back to vault").performClick()
+            compose.onNodeWithText("Unset edits were discarded.").assertExists()
+            compose.onNodeWithText("Save").performClick()
+            compose.waitUntil(10_000) { shown("Saved locally") }
+            compose.onNodeWithText("set-user").assertExists()
+            compose.onNodeWithText("unset-user").assertDoesNotExist()
             openReport()
-            compose.onNodeWithText("Back to editor").performClick()
-            compose.onNodeWithText("Name").assertTextContains("draft")
+            compose.onNodeWithText("Back to vault").performClick()
             openReport()
             androidx.test.espresso.Espresso.pressBack()
-            compose.onNodeWithText("Name").assertTextContains("draft")
+            compose.onNodeWithText("Find by name or tag").assertExists()
             openReport()
             compose.onNodeWithText("Lock").performClick()
-            compose.onNodeWithText("Discard and lock").performClick()
             compose.onNodeWithText("Master password").assertExists()
             compose.onNodeWithText("Password health report").assertDoesNotExist()
         }
@@ -81,7 +92,7 @@ class VaultUiTest {
         val pepper = pepper()
         LegacySettings.write(context, Settings(pepper)); pepper.fill(0)
         ActivityScenario.launch(MainActivity::class.java).use {
-            compose.onNodeWithText("Database name").performTextReplacement("cancel-test")
+            compose.onNodeWithText("Vault name").performTextReplacement("cancel-test")
             compose.onNodeWithText("Master password").performTextReplacement("synthetic-test-password")
             androidx.test.espresso.Espresso.closeSoftKeyboard()
             compose.onNodeWithText("Unlock", substring = false).performScrollTo().assertIsDisplayed().performClick()
@@ -104,80 +115,74 @@ class VaultUiTest {
         try { LegacySettings.write(context, Settings(pepper)) } finally { pepper.fill(0) }
         storage.write(name, instrumentation.context.assets.open("linux-debug-unmarked.keptino").use { it.readBytes() })
         ActivityScenario.launch(MainActivity::class.java).use {
-            fun click(text: String) = compose.onNodeWithText(text, substring = false).performScrollTo().performClick()
+            fun click(text: String) = compose.onNodeWithText(text).performClick()
+            fun icon(text: String) = compose.onNodeWithContentDescription(text).performClick()
             fun unlock() {
-                compose.onNodeWithText("Database name").performTextReplacement(name)
+                compose.onNodeWithText("Vault name").performTextReplacement(name)
                 compose.onNodeWithText("Master password").performTextReplacement(args.getString("password")!!)
                 androidx.test.espresso.Espresso.closeSoftKeyboard()
-                click("Unlock")
+                compose.onNodeWithText("Unlock").performScrollTo().performClick()
                 credential.enterPin()
-                compose.waitUntil(120_000) { shown("Find by name or tag") }
+                compose.waitUntil(120_000) { shown("mail") }
             }
             fun find(entry: String) {
                 compose.onNodeWithText("Find by name or tag").performTextReplacement(entry)
-                click("Find")
+                androidx.test.espresso.Espresso.closeSoftKeyboard()
+                compose.waitUntil(10_000) { compose.onAllNodes(hasText(entry, ignoreCase = true) and hasClickAction() and !hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() || shown("No matching entry") }
             }
+            fun openBank() = compose.onNode(hasText("bank") and hasClickAction() and !hasSetTextAction()).performClick()
             unlock()
-            find("bank")
-            click("Generate password")
-            compose.onNodeWithText("Generated 24 characters, 152 bits", substring = true).assertExists()
-            compose.onNodeWithText("Delete entry").assertDoesNotExist()
-            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
-            val passwordField = compose.onNodeWithText("Password", substring = false)
-            val generated = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
-            org.junit.Assert.assertEquals(24, generated.length)
-            click("Revert entry edits")
-            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
-            passwordField.assertTextContains("hunter2 ünïcödé 🔑")
-            click("Generator options")
+            find("BANK")
+            openBank()
+            icon("Generate password")
+            compose.onNodeWithText("152 bits").assertExists()
+            icon("Reveal preview")
+            androidx.test.espresso.Espresso.pressBack()
+            icon("Reveal Password")
+            val password = compose.onNodeWithText("Password")
+            password.assertTextContains("hunter2 ünïcödé 🔑")
+            icon("Generate password")
             click("Words")
-            val wordCount = compose.onNodeWithText("Word count (1–32)")
-            wordCount.performScrollTo().performTextReplacement("33")
-            compose.onNodeWithText("Generate passphrase").assertIsNotEnabled()
-            wordCount.performTextReplacement("6")
-            click("Generate passphrase")
-            compose.onNodeWithText("Generated 6 words, 77 bits", substring = true).assertExists()
-            val phrase = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
-            // Some EFF words contain their own hyphen.
-            assertTrue(phrase.count { it == '-' } >= 5 && phrase.all { it in 'a'..'z' || it == '-' })
+            compose.waitUntil(5_000) { shown("77 bits") }
+            click("Use this password")
+            val generated = password.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
+            assertTrue(generated.count { it == '-' } >= 5 && generated.all { it in 'a'..'z' || it == '-' })
+            click("Revert")
+            icon("Reveal Password")
+            password.assertTextContains("hunter2 ünïcödé 🔑")
+            icon("Generate password")
             click("Characters")
-            click("Uppercase")
-            click("Lowercase")
-            click("Symbols")
-            click("Digits")
-            compose.onNodeWithText("Generate password").assertIsNotEnabled()
-            click("Digits")
-            compose.onNodeWithText("Length (1–256)").performScrollTo().performTextReplacement("6")
-            click("Generate password")
-            compose.onNodeWithText("Generated 6 characters, 19 bits", substring = true).assertExists()
-            val digits = passwordField.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
-            assertTrue(digits.length == 6 && digits.all { it in '0'..'9' })
-            click("Hide options")
+            for (label in listOf("A–Z", "a–z", "#%&", "0–9")) click(label)
+            compose.onNodeWithText("Use this password").assertIsNotEnabled()
+            click("0–9")
+            click("Use this password")
+            val digits = password.fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsProperties.EditableText].text
+            assertTrue(digits.length == 24 && digits.all { it in '0'..'9' })
             click("Set entry")
             click("Save")
             compose.waitUntil(30_000) { shown("Saved locally") }
-            click("Delete entry")
-            compose.onNodeWithText("Delete 'bank'?").assertExists()
-            compose.onNodeWithText("Cancel").performClick()
-            compose.onNodeWithText("Delete entry").assertExists()
-            click("Delete entry")
-            compose.onNodeWithText("Delete", substring = false).performClick()
-            find("bank")
-            compose.onNodeWithText("No matching entry").assertExists()
-            click("Lock")
-            compose.onNodeWithText("Discard and lock").performClick()
+            openBank()
+            icon("Delete entry")
+            click("Cancel")
+            icon("Delete entry")
+            click("Delete")
+            compose.waitUntil(10_000) { shown("No matching entry") }
+            icon("Lock")
+            click("Discard and lock")
             unlock()
-            find("bank")
-            click("Delete entry")
-            compose.onNodeWithText("Delete", substring = false).performClick()
+            openBank()
+            icon("Delete entry")
+            click("Delete")
             click("Save")
             compose.waitUntil(30_000) { shown("Saved locally") }
-            click("Lock")
+            icon("Lock")
             unlock()
             find("bank")
-            compose.onNodeWithText("No matching entry").assertExists()
+            compose.waitUntil(10_000) { shown("No matching entry") }
             find("mail")
-            compose.onNodeWithText("Delete entry").assertExists()
+            compose.onNode(hasText("mail") and hasClickAction() and !hasSetTextAction()).performClick()
+            compose.onNodeWithContentDescription("Delete entry").assertExists()
+
         }
     }
 
@@ -200,7 +205,7 @@ class VaultUiTest {
         }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             fun unlock() {
-                compose.onNodeWithText("Database name").performTextReplacement(name)
+                compose.onNodeWithText("Vault name").performTextReplacement(name)
                 compose.onNodeWithText("Master password").performTextReplacement(args.getString("password")!!)
                 androidx.test.espresso.Espresso.closeSoftKeyboard()
                 compose.onNodeWithText("Unlock", substring = false).performScrollTo().assertIsDisplayed().performClick()
@@ -214,32 +219,38 @@ class VaultUiTest {
             assertFalse("The first unlock must migrate the legacy setup", LegacySettings.stillLegacy(context))
             if (mock != null) compose.onNodeWithText("Opened remote database").assertExists()
             compose.onNodeWithText("Find by name or tag").performTextReplacement(args.getString("entry") ?: "example")
-            compose.onNodeWithText("Find", substring = false).performClick()
-            compose.onNodeWithText("Copy Password").performScrollTo().performClick()
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            val entry = args.getString("entry") ?: "example"
+            val entryRow = hasText(entry) and hasClickAction() and !hasSetTextAction()
+            compose.waitUntil(10_000) { compose.onAllNodes(entryRow).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(entryRow).performClick()
+            compose.onNodeWithContentDescription("Copy Password").performScrollTo().performClick()
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
             scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
             compose.waitForIdle()
-            compose.onNodeWithText("Find by name or tag").assertExists()
+            compose.onNodeWithText("Password").assertExists()
             scenario.onActivity { activity ->
                 val clip = activity.getSystemService(android.content.ClipboardManager::class.java).primaryClip
                 org.junit.Assert.assertEquals("hunter2 ünïcödé 🔑", clip?.getItemAt(0)?.text?.toString())
             }
-            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Reveal Password").performScrollTo().performClick()
             compose.onNodeWithText("Password", substring = false).performTextReplacement("accidental edit")
-            compose.onNodeWithText("Revert entry edits").performScrollTo().performClick()
-            compose.onAllNodesWithText("Reveal")[0].performScrollTo().performClick()
+            compose.onNodeWithText("Revert").performClick()
+            compose.onNodeWithContentDescription("Reveal Password").performScrollTo().performClick()
             compose.onNodeWithText("Password", substring = false).assertTextContains("hunter2 ünïcödé 🔑")
             compose.onNodeWithText("Password", substring = false).performTextReplacement("android-edited-password 🔑")
-            compose.onNodeWithText("Set entry", substring = false).performScrollTo().performClick()
-            compose.onNodeWithText("Save", substring = false).performScrollTo().performClick()
+            compose.onNodeWithText("Set entry", substring = false).performClick()
+            compose.onNodeWithText("Save", substring = false).performClick()
             // Save reuses the session's sync configuration: no prompt may appear.
             compose.waitUntil(30_000) { credential.promptShowing() || shown(savedText) }
             assertFalse("Save must not ask for the device credential again", credential.promptShowing())
             compose.onNodeWithText(savedText, substring = false).assertExists()
             // A fixed output name lets the host reopen the exact UI-saved bytes with Linux.
             storage.write("android-ui-roundtrip", storage.read(name)!!)
-            compose.onNodeWithText("Copy Password").performScrollTo().performClick()
-            compose.onNodeWithText("Lock", substring = false).performScrollTo().performClick()
+            compose.onNode(entryRow).performClick()
+            compose.onNodeWithContentDescription("Copy Password").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Back to vault").performClick()
+            compose.onNodeWithContentDescription("Lock").performClick()
             compose.onNodeWithText("Master password").assertExists()
             scenario.onActivity { activity ->
                 val clipboard = activity.getSystemService(android.content.ClipboardManager::class.java)
@@ -251,8 +262,7 @@ class VaultUiTest {
             lateinit var vm: VaultViewModel
             scenario.onActivity { activity ->
                 vm = androidx.lifecycle.ViewModelProvider(activity)[VaultViewModel::class.java]
-                vm.query = args.getString("entry") ?: "example"
-                vm.navigate(0)
+                vm.openEntry(args.getString("entry") ?: "example")
                 vm.reveal(3)
                 org.junit.Assert.assertEquals("android-edited-password 🔑", vm.fields[2])
                 vm.save()
